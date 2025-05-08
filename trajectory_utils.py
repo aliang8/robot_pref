@@ -28,7 +28,7 @@ DEFAULT_DATA_PATHS = [
 
 def load_tensordict(file_path):
     """Load tensordict data from file."""
-    data = torch.load(file_path)
+    data = torch.load(file_path, weights_only=False)
     print(f"Loaded TensorDict with shape: {data['image'].shape}, device: {data['image'].device}")
     print(f"Fields: {list(data.keys())}")
     return data

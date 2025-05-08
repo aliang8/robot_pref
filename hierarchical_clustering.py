@@ -574,7 +574,7 @@ def main():
     n_clusters = 3  # Number of clusters for visualization
     batch_size = 64  # Batch size for DINOv2 embedding computation
     max_segments_for_dtw = None  # Maximum number of segments to use for DTW computation
-    segments_per_dataset = 2000  # Maximum number of segments to extract from each dataset
+    segments_per_dataset = 500  # Maximum number of segments to extract from each dataset
     
     # Cache file paths
     embeddings_cache = "cached_data/dinov2_embeddings.pt"

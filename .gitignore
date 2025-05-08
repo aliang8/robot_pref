@@ -12,3 +12,4 @@ __pycache__
 *.webm
 *.ogg
 *.mp3
+iql_model/*

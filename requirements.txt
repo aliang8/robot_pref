@@ -1,0 +1,42 @@
+# Core PyTorch and related dependencies
+torch==2.0.1
+torchvision==0.15.2
+tensordict==0.1.0
+
+# Data processing and scientific computing
+numpy==1.24.3
+scipy==1.10.1
+pandas==2.0.3
+scikit-learn==1.3.0
+
+# RL libraries
+# d3rlpy==1.1.0
+gym
+gymnasium
+# For d4rl, install separately with: pip install git+https://github.com/Farama-Foundation/d4rl@master#egg=d4rl
+
+# Image processing
+Pillow==10.0.0
+opencv-python==4.8.0.76
+
+# Visualization
+matplotlib==3.7.2
+seaborn==0.12.2
+tqdm==4.65.0
+
+# Deep learning related
+transformers==4.30.2
+
+# Development tools
+ipython==8.14.0
+jupyter==1.0.0
+ipywidgets==8.0.7
+
+# For creating animations and videos
+ffmpeg-python==0.2.0
+
+# Additional dependencies
+cython==3.0.0
+pyyaml==6.0.1
+cloudpickle==2.2.1
+tensorboard==2.13.0 
