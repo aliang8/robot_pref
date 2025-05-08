@@ -1,0 +1,14 @@
+__pycache__
+*.pyc
+*.pt
+*.pkl
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.mp4
+*.avi
+*.mov
+*.webm
+*.ogg
+*.mp3
