@@ -787,6 +787,8 @@ def main():
                         help="Number of representative segments to show per cluster in the grid video")
     parser.add_argument("--skip_videos", action="store_true",
                         help="Skip generating videos to speed up execution")
+    parser.add_argument("--preprocessed_data", type=str, default=None,
+                        help="Path to preprocessed data file (skips extraction if provided)")
     args = parser.parse_args()
 
     # Create output directory
@@ -794,12 +796,13 @@ def main():
     
     print("\n" + "="*50)
     print(f"Clustering robot trajectories based on end-effector {'relative differences' if args.use_relative_differences else 'positions'}")
-    print(f"Data path: {args.data_path}")
+    print(f"Data path: {args.data_path if args.preprocessed_data is None else args.preprocessed_data}")
     print(f"Segment length: {args.segment_length}")
     print(f"Number of clusters: {args.n_clusters}")
     print(f"Linkage method: {args.linkage_method}")
     print(f"Use shared ranges: {args.use_shared_ranges}")
     print(f"Skip videos: {args.skip_videos}")
+    print(f"Using preprocessed data: {args.preprocessed_data is not None}")
     print("="*50 + "\n")
     
     # Compute global EEF position ranges if needed
@@ -807,23 +810,68 @@ def main():
     if args.use_shared_ranges:
         global_ranges = compute_eef_position_ranges(args.data_path)
     
-    # Load data
-    print(f"Loading data from {args.data_path}")
-    data = load_tensordict(args.data_path)
-
-    # Extract EEF trajectories
-    print("\nExtracting end-effector trajectories...")
-    segments, segment_indices, original_segments = extract_eef_trajectories(
-        data, 
-        segment_length=args.segment_length, 
-        max_segments=args.max_segments,
-        use_relative_differences=args.use_relative_differences
-    )
+    # Load data and extract segments
+    segment_type = "relative" if args.use_relative_differences else "absolute"
     
-    print(f"Extracted {len(segments)} segments.")
+    if args.preprocessed_data is not None:
+        # Load preprocessed data
+        from trajectory_utils import load_preprocessed_segments
+        preproc_data = load_preprocessed_segments(args.preprocessed_data)
+        
+        # Check if the preprocessed data has the expected format and settings
+        if 'use_relative_differences' in preproc_data and preproc_data['use_relative_differences'] != args.use_relative_differences:
+            print(f"WARNING: Preprocessed data was created with use_relative_differences={preproc_data['use_relative_differences']}")
+            print(f"Current setting is use_relative_differences={args.use_relative_differences}")
+            proceed = input("Proceed anyway? (y/n): ").strip().lower()
+            if proceed != 'y':
+                print("Aborting.")
+                return
+        
+        # Extract segments from preprocessed data
+        segments = preproc_data['segments']
+        segment_indices = preproc_data['segment_indices']
+        original_segments = preproc_data['original_segments']
+        
+        # Load the original data if needed for visualization
+        data = None
+        if not args.skip_videos:
+            # Try to use observation data from the preprocessed file first
+            data = {}
+            
+            # Check for essential fields in preprocessed data
+            essential_fields = ['obs', 'state', 'image', 'episode']
+            has_essential_data = False
+            
+            for field in essential_fields:
+                if field in preproc_data:
+                    data[field] = preproc_data[field]
+                    if field in ['obs', 'state']:
+                        has_essential_data = True
+            
+            # If preprocessed data doesn't have the essential fields, try to load from original file
+            if not has_essential_data:
+                print(f"Preprocessed data doesn't contain necessary observation data for visualization.")
+                print(f"Loading original data from {args.data_path}")
+                data = load_tensordict(args.data_path)
+            else:
+                print("Using observation data from preprocessed file for visualization")
+    else:
+        # Load original data and extract segments
+        print(f"Loading data from {args.data_path}")
+        data = load_tensordict(args.data_path)
+
+        # Extract EEF trajectories
+        print("\nExtracting end-effector trajectories...")
+        segments, segment_indices, original_segments = extract_eef_trajectories(
+            data, 
+            segment_length=args.segment_length, 
+            max_segments=args.max_segments,
+            use_relative_differences=args.use_relative_differences
+        )
+        
+        print(f"Extracted {len(segments)} segments.")
     
     # Save segment visualization if not skipping videos
-    segment_type = "relative" if args.use_relative_differences else "absolute"
     if not args.skip_videos:
         output_file = os.path.join(args.output_dir, f"eef_{segment_type}_segments_3d.mp4")
         create_cluster_animation(original_segments, np.zeros(len(segments), dtype=int), 
@@ -900,21 +948,23 @@ def main():
             global_ranges=global_ranges
         )
         
-        # Create grid video with observation images for each cluster
-        print("\nCreating observation grid video...")
-        create_observation_grid_video(
-            data,
-            indices_for_clustering,
-            clusters,
-            n_per_cluster=args.segments_per_cluster,
-            output_file=f"{args.output_dir}/cluster_observations_video.mp4"
-        )
+        # Create grid video with observation images for each cluster if data is available
+        if data is not None and 'image' in data:
+            print("\nCreating observation grid video...")
+            create_observation_grid_video(
+                data,
+                indices_for_clustering,
+                clusters,
+                n_per_cluster=args.segments_per_cluster,
+                output_file=f"{args.output_dir}/cluster_observations_video.mp4"
+            )
+        else:
+            print("\nSkipping observation grid video (image data not available)")
     else:
         print("\nSkipping all video generation (--skip_videos is set)")
     
     # Save results
     print("\nSaving clustering results...")
-    segment_type = "relative" if args.use_relative_differences else "absolute"
     results = {
         'args': vars(args),
         'segment_indices': segment_indices,

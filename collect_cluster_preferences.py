@@ -25,7 +25,8 @@ else:
 from trajectory_utils import (
     DEFAULT_DATA_PATHS,
     RANDOM_SEED,
-    load_tensordict
+    load_tensordict,
+    load_preprocessed_segments
 )
 
 # Import clustering functions
@@ -111,7 +112,7 @@ def display_segment(data, start_idx, end_idx, title=None, cluster_id=None):
     
     return anim
 
-def present_preference_query(data, segment1, segment2, query_id=None):
+def present_preference_query(data, segment1, segment2, query_id=None, skip_videos=False):
     """Present a preference query to the user.
     
     Args:
@@ -119,6 +120,7 @@ def present_preference_query(data, segment1, segment2, query_id=None):
         segment1: (idx1, start_idx1, end_idx1) for first segment
         segment2: (idx2, start_idx2, end_idx2) for second segment
         query_id: Optional ID for the query
+        skip_videos: If True, skip generating videos to save time
         
     Returns:
         int: 1 if segment1 is preferred, 2 if segment2 is preferred, 0 if equal
@@ -135,32 +137,42 @@ def present_preference_query(data, segment1, segment2, query_id=None):
     print(f"\n{query_title}")
     print("=" * 40)
     
-    # Display the two segments side by side
+    # Get end-effector trajectories
     eef_positions = data["obs"][:, :3]
     
-    print("Segment 1:")
-    anim1 = create_eef_trajectory_animation(eef_positions, start_idx1, end_idx1, title="Segment 1")
+    # Display the two segments textually
+    print(f"Segment 1: {start_idx1}-{end_idx1} (Length: {end_idx1-start_idx1+1})")
+    print(f"Segment 2: {start_idx2}-{end_idx2} (Length: {end_idx2-start_idx2+1})")
     
-    print("Segment 2:")
-    anim2 = create_eef_trajectory_animation(eef_positions, start_idx2, end_idx2, title="Segment 2")
-    
-    if is_notebook:
-        display(HTML(anim1.to_jshtml()))
-        display(HTML(anim2.to_jshtml()))
-    
-    # If running in interactive mode, create side-by-side video
-    temp_video = "temp_comparison.mp4"
-    create_comparison_video(
-        eef_positions,
-        (start_idx1, end_idx1),
-        [(start_idx2, end_idx2)], 
-        [0],  # Placeholder for distance
-        dataset_indicators=None,
-        output_file=temp_video,
-        data=data if "image" in data else None
-    )
-    
-    print("\nCreated comparison video:", temp_video)
+    # Display animations and video only if not skipping
+    if not skip_videos:
+        print("\nCreating trajectory animations...")
+        
+        print("Segment 1:")
+        anim1 = create_eef_trajectory_animation(eef_positions, start_idx1, end_idx1, title="Segment 1")
+        
+        print("Segment 2:")
+        anim2 = create_eef_trajectory_animation(eef_positions, start_idx2, end_idx2, title="Segment 2")
+        
+        if is_notebook:
+            display(HTML(anim1.to_jshtml()))
+            display(HTML(anim2.to_jshtml()))
+        
+        # If running in interactive mode, create side-by-side video
+        temp_video = "temp_comparison.mp4"
+        create_comparison_video(
+            eef_positions,
+            (start_idx1, end_idx1),
+            [(start_idx2, end_idx2)], 
+            [0],  # Placeholder for distance
+            dataset_indicators=None,
+            output_file=temp_video,
+            data=data if "image" in data else None
+        )
+        
+        print("\nCreated comparison video:", temp_video)
+    else:
+        print("\n[Videos skipped to save time]")
     
     # Get user preference
     while True:
@@ -181,13 +193,14 @@ def present_preference_query(data, segment1, segment2, query_id=None):
     
     return preference
 
-def collect_cluster_preferences(data, cluster_representatives, num_comparisons=None):
+def collect_cluster_preferences(data, cluster_representatives, num_comparisons=None, skip_videos=False):
     """Collect user preferences between cluster representatives.
     
     Args:
         data: TensorDict with observations
         cluster_representatives: Dict mapping cluster_id to representative segments
         num_comparisons: Number of comparisons to conduct (default: all pairs)
+        skip_videos: Skip generating videos for preference collection
         
     Returns:
         list: User preferences in format [(cluster_id1, cluster_id2, preference), ...]
@@ -219,7 +232,7 @@ def collect_cluster_preferences(data, cluster_representatives, num_comparisons=N
         segment2 = random.choice(cluster_representatives[cluster_id2])
         
         # Present preference query
-        preference = present_preference_query(data, segment1, segment2, query_id=i+1)
+        preference = present_preference_query(data, segment1, segment2, query_id=i+1, skip_videos=skip_videos)
         
         # Record preference
         preferences.append((cluster_id1, cluster_id2, preference))
@@ -394,6 +407,8 @@ def main():
     parser = argparse.ArgumentParser(description="Collect and augment preferences based on cluster representatives")
     parser.add_argument("--data_path", type=str, default=DEFAULT_DATA_PATHS[0],
                         help="Path to the PT file containing trajectory data")
+    parser.add_argument("--preprocessed_data", type=str, default=None,
+                        help="Path to preprocessed data file (used instead of data_path if provided)")
     parser.add_argument("--clustering_results", type=str, required=True,
                         help="Path to the pickle file with clustering results")
     parser.add_argument("--output_dir", type=str, default="preference_data",
@@ -402,14 +417,49 @@ def main():
                         help="Number of representative segments per cluster")
     parser.add_argument("--max_comparisons", type=int, default=None,
                         help="Maximum number of pairwise comparisons to perform")
+    parser.add_argument("--skip_videos", action="store_true",
+                        help="Skip generating videos for preference collection to speed things up")
     args = parser.parse_args()
     
     # Create output directory
     os.makedirs(args.output_dir, exist_ok=True)
     
     # Load data
-    print(f"Loading data from {args.data_path}")
-    data = load_tensordict(args.data_path)
+    if args.preprocessed_data:
+        print(f"Loading preprocessed data from {args.preprocessed_data}")
+        preproc_data = load_preprocessed_segments(args.preprocessed_data)
+        
+        # Create data structure expected by preference collection functions
+        data = {}
+        
+        # Check which fields are available in preprocessed data
+        essential_fields = ['obs', 'state', 'image', 'episode', 'reward']
+        missing_fields = []
+        
+        for field in essential_fields:
+            if field in preproc_data:
+                data[field] = preproc_data[field]
+            else:
+                missing_fields.append(field)
+        
+        # Handle missing fields
+        if 'obs' not in data and 'state' not in data:
+            print(f"WARNING: Preprocessed data does not contain observation data (obs or state).")
+            print(f"Loading original data from {args.data_path} for observations.")
+            orig_data = load_tensordict(args.data_path)
+            
+            # Copy missing essential fields
+            for field in missing_fields:
+                if field in orig_data:
+                    data[field] = orig_data[field]
+                    print(f"Loaded field '{field}' from original data")
+        
+        # Add source path for reference
+        data['_source_path'] = args.preprocessed_data
+    else:
+        print(f"Loading data from {args.data_path}")
+        data = load_tensordict(args.data_path)
+        data['_source_path'] = args.data_path
     
     # Load clustering results
     clustering_results = load_clustering_results(args.clustering_results)
@@ -425,7 +475,9 @@ def main():
     
     # Collect user preferences between clusters
     user_preferences = collect_cluster_preferences(
-        data, cluster_representatives, num_comparisons=args.max_comparisons
+        data, cluster_representatives, 
+        num_comparisons=args.max_comparisons,
+        skip_videos=args.skip_videos
     )
     
     # Save raw preferences

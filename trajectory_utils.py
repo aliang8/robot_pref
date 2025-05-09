@@ -417,4 +417,65 @@ def sample_segments(segments, segment_indices, n_samples=500):
     sampled_segments = [segments[i] for i in sample_idxs]
     sampled_indices = [segment_indices[i] for i in sample_idxs]
     
-    return sampled_segments, sampled_indices 
+    return sampled_segments, sampled_indices
+
+def save_preprocessed_segments(data, output_file, compress=True):
+    """Save preprocessed segments data to a file.
+    
+    Args:
+        data: Dictionary containing segments, indices, clusters, etc.
+        output_file: Path to save the data
+        compress: Whether to use compression (default: True)
+    """
+    print(f"Saving preprocessed data to {output_file}")
+    os.makedirs(os.path.dirname(os.path.abspath(output_file)), exist_ok=True)
+    
+    # Make sure all tensors are on CPU
+    for key, value in data.items():
+        if isinstance(value, torch.Tensor):
+            data[key] = value.cpu()
+        elif isinstance(value, list) and len(value) > 0 and isinstance(value[0], torch.Tensor):
+            data[key] = [v.cpu() for v in value]
+    
+    # Add timestamp
+    import datetime
+    data['timestamp'] = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    
+    # Save data
+    if compress:
+        torch.save(data, output_file, _use_new_zipfile_serialization=True)
+    else:
+        torch.save(data, output_file, _use_new_zipfile_serialization=False)
+    
+    print(f"Saved preprocessed data with keys: {list(data.keys())}")
+    
+    # Print some statistics about the data
+    if 'segments' in data:
+        print(f"Number of segments: {len(data['segments'])}")
+    if 'clusters' in data and 'segment_indices' in data:
+        print(f"Number of clusters: {len(np.unique(data['clusters']))}")
+        print(f"Number of segment indices: {len(data['segment_indices'])}")
+
+def load_preprocessed_segments(file_path):
+    """Load preprocessed segments data from file.
+    
+    Args:
+        file_path: Path to the saved data file
+        
+    Returns:
+        Dictionary containing the preprocessed data
+    """
+    print(f"Loading preprocessed data from {file_path}")
+    data = torch.load(file_path)
+    
+    # Print some statistics about the loaded data
+    print(f"Loaded data with keys: {list(data.keys())}")
+    if 'segments' in data:
+        print(f"Number of segments: {len(data['segments'])}")
+    if 'clusters' in data and 'segment_indices' in data:
+        print(f"Number of clusters: {len(np.unique(data['clusters']))}")
+        print(f"Number of segment indices: {len(data['segment_indices'])}")
+    if 'timestamp' in data:
+        print(f"Data timestamp: {data['timestamp']}")
+    
+    return data 
