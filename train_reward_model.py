@@ -190,6 +190,21 @@ class PreferenceDataset(Dataset):
         self.segment_pairs = segment_pairs
         self.segment_indices = segment_indices
         self.preferences = preferences
+        
+        # Determine the data length for bounds checking
+        if isinstance(self.data, dict):
+            # For dictionary data, use the observation tensor length
+            if "obs" in self.data:
+                self.data_length = len(self.data["obs"])
+            elif "state" in self.data:
+                self.data_length = len(self.data["state"])
+            else:
+                raise ValueError("Data dictionary must contain 'obs' or 'state' key")
+        else:
+            # For tensor data, use its length
+            self.data_length = len(self.data)
+        
+        print(f"Dataset initialized with data length: {self.data_length}")
     
     def __len__(self):
         return len(self.segment_pairs)
@@ -199,19 +214,30 @@ class PreferenceDataset(Dataset):
         start1, end1 = self.segment_indices[seg_idx1]
         start2, end2 = self.segment_indices[seg_idx2]
         
-        # Get data for first segment - with safety checks
-        if start1 < 0 or end1 >= len(self.data) or start1 > end1:
-            raise IndexError(f"Invalid segment indices for segment 1: {start1}:{end1}")
+        # Check bounds against the correct data length
+        if start1 < 0 or end1 >= self.data_length or start1 > end1:
+            raise IndexError(f"Invalid segment indices for segment 1: {start1}:{end1}, data length: {self.data_length}")
         
-        # Get data for second segment - with safety checks
-        if start2 < 0 or end2 >= len(self.data) or start2 > end2:
-            raise IndexError(f"Invalid segment indices for segment 2: {start2}:{end2}")
+        if start2 < 0 or end2 >= self.data_length or start2 > end2:
+            raise IndexError(f"Invalid segment indices for segment 2: {start2}:{end2}, data length: {self.data_length}")
         
-        # Get data for segments
-        obs1 = self.data[start1:end1+1].clone().detach()
-        actions1 = self.data[start1:end1].clone().detach()
-        obs2 = self.data[start2:end2+1].clone().detach()
-        actions2 = self.data[start2:end2].clone().detach()
+        # Get data for segments (handle dictionary data correctly)
+        if isinstance(self.data, dict):
+            # Extract from dictionary (TensorDict)
+            obs_key = "obs" if "obs" in self.data else "state"
+            action_key = "action"
+            
+            # Safely extract data
+            obs1 = self.data[obs_key][start1:end1+1].clone().detach()
+            actions1 = self.data[action_key][start1:end1].clone().detach()
+            obs2 = self.data[obs_key][start2:end2+1].clone().detach()
+            actions2 = self.data[action_key][start2:end2].clone().detach()
+        else:
+            # Extract directly from tensor
+            obs1 = self.data[start1:end1+1].clone().detach()
+            actions1 = self.data[start1:end1].clone().detach()
+            obs2 = self.data[start2:end2+1].clone().detach()
+            actions2 = self.data[start2:end2].clone().detach()
         
         # Make observations and actions have the same length (important for concatenation)
         # Method 1: Remove the last observation
@@ -291,7 +317,7 @@ def log_wandb_metrics(train_loss, val_loss, epoch, lr=None):
     
     wandb.log(metrics)
 
-def train_reward_model_with_wandb(model, train_loader, val_loader, device, num_epochs=50, lr=1e-4):
+def train_reward_model(model, train_loader, val_loader, device, num_epochs=50, lr=1e-4):
     """Train the reward model using Bradley-Terry loss with wandb logging."""
     optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=1e-4)  # Add weight decay for regularization
     scheduler = StepLR(optimizer, step_size=10, gamma=0.5)
@@ -464,7 +490,7 @@ def train_reward_model_with_wandb(model, train_loader, val_loader, device, num_e
             wandb.log({"model_simplified": True})
             
         # Train the simpler model with more regularization and lower learning rate
-        return train_reward_model_with_wandb(simpler_model, train_loader, val_loader, device, num_epochs, lr=lr/10)
+        return train_reward_model(simpler_model, train_loader, val_loader, device, num_epochs, lr=lr/10)
     
     # Load best model if we found one
     if best_model_state is not None:
@@ -562,20 +588,24 @@ def main(cfg: DictConfig):
     
     print(f"Creating segments of length {cfg.data.segment_length}...")
     num_segments = cfg.data.num_segments if cfg.data.num_segments > 0 else None
-    segments, segment_indices = create_segments(data, segment_length=cfg.data.segment_length, max_segments=num_segments)
+    
+    # Ensure data is on CPU before creating segments to avoid device mismatch issues
+    data_cpu = {k: v.cpu() if isinstance(v, torch.Tensor) else v for k, v in data.items()}
+    
+    segments, segment_indices = create_segments(data_cpu, segment_length=cfg.data.segment_length, max_segments=num_segments)
     
     # Generate preference pairs
     print(f"Generating {cfg.data.num_pairs} preference pairs...")
     segment_pairs, preferences = sample_segment_pairs(
         segments, 
         segment_indices, 
-        data["reward"], 
+        data_cpu["reward"], 
         n_pairs=cfg.data.num_pairs
     )
     
     # Create dataset
     preference_dataset = PreferenceDataset(
-        data, 
+        data_cpu, 
         segment_pairs,
         segment_indices,
         preferences
@@ -647,8 +677,9 @@ def main(cfg: DictConfig):
     
     # Log model info to wandb
     if cfg.wandb.use_wandb:
+        # Use a different key name to avoid conflicts with existing 'model' key
         wandb.config.update({
-            "model": {
+            "model_info": {
                 "hidden_dims": cfg.model.hidden_dims,
                 "total_parameters": sum(p.numel() for p in model.parameters())
             }
@@ -666,7 +697,7 @@ def main(cfg: DictConfig):
     
     # Train the model
     print("\nTraining reward model...")
-    model, train_losses, val_losses = train_reward_model_with_wandb(
+    model, train_losses, val_losses = train_reward_model(
         model, train_loader, val_loader, device, 
         num_epochs=cfg.training.num_epochs, lr=cfg.model.lr
     )

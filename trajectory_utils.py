@@ -124,7 +124,7 @@ def create_segments(data, segment_length=20, max_segments=None):
     # Ensure episode_ids is on CPU for indexing operations
     episode_ids_cpu = episode_ids.cpu()
     
-    # Create masks for NaN values
+    # Create mask for NaN values
     obs_valid = ~torch.isnan(observations).any(dim=1)
     
     unique_episodes = torch.unique(episode_ids_cpu).tolist()
@@ -144,6 +144,9 @@ def create_segments(data, segment_length=20, max_segments=None):
                 
             # Get valid indices
             valid_indices = ep_indices[ep_valid]
+            
+            # Ensure valid_indices is on CPU for consistent processing
+            valid_indices = valid_indices.cpu()
             
             # Check for consecutive indices
             if len(valid_indices) < segment_length:

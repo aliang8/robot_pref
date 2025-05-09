@@ -81,7 +81,10 @@ def extract_eef_trajectories(data, segment_length=20, max_segments=None, use_rel
     unique_episodes = torch.unique(episode_ids_cpu).tolist()
     print(f"Found {len(unique_episodes)} unique episodes")
     
-    with tqdm(total=len(unique_episodes), desc="Processing episodes") as pbar:
+    # Identify valid segments in each episode
+    valid_segments_per_episode = {}
+    
+    with tqdm(total=len(unique_episodes), desc="Finding valid segments per episode") as pbar:
         for episode_id in unique_episodes:
             # Get indices for this episode
             ep_indices = torch.where(episode_ids_cpu == episode_id)[0]
@@ -91,6 +94,7 @@ def extract_eef_trajectories(data, segment_length=20, max_segments=None, use_rel
             
             # Skip if no valid positions
             if not ep_valid.any():
+                pbar.update(1)
                 continue
                 
             # Get valid indices
@@ -98,72 +102,147 @@ def extract_eef_trajectories(data, segment_length=20, max_segments=None, use_rel
             
             # Check if we have enough consecutive indices
             if len(valid_indices) < effective_length:
+                pbar.update(1)
                 continue
                 
             # Find consecutive blocks using diff
             diffs = torch.diff(valid_indices)
-            breaks = torch.where(diffs > 1)[0]
+            breaks = torch.where(diffs > 1)[0].tolist() + [len(valid_indices) - 1]
             
-            # Process each block of consecutive indices
+            # Track start and end indices of valid blocks
             start_idx = 0
+            valid_blocks = []
+            
             for b in breaks:
                 # Check if block is long enough
                 if b - start_idx + 1 >= effective_length:
-                    # Create segments from this block
-                    for i in range(start_idx, b - effective_length + 2):
-                        start = valid_indices[i].item()
-                        end = valid_indices[i + effective_length - 1].item()
-                        
-                        # Get EEF trajectory for this segment
-                        segment_eef = eef_positions[start:end+1]
-                        
-                        # Check again for NaN values (redundancy check)
-                        if not torch.isnan(segment_eef).any():
-                            # For relative differences, compute frame-to-frame differences
-                            if use_relative_differences:
-                                diff_segment = segment_eef[1:] - segment_eef[:-1]
-                                segments.append(diff_segment)
-                                original_segments.append(segment_eef)
-                            else:
-                                segments.append(segment_eef)
-                                original_segments.append(segment_eef)
-                            
-                            segment_indices.append((start, end))
-                
-                start_idx = b.item() + 1
+                    valid_blocks.append((start_idx, b))
+                start_idx = b + 1
             
-            # Process final block
-            if len(valid_indices) - start_idx >= effective_length:
-                for i in range(start_idx, len(valid_indices) - effective_length + 1):
-                    start = valid_indices[i].item()
-                    end = valid_indices[i + effective_length - 1].item()
+            # Store valid segments for this episode
+            if valid_blocks:
+                valid_segments_per_episode[episode_id] = []
+                
+                for start_block, end_block in valid_blocks:
+                    # Calculate how many valid segments can be created from this block
+                    block_length = end_block - start_block + 1
+                    possible_segments = block_length - effective_length + 1
                     
-                    # Get EEF trajectory for this segment
-                    segment_eef = eef_positions[start:end+1]
-                    
-                    # Check again for NaN values
-                    if not torch.isnan(segment_eef).any():
-                        # For relative differences, compute frame-to-frame differences
-                        if use_relative_differences:
-                            diff_segment = segment_eef[1:] - segment_eef[:-1]
-                            segments.append(diff_segment)
-                            original_segments.append(segment_eef)
-                        else:
-                            segments.append(segment_eef)
-                            original_segments.append(segment_eef)
-                        
-                        segment_indices.append((start, end))
+                    if possible_segments > 0:
+                        # Store block information for later sampling
+                        valid_segments_per_episode[episode_id].append({
+                            'start_block': start_block,
+                            'end_block': end_block,
+                            'possible_segments': possible_segments,
+                            'valid_indices': valid_indices
+                        })
             
             pbar.update(1)
     
-    # Subsample if needed
-    if max_segments is not None and max_segments < len(segments) and max_segments > 0:
-        print(f"Sampling {max_segments} segments from {len(segments)} total segments...")
-        # Sample segments
-        indices = random.sample(range(len(segments)), max_segments)
-        segments = [segments[i] for i in indices]
-        original_segments = [original_segments[i] for i in indices]
-        segment_indices = [segment_indices[i] for i in indices]
+    # Sample segments from valid episodes
+    print("Sampling segments from valid episodes")
+    episodes_with_valid_segments = list(valid_segments_per_episode.keys())
+    
+    # Keep track of episodes we've sampled one segment from already
+    sampled_one_per_episode = set()
+    
+    # Keep looping until we have enough segments or can't find any more
+    loop_count = 0
+    max_loops = 10  # Limit number of loops to avoid infinite loop
+    
+    # Continue until we reach max_segments or run out of loops
+    while (max_segments is None or len(segments) < max_segments) and loop_count < max_loops:
+        loop_count += 1
+        random.shuffle(episodes_with_valid_segments)
+        
+        # Prioritize episodes we haven't sampled from yet
+        if loop_count == 1:
+            # First pass: prioritize getting one segment per episode
+            priority_episodes = [ep for ep in episodes_with_valid_segments if ep not in sampled_one_per_episode]
+            sampling_episodes = priority_episodes + [ep for ep in episodes_with_valid_segments if ep in sampled_one_per_episode]
+            desc = "Sampling one segment per episode"
+        else:
+            # Later passes: just use all episodes
+            sampling_episodes = episodes_with_valid_segments
+            desc = f"Additional sampling (loop {loop_count})"
+        
+        new_segments_in_loop = 0
+        for episode_id in tqdm(sampling_episodes, desc=desc):
+            # Stop if we've reached the max segments
+            if max_segments is not None and len(segments) >= max_segments:
+                break
+                
+            blocks = valid_segments_per_episode[episode_id]
+            if not blocks:
+                continue
+            
+            # Choose a random block
+            block = random.choice(blocks)
+            valid_indices = block['valid_indices']
+            start_block = block['start_block']
+            end_block = block['end_block']
+            possible_segments = block['possible_segments']
+            
+            if possible_segments <= 0:
+                continue
+            
+            # Choose a random segment within this block
+            segment_offset = random.randrange(possible_segments)
+            start_idx = start_block + segment_offset
+            end_idx = start_idx + effective_length - 1
+            
+            # Get start and end indices in the original data
+            start = valid_indices[start_idx].item()
+            end = valid_indices[end_idx].item()
+            
+            # Check for overlap with previously selected segments (after first loop)
+            if loop_count > 1 or episode_id in sampled_one_per_episode:
+                overlap = False
+                for prev_start, prev_end in segment_indices:
+                    # Check for any overlap
+                    if (start <= prev_end and end >= prev_start):
+                        overlap = True
+                        break
+                
+                if overlap:
+                    continue
+            
+            # Track that we've sampled from this episode
+            sampled_one_per_episode.add(episode_id)
+            
+            # Get EEF trajectory for this segment
+            segment_eef = eef_positions[start:end+1]
+            
+            # Double check for NaN values
+            if torch.isnan(segment_eef).any():
+                continue
+            
+            # For relative differences, compute frame-to-frame differences
+            if use_relative_differences:
+                diff_segment = segment_eef[1:] - segment_eef[:-1]
+                segments.append(diff_segment)
+                original_segments.append(segment_eef)
+            else:
+                segments.append(segment_eef)
+                original_segments.append(segment_eef)
+            
+            segment_indices.append((start, end))
+            new_segments_in_loop += 1
+        
+        print(f"Added {new_segments_in_loop} segments in loop {loop_count}")
+        
+        # If first loop, report how many episodes we got one segment from
+        if loop_count == 1:
+            print(f"Sampled one segment from {len(sampled_one_per_episode)} episodes out of {len(episodes_with_valid_segments)} valid episodes")
+        
+        # If we didn't add any new segments in this loop, we're stuck
+        if new_segments_in_loop == 0:
+            print("Could not find any more non-overlapping segments, stopping.")
+            break
+        
+        # If we're not using max_segments, only do one pass to get one segment per episode
+        if max_segments is None:
+            break
     
     print(f"Created {len(segments)} {'difference' if use_relative_differences else 'absolute position'} segments across {len(unique_episodes)} episodes")
     if segments:
