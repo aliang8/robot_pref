@@ -101,40 +101,163 @@ def compute_dinov2_embeddings(images, batch_size=32, cache_file=None):
     
     return all_embeddings
 
-def create_segments(embeddings, episode_ids, H):
-    """Create H-step segments from embeddings, ensuring segments don't cross episode boundaries."""
-    print(f"Creating segments with window size H={H} from embeddings of shape {embeddings.shape}")
+def create_segments(data, segment_length=20, max_segments=None):
+    """Create segments from data for reward model training.
+    
+    Args:
+        data: TensorDict with observations/actions/rewards/episodes
+        segment_length: Length of segments (H)
+        max_segments: Maximum number of segments to return (None for all)
+        
+    Returns:
+        segments: List of segment embeddings
+        segment_indices: List of (start_idx, end_idx) for each segment
+    """
+    # Extract necessary data
+    episode_ids = data["episode"]
+    observations = data["obs"] if "obs" in data else data["state"]
+    
+    print(f"Creating segments with window size H={segment_length} from observations of shape {observations.shape}")
     segments = []
     segment_indices = []  # Store start and end indices of each segment
     
     # Ensure episode_ids is on CPU for indexing operations
     episode_ids_cpu = episode_ids.cpu()
     
+    # Create masks for NaN values
+    obs_valid = ~torch.isnan(observations).any(dim=1)
+    
     unique_episodes = torch.unique(episode_ids_cpu).tolist()
     print(f"Found {len(unique_episodes)} unique episodes")
     
-    for episode_id in tqdm(unique_episodes, desc="Processing episodes"):
-        # Get indices for this episode (ensure indices are on CPU)
-        ep_indices = torch.where(episode_ids_cpu == episode_id)[0]
-        ep_embeddings = embeddings[ep_indices]
-        
-        num_segments_in_episode = max(0, len(ep_embeddings) - H + 1)
-        
-        # Create segments for this episode
-        for i in range(0, len(ep_embeddings) - H + 1):
-            segment = ep_embeddings[i:i+H]
-            segments.append(segment)
-            # Store indices as CPU tensors or integers
-            segment_indices.append((int(ep_indices[i].item()), int(ep_indices[i+H-1].item())))
-        
-        if num_segments_in_episode == 0:
-            print(f"Episode {episode_id} has {len(ep_embeddings)} frames (less than H={H}), skipping")
+    with tqdm(total=len(unique_episodes), desc="Processing episodes") as pbar:
+        for episode_id in unique_episodes:
+            # Get indices for this episode
+            ep_indices = torch.where(episode_ids_cpu == episode_id)[0]
+            
+            # Apply valid mask to this episode
+            ep_valid = obs_valid[ep_indices]
+            
+            # Skip if no valid observations
+            if not ep_valid.any():
+                continue
+                
+            # Get valid indices
+            valid_indices = ep_indices[ep_valid]
+            
+            # Check for consecutive indices
+            if len(valid_indices) < segment_length:
+                continue
+                
+            # Find consecutive blocks using diff
+            diffs = torch.diff(valid_indices)
+            breaks = torch.where(diffs > 1)[0]
+            
+            # Process each block of consecutive indices
+            start_idx = 0
+            for b in breaks:
+                # Check if block is long enough
+                if b - start_idx + 1 >= segment_length:
+                    # Create segments from this block
+                    for i in range(start_idx, b - segment_length + 2):
+                        start = valid_indices[i].item()
+                        end = valid_indices[i + segment_length - 1].item()
+                        
+                        # Get observations for this segment
+                        segment_obs = observations[start:end+1]
+                        
+                        # Check again for NaN values (redundancy check)
+                        if not torch.isnan(segment_obs).any():
+                            segments.append(segment_obs)
+                            segment_indices.append((start, end))
+                
+                start_idx = b.item() + 1
+            
+            # Process final block
+            if len(valid_indices) - start_idx >= segment_length:
+                for i in range(start_idx, len(valid_indices) - segment_length + 1):
+                    start = valid_indices[i].item()
+                    end = valid_indices[i + segment_length - 1].item()
+                    
+                    # Get observations for this segment
+                    segment_obs = observations[start:end+1]
+                    
+                    # Check again for NaN values
+                    if not torch.isnan(segment_obs).any():
+                        segments.append(segment_obs)
+                        segment_indices.append((start, end))
+            
+            pbar.update(1)
+    
+    # Subsample if needed
+    if max_segments is not None and max_segments < len(segments) and max_segments > 0:
+        # Sample segments
+        indices = random.sample(range(len(segments)), max_segments)
+        segments = [segments[i] for i in indices]
+        segment_indices = [segment_indices[i] for i in indices]
     
     print(f"Created {len(segments)} segments across {len(unique_episodes)} episodes")
     if segments:
         print(f"Each segment has shape: {segments[0].shape}")
     
     return segments, segment_indices
+
+def sample_segment_pairs(segments, segment_indices, rewards, n_pairs=5000):
+    """Generate synthetic preference pairs based on cumulative rewards.
+    
+    Args:
+        segments: List of segment data
+        segment_indices: List of (start_idx, end_idx) tuples for each segment
+        rewards: Tensor of reward values for all transitions
+        n_pairs: Number of preference pairs to generate
+        
+    Returns:
+        pairs: List of (idx1, idx2) tuples indicating segment pairs
+        preferences: List of preference labels (1 if first segment preferred, 2 if second)
+    """
+    n_segments = len(segments)
+    print(f"Generating {n_pairs} preference pairs from {n_segments} segments")
+    
+    # Ensure rewards is on CPU for indexing
+    rewards_cpu = rewards.cpu() if isinstance(rewards, torch.Tensor) else rewards
+    
+    # Sample random pairs of segment indices
+    pairs = []
+    preference_labels = []
+    
+    # Keep generating pairs until we have enough or max attempts reached
+    max_attempts = n_pairs * 5  # Allow more attempts to handle cases with equal rewards
+    
+    with tqdm(total=n_pairs, desc="Generating preference pairs") as pbar:
+        while len(pairs) < n_pairs and len(pairs) < max_attempts:
+            # Sample two different segments
+            idx1, idx2 = random.sample(range(n_segments), 2)
+            
+            # Get segment indices
+            start1, end1 = segment_indices[idx1]
+            start2, end2 = segment_indices[idx2]
+            
+            # Calculate cumulative reward for each segment
+            reward1 = rewards_cpu[start1:end1+1].sum().item()
+            reward2 = rewards_cpu[start2:end2+1].sum().item()
+            
+            # Skip if rewards are too close (avoid ambiguous preferences)
+            if abs(reward1 - reward2) < 1e-6:
+                continue
+            
+            # Add pair to the list
+            pairs.append((idx1, idx2))
+            
+            # Assign preference label (1 if segment1 is preferred, 2 if segment2 is preferred)
+            if reward1 > reward2:
+                preference_labels.append(1)
+            else:
+                preference_labels.append(2)
+                
+            pbar.update(1)
+    
+    print(f"Generated {len(pairs)} preference pairs")
+    return pairs, preference_labels
 
 def compute_dtw_distance(query_segment, reference_segment):
     """Compute DTW distance between two segments."""

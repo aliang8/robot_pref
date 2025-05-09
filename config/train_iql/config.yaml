@@ -1,0 +1,48 @@
+# Hydra config for IQL policy training
+
+# Data parameters
+data:
+  data_path: "/scr/shared/clam/datasets/metaworld/assembly-v2/buffer_assembly-v2.pt"
+  reward_model_path: "reward_model/state_action_reward_model.pt"
+  max_segments: 1000
+  reward_batch_size: 32
+
+# Model architecture
+model:
+  hidden_dims: [256, 256]
+  actor_learning_rate: 3e-4
+  critic_learning_rate: 3e-4
+  batch_size: 256
+  gamma: 0.99
+  tau: 0.005
+  n_critics: 2
+  expectile: 0.7
+  weight_temp: 3.0
+  encoder_dims: [256, 256, 256]
+
+# Training parameters
+training:
+  iql_epochs: 100
+  eval_interval: 10
+  eval_episodes: 10
+
+# Evaluation settings
+evaluation:
+  skip_env_creation: false
+  record_video: false
+  parallel_eval: true
+  eval_workers: null  # null will use min(n_episodes, cpu_count)
+
+# Output parameters
+output:
+  output_dir: "iql_model"
+  video_dir: null
+
+# Wandb configuration
+wandb:
+  use_wandb: true
+  project: robot_pref
+  entity: clvr
+  name: null  # Will be auto-generated if null
+  tags: ["iql", "preference_learning"]
+  notes: "IQL policy training with learned reward function" 

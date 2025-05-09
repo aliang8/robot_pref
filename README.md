@@ -1,113 +1,92 @@
-# Robot Trajectory Preference Learning
+# Robot Preference Learning
 
-This repository contains scripts for training reward models from robot trajectory preferences and using them to train reinforcement learning policies. The codebase leverages DINOv2 visual embeddings for processing trajectory segments.
+This repository contains code for training robot manipulation policies using preference learning techniques. The codebase is designed to work with [MetaWorld](https://meta-world.github.io/) environments and [D3RLPy](https://github.com/takuseno/d3rlpy) for offline reinforcement learning.
 
 ## Setup
 
-### Requirements
-
-Install the necessary packages:
+Install the required packages:
 
 ```bash
-pip install torch numpy matplotlib tqdm pillow metaworld d3rlpy tensordict
+pip install wandb hydra-core d3rlpy
 ```
 
-You also need to install the custom DTW implementation used for trajectory comparison.
+## Key Components
 
-## Workflow
+1. **Reward Model Training**: Learns a reward function from preferences between trajectory segments using Bradley-Terry preference learning
+2. **IQL Policy Training**: Trains a policy using the learned reward model with Implicit Q-Learning (IQL)
 
-The overall workflow consists of these main steps:
+## Configuration with Hydra
 
-1. **Process and analyze trajectory data** from MetaWorld environments
-2. **Train a reward model** using Bradley-Terry preference learning
-3. **Train an IQL policy** using the learned reward model
-4. **Evaluate the policy** on MetaWorld environments
+This project uses [Hydra](https://hydra.cc/) for configuration management, allowing for flexible experiment configuration without modifying code.
 
-## Scripts
+### Configuration Files
 
-### Shared Utilities
+- `config/train_reward_model/config.yaml`: Configuration for reward model training
+- `config/train_iql/config.yaml`: Configuration for IQL policy training
 
-- `trajectory_utils.py`: Common utilities for trajectory processing, including:
-  - Loading trajectory data from TensorDict files
-  - Computing DINOv2 embeddings for images
-  - Creating fixed-length segments
-  - Computing DTW distances between segments
+### Overriding Config Values
 
-### Data Processing and Analysis
-
-- `hierarchical_clustering.py`: Process trajectory data and cluster segments
-- `segment_matching.py`: Find segments similar to a query segment using DTW
-- `analyze_preferences.py`: Visualize and analyze preference data
-
-### Reward Learning and Policy Training
-
-- `train_reward_model.py`: Train a reward model using Bradley-Terry loss on segment preferences
-- `train_iql_policy.py`: Train an IQL policy using the learned reward model
-- `evaluate_policy.py`: Evaluate the trained policy on MetaWorld environments
-
-## Usage Examples
-
-### Process and analyze trajectory data
+You can override config values from the command line:
 
 ```bash
-# Analyze trajectories with hierarchical clustering
-python hierarchical_clustering.py
+# Train reward model with custom parameters
+python train_reward_model.py data.data_path="/path/to/dataset.pt" model.hidden_dims=[512,512]
 
-# Find similar segments across datasets
-python segment_matching.py --samples_per_dataset 500 --top_k 5
+# Train IQL policy with custom parameters
+python train_iql_policy.py data.data_path="/path/to/dataset.pt" training.iql_epochs=200
 ```
 
-### Train reward model
+## Weights & Biases Integration
+
+This codebase integrates with [Weights & Biases](https://wandb.ai/) for experiment tracking.
+
+### Enabling/Disabling Wandb
+
+In the configuration files, set `wandb.use_wandb` to `true` or `false` to enable/disable wandb.
+
+```yaml
+# Enable wandb logging
+wandb:
+  use_wandb: true
+  project: "robot_preference_learning"
+  entity: null  # Your wandb username or team
+```
+
+### Tracked Metrics
+
+The following metrics are tracked in wandb:
+
+#### Reward Model Training:
+- Training and validation loss
+- Test accuracy
+- Model architecture details
+- Training curve visualization
+
+#### IQL Policy Training:
+- Evaluation returns and success rates
+- Training metrics from D3RLPy
+- Model artifacts
+
+## Example Usage
+
+### Train a Reward Model
 
 ```bash
-# Train reward model on a MetaWorld task
-python train_reward_model.py \
-  --data_path "/scr/shared/clam/datasets/metaworld/assembly-v2/buffer_assembly-v2.pt" \
-  --num_segments 5000 \
-  --num_pairs 10000 \
-  --num_epochs 50
+python train_reward_model.py data.data_path="/scr/shared/clam/datasets/metaworld/assembly-v2/buffer_assembly-v2.pt" model.hidden_dims=[256,256] training.num_epochs=50
 ```
 
-### Train and evaluate IQL policy
+### Train an IQL Policy
 
 ```bash
-# Train IQL policy using the trained reward model
-python train_iql_policy.py \
-  --data_path "/scr/shared/clam/datasets/metaworld/assembly-v2/buffer_assembly-v2.pt" \
-  --reward_model_path "reward_model/reward_model.pt" \
-  --iql_epochs 100
-
-# Evaluate trained policy
-python evaluate_policy.py \
-  --model_path "iql_model/iql_assembly-v2.pt" \
-  --task_name "assembly-v2" \
-  --num_episodes 20 \
-  --record
+python train_iql_policy.py data.data_path="/scr/shared/clam/datasets/metaworld/assembly-v2/buffer_assembly-v2.pt" data.reward_model_path="reward_model/state_action_reward_model.pt"
 ```
 
-## Data Paths
+## Video Recording
 
-The default data paths for MetaWorld tasks are:
+The IQL training script supports recording evaluation videos. To enable:
 
-```
-/scr/shared/clam/datasets/metaworld/assembly-v2/buffer_assembly-v2.pt
-/scr/shared/clam/datasets/metaworld/bin-picking-v2/buffer_bin-picking-v2.pt
-/scr/shared/clam/datasets/metaworld/peg-insert-side-v2/buffer_peg-insert-side-v2.pt
+```bash
+python train_iql_policy.py evaluation.record_video=true
 ```
 
-## Workflow Details
-
-1. **Segment Generation**:
-   - Load trajectory data from `.pt` files
-   - Compute DINOv2 embeddings for visual features
-   - Create fixed-length segments respecting episode boundaries
-
-2. **Reward Model Training**:
-   - Generate synthetic preference pairs based on original rewards
-   - Train an MLP reward model using Bradley-Terry loss
-   - Evaluate model on held-out preference pairs
-
-3. **IQL Policy Training**:
-   - Create an MDP dataset with learned rewards
-   - Train an IQL policy using d3rlpy
-   - Evaluate policy on the original MetaWorld environment 
+Videos will be saved in the output directory. 

@@ -5,21 +5,29 @@ import random
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 import pickle
-import argparse
-from torch.utils.data import Dataset, DataLoader
-import torch.nn as nn
-import torch.optim as optim
-from torch.optim.lr_scheduler import StepLR
-from pathlib import Path
 import time
+from pathlib import Path
+from torch import optim
+from torch.optim.lr_scheduler import StepLR
+from torch.utils.data import Dataset, DataLoader, random_split
+import torch.nn as nn
+import hydra
+from omegaconf import DictConfig, OmegaConf
+import wandb
 
 # Import utility functions
 from trajectory_utils import (
     DEFAULT_DATA_PATHS,
     RANDOM_SEED,
     load_tensordict,
-    sample_segments
+    create_segments,
+    sample_segment_pairs
 )
+
+# Set seed for reproducibility
+torch.manual_seed(RANDOM_SEED)
+np.random.seed(RANDOM_SEED)
+random.seed(RANDOM_SEED)
 
 # Set random seed for reproducibility
 RANDOM_SEED = 42
@@ -176,13 +184,12 @@ class SegmentRewardModel(nn.Module):
 
 class PreferenceDataset(Dataset):
     """Dataset for segment preference pairs."""
-    def __init__(self, observations, actions, segment_pairs, segment_indices, preference_labels):
+    def __init__(self, data, segment_pairs, segment_indices, preferences):
         # Ensure all data is on CPU for multi-process loading
-        self.observations = observations.cpu() if isinstance(observations, torch.Tensor) else observations
-        self.actions = actions.cpu() if isinstance(actions, torch.Tensor) else actions
+        self.data = data.cpu() if isinstance(data, torch.Tensor) else data
         self.segment_pairs = segment_pairs
         self.segment_indices = segment_indices
-        self.preference_labels = preference_labels
+        self.preferences = preferences
     
     def __len__(self):
         return len(self.segment_pairs)
@@ -193,18 +200,18 @@ class PreferenceDataset(Dataset):
         start2, end2 = self.segment_indices[seg_idx2]
         
         # Get data for first segment - with safety checks
-        if start1 < 0 or end1 >= len(self.observations) or start1 > end1:
+        if start1 < 0 or end1 >= len(self.data) or start1 > end1:
             raise IndexError(f"Invalid segment indices for segment 1: {start1}:{end1}")
         
         # Get data for second segment - with safety checks
-        if start2 < 0 or end2 >= len(self.observations) or start2 > end2:
+        if start2 < 0 or end2 >= len(self.data) or start2 > end2:
             raise IndexError(f"Invalid segment indices for segment 2: {start2}:{end2}")
         
         # Get data for segments
-        obs1 = self.observations[start1:end1+1].clone().detach()
-        actions1 = self.actions[start1:end1].clone().detach()
-        obs2 = self.observations[start2:end2+1].clone().detach()
-        actions2 = self.actions[start2:end2].clone().detach()
+        obs1 = self.data[start1:end1+1].clone().detach()
+        actions1 = self.data[start1:end1].clone().detach()
+        obs2 = self.data[start2:end2+1].clone().detach()
+        actions2 = self.data[start2:end2].clone().detach()
         
         # Make observations and actions have the same length (important for concatenation)
         # Method 1: Remove the last observation
@@ -224,7 +231,7 @@ class PreferenceDataset(Dataset):
             actions2 = actions2[:min_len]
         
         # Convert preference to tensor
-        pref = torch.tensor(self.preference_labels[idx], dtype=torch.long)
+        pref = torch.tensor(self.preferences[idx], dtype=torch.long)
         
         # Handle NaN values
         if torch.isnan(obs1).any() or torch.isnan(actions1).any() or torch.isnan(obs2).any() or torch.isnan(actions2).any():
@@ -268,163 +275,24 @@ def bradley_terry_loss(rewards1, rewards2, preferences):
     
     return loss
 
-def create_state_action_segments(data, H, max_segments=None):
-    """Create H-step segments of observations and actions from data."""
-    # Extract episode IDs
-    episode_ids = data["episode"].cpu()
-    observations = data["obs"] if "obs" in data else data["state"]
-    actions = data["action"]
-    rewards = data["reward"]
+def log_wandb_metrics(train_loss, val_loss, epoch, lr=None):
+    """Log training metrics to wandb."""
+    if not wandb.run:
+        return
     
-    # Move data to CPU for indexing operations
-    observations_cpu = observations.cpu()
-    actions_cpu = actions.cpu()
-    rewards_cpu = rewards.cpu()
+    metrics = {
+        "epoch": epoch,
+        "train_loss": train_loss,
+        "val_loss": val_loss,
+    }
     
-    # Create clean masks to handle NaN values at episode beginnings - use vectorized operations
-    print("Creating masks for NaN values...")
-    obs_mask = ~torch.isnan(observations_cpu).any(dim=1)
-    action_mask = ~torch.isnan(actions_cpu).any(dim=1)
-    reward_mask = ~torch.isnan(rewards_cpu)
+    if lr is not None:
+        metrics["learning_rate"] = lr
     
-    # Combined mask for valid transitions
-    valid_mask = obs_mask & action_mask & reward_mask
-    
-    # Count NaNs to report
-    total_transitions = len(observations)
-    valid_transitions = valid_mask.sum().item()
-    print(f"Found {total_transitions - valid_transitions} NaN transitions out of {total_transitions} total transitions")
-    
-    segments = []
-    segment_indices = []  # Store start and end indices of each segment
-    
-    # Process all episodes at once for faster operation
-    print("Finding valid episodes and segments...")
-    unique_episodes = torch.unique(episode_ids).tolist()
-    print(f"Found {len(unique_episodes)} unique episodes")
-    
-    # Pre-allocate a list for all potential segments to avoid repeated allocations
-    potential_segments = []
-    
-    for episode_id in tqdm(unique_episodes, desc="Processing episodes"):
-        # Get indices for this episode
-        ep_indices = torch.where(episode_ids == episode_id)[0]
-        
-        # For each episode, get valid indices (no NaNs)
-        ep_valid = valid_mask[ep_indices]
-        
-        # Skip if no valid indices
-        if not ep_valid.any():
-            continue
-        
-        # Get consecutive valid indices for this episode
-        valid_ep_indices = ep_indices[ep_valid].numpy()  # Convert to numpy for faster operations
-        
-        # Skip episodes with too few valid transitions
-        if len(valid_ep_indices) < H:
-            continue
-        
-        # Find consecutive segments using numpy operations (faster than PyTorch for this task)
-        # Calculate differences between consecutive indices
-        diffs = np.diff(valid_ep_indices)
-        # Find where the difference is not 1 (indicating a break in consecutive indices)
-        break_points = np.where(diffs > 1)[0]
-        
-        # Process each consecutive group
-        if len(break_points) == 0:  # Single consecutive group
-            # We can directly create segments from this group
-            for i in range(len(valid_ep_indices) - H + 1):
-                start_idx = valid_ep_indices[i]
-                end_idx = valid_ep_indices[i + H - 1]
-                potential_segments.append((start_idx, end_idx))
-        else:
-            # Process multiple groups
-            start_idx = 0
-            for bp in break_points:
-                # Check if this group is long enough
-                if bp - start_idx + 1 >= H:
-                    # Create segments from this group
-                    for i in range(start_idx, bp - H + 2):
-                        s_idx = valid_ep_indices[i]
-                        e_idx = valid_ep_indices[i + H - 1]
-                        potential_segments.append((s_idx, e_idx))
-                start_idx = bp + 1
-            
-            # Process the last group
-            if len(valid_ep_indices) - start_idx >= H:
-                for i in range(start_idx, len(valid_ep_indices) - H + 1):
-                    s_idx = valid_ep_indices[i]
-                    e_idx = valid_ep_indices[i + H - 1]
-                    potential_segments.append((s_idx, e_idx))
-    
-    # Randomly sample segments if max_segments is specified
-    if max_segments is not None and max_segments < len(potential_segments):
-        print(f"Sampling {max_segments} segments from {len(potential_segments)} potential segments...")
-        sampled_indices = random.sample(range(len(potential_segments)), max_segments)
-        segment_indices = [potential_segments[i] for i in sampled_indices]
-    else:
-        segment_indices = potential_segments
-    
-    print(f"Created {len(segment_indices)} segments across {len(unique_episodes)} episodes after filtering out NaN transitions")
-    
-    return segment_indices
+    wandb.log(metrics)
 
-def generate_synthetic_preferences(segment_indices, rewards, n_pairs=10000):
-    """Generate synthetic preference pairs based on cumulative rewards."""
-    n_segments = len(segment_indices)
-    print(f"Generating preferences from {n_segments} segments")
-    
-    # Sample random pairs of segment indices
-    pairs = []
-    preference_labels = []
-    
-    # Keep generating pairs until we have enough or max attempts reached
-    max_attempts = n_pairs * 5  # Allow more attempts to handle cases with equal rewards
-    num_attempts = 0
-    
-    with tqdm(total=n_pairs, desc="Generating preference pairs") as pbar:
-        while len(pairs) < n_pairs and num_attempts < max_attempts:
-            num_attempts += 1
-            
-            # Sample two different segments
-            idx1, idx2 = random.sample(range(n_segments), 2)
-            
-            # Get segment indices
-            start1, end1 = segment_indices[idx1]
-            start2, end2 = segment_indices[idx2]
-            
-            # Skip if rewards contain NaN values
-            if torch.isnan(rewards[start1:end1+1]).any() or torch.isnan(rewards[start2:end2+1]).any():
-                continue
-            
-            # Calculate cumulative reward for each segment
-            reward1 = rewards[start1:end1+1].sum().item()
-            reward2 = rewards[start2:end2+1].sum().item()
-            
-            # If rewards are equal, skip this pair
-            if abs(reward1 - reward2) < 1e-6:
-                continue
-            
-            # Add pair to the list
-            pairs.append((idx1, idx2))
-            
-            # Assign preference label (1 if segment1 is preferred, 2 if segment2 is preferred)
-            if reward1 > reward2:
-                preference_labels.append(1)
-            else:
-                preference_labels.append(2)
-                
-            pbar.update(1)
-            
-            # If we've reached the target number of pairs, we're done
-            if len(pairs) >= n_pairs:
-                break
-    
-    print(f"Generated {len(pairs)} preference pairs after {num_attempts} attempts")
-    return pairs, preference_labels
-
-def train_reward_model(model, train_loader, val_loader, device, num_epochs=50, lr=1e-4):
-    """Train the reward model using Bradley-Terry loss."""
+def train_reward_model_with_wandb(model, train_loader, val_loader, device, num_epochs=50, lr=1e-4):
+    """Train the reward model using Bradley-Terry loss with wandb logging."""
     optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=1e-4)  # Add weight decay for regularization
     scheduler = StepLR(optimizer, step_size=10, gamma=0.5)
     
@@ -503,22 +371,21 @@ def train_reward_model(model, train_loader, val_loader, device, num_epochs=50, l
             nan_grad = False
             for param in model.parameters():
                 if param.grad is not None and torch.isnan(param.grad).any():
-                    nan_batches += 1
-                    optimizer.zero_grad(set_to_none=True)
                     nan_grad = True
                     break
             
-            if not nan_grad:
-                optimizer.step()
-                train_loss += loss.item()
-                
-                # Update progress bar with current loss
-                progress_bar.set_postfix({"loss": f"{loss.item():.4f}"})
-        
-        # Log if there were any NaN issues
+            if nan_grad:
+                nan_batches += 1
+                continue
+            
+            optimizer.step()
+            
+            train_loss += loss.item()
+            progress_bar.set_postfix({"loss": f"{loss.item():.4f}"})
+            
         if nan_batches > 0:
-            print(f"WARNING: {nan_batches}/{len(train_loader)} batches skipped due to NaN issues")
-        
+            print(f"WARNING: {nan_batches}/{len(train_loader)} training batches skipped due to NaN issues")
+            
         avg_train_loss = train_loss / (len(train_loader) - nan_batches) if len(train_loader) > nan_batches else float('nan')
         train_losses.append(avg_train_loss)
         
@@ -527,7 +394,6 @@ def train_reward_model(model, train_loader, val_loader, device, num_epochs=50, l
         val_loss = 0
         val_nan_batches = 0
         
-        # Use a progress bar for validation too
         val_progress = tqdm(val_loader, desc=f"Epoch {epoch+1}/{num_epochs} (Val)", 
                            leave=False, dynamic_ncols=True)
         
@@ -579,6 +445,9 @@ def train_reward_model(model, train_loader, val_loader, device, num_epochs=50, l
             best_val_loss = avg_val_loss
             best_model_state = model.state_dict().copy()
         
+        # Log to wandb
+        log_wandb_metrics(avg_train_loss, avg_val_loss, epoch, scheduler.get_last_lr()[0])
+        
         print(f"Epoch {epoch+1}/{num_epochs}: train_loss={avg_train_loss:.4f}, val_loss={avg_val_loss:.4f}, lr={scheduler.get_last_lr()[0]:.6f}")
     
     # If we had NaN issues the whole time, try with a simpler model
@@ -589,8 +458,13 @@ def train_reward_model(model, train_loader, val_loader, device, num_epochs=50, l
                                           model.reward_model.model[0].in_features // 2, 
                                           hidden_dims=[64, 32])
         simpler_model = simpler_model.to(device)
+        
+        # Log to wandb
+        if wandb.run:
+            wandb.log({"model_simplified": True})
+            
         # Train the simpler model with more regularization and lower learning rate
-        return train_reward_model(simpler_model, train_loader, val_loader, device, num_epochs, lr=lr/10)
+        return train_reward_model_with_wandb(simpler_model, train_loader, val_loader, device, num_epochs, lr=lr/10)
     
     # Load best model if we found one
     if best_model_state is not None:
@@ -612,168 +486,134 @@ def train_reward_model(model, train_loader, val_loader, device, num_epochs=50, l
         plt.title('Reward Model Training')
         plt.legend()
         plt.savefig('reward_model_training.png', dpi=300, bbox_inches='tight')
+        
+        # Log the plot to wandb
+        if wandb.run:
+            wandb.log({"training_curve": wandb.Image('reward_model_training.png')})
+            
         plt.close()
     
     return model, train_losses, val_losses
 
-def evaluate_reward_model(model, test_loader, device):
-    """Evaluate the reward model on test data."""
-    model.eval()
-    test_loss = 0
-    correct = 0
-    total = 0
-    avg_logpdf = 0
+@hydra.main(config_path="config/train_reward_model", config_name="config", version_base=None)
+def main(cfg: DictConfig):
+    """Train a state-action reward model using BT loss with Hydra config."""
+    print("\n" + "=" * 50)
+    print("Training reward model with Bradley-Terry preference learning")
+    print("=" * 50)
     
-    with torch.no_grad():
-        for obs1, actions1, obs2, actions2, pref in tqdm(test_loader, desc="Evaluating reward model"):
-            obs1, actions1 = obs1.to(device), actions1.to(device)
-            obs2, actions2 = obs2.to(device), actions2.to(device)
-            pref = pref.to(device)
-            
-            reward1 = model(obs1, actions1)
-            reward2 = model(obs2, actions2)
-            
-            loss = bradley_terry_loss(reward1, reward2, pref)
-            test_loss += loss.item()
-            
-            # Count correct predictions (when model assigns higher reward to preferred segment)
-            pred = 1 * (reward1 > reward2) + 2 * (reward1 <= reward2)
-            correct += (pred == pref).sum().item()
-            total += pref.size(0)
-            
-            # Compute logpdf for preferred segments
-            preferred_obs = torch.where((pref == 1).unsqueeze(1).unsqueeze(2).expand_as(obs1), obs1, obs2)
-            preferred_actions = torch.where((pref == 1).unsqueeze(1).unsqueeze(2).expand_as(actions1), actions1, actions2)
-            preferred_rewards = torch.where((pref == 1), reward1, reward2)
-            
-            # Calculate logpdf
-            logpdfs = model.logpdf(preferred_obs, preferred_actions, preferred_rewards)
-            avg_logpdf += logpdfs.mean().item()
+    # Print config for visibility
+    print("\nConfiguration:")
+    print(OmegaConf.to_yaml(cfg))
     
-    test_loss /= len(test_loader)
-    accuracy = 100. * correct / total
-    avg_logpdf /= len(test_loader)
-    
-    print(f"Test loss: {test_loss:.4f}, Accuracy: {accuracy:.2f}%, Avg LogPDF: {avg_logpdf:.4f}")
-    return test_loss, accuracy, avg_logpdf
-
-def main():
-    parser = argparse.ArgumentParser(description="Train a state-action reward model using BT loss")
-    parser.add_argument("--data_path", type=str, default=DEFAULT_DATA_PATHS[0],
-                        help="Path to the PT file containing trajectory data")
-    parser.add_argument("--segment_length", type=int, default=20,
-                        help="Length of segments (H)")
-    parser.add_argument("--num_segments", type=int, default=5000,
-                        help="Number of segments to sample (0 for all)")
-    parser.add_argument("--num_pairs", type=int, default=5000,
-                        help="Number of preference pairs to generate")
-    parser.add_argument("--batch_size", type=int, default=256,
-                        help="Batch size for training")
-    parser.add_argument("--num_epochs", type=int, default=50,
-                        help="Number of epochs for training")
-    parser.add_argument("--lr", type=float, default=1e-4,
-                        help="Learning rate")
-    parser.add_argument("--hidden_dims", nargs="+", type=int, default=[256, 256],
-                        help="Hidden dimensions of the reward model")
-    parser.add_argument("--output_dir", type=str, default="reward_model",
-                        help="Directory to save model and results")
-    parser.add_argument("--num_workers", type=int, default=4,
-                        help="Number of workers for data loading")
-    parser.add_argument("--pin_memory", action="store_true",
-                        help="Use pin_memory for faster data transfer to GPU")
-    parser.add_argument("--gpu", type=int, default=0,
-                        help="GPU device ID to use (e.g., 0 for cuda:0)")
-    parser.add_argument("--use_cpu", action="store_true",
-                        help="Force using CPU even if CUDA is available")
-    args = parser.parse_args()
+    # Initialize wandb
+    if cfg.wandb.use_wandb:
+        # Generate experiment name based on data path
+        dataset_name = Path(cfg.data.data_path).stem
+        
+        # Set up a run name if not specified
+        run_name = cfg.wandb.name
+        if run_name is None:
+            run_name = f"reward_{dataset_name}_{time.strftime('%Y%m%d_%H%M%S')}"
+        
+        # Initialize wandb
+        wandb.init(
+            project=cfg.wandb.project,
+            entity=cfg.wandb.entity,
+            name=run_name,
+            config=OmegaConf.to_container(cfg, resolve=True),
+            tags=cfg.wandb.tags,
+            notes=cfg.wandb.notes
+        )
+        print(f"Wandb initialized: {wandb.run.name}")
     
     # Create output directory
-    os.makedirs(args.output_dir, exist_ok=True)
+    os.makedirs(cfg.output.output_dir, exist_ok=True)
     
-    # Setup device with explicit GPU selection
-    if args.use_cpu:
+    # Setup CUDA device
+    if cfg.hardware.use_cpu:
         device = torch.device("cpu")
-        print("Forcing CPU usage as specified")
     else:
-        if torch.cuda.is_available():
-            device = torch.device(f"cuda:{args.gpu}")
-            print(f"Using GPU {args.gpu}: {torch.cuda.get_device_name(args.gpu)}")
-        else:
-            device = torch.device("cpu")
-            print("CUDA not available, using CPU")
+        cuda_device = f"cuda:{cfg.hardware.gpu}" if torch.cuda.is_available() else "cpu"
+        device = torch.device(cuda_device)
     
+    print(f"Using device: {device}")
+    
+    # Determine effective GPU and CPU settings
+    effective_num_workers = cfg.training.num_workers
+    effective_pin_memory = cfg.training.pin_memory
+    
+    # Adjust for CPU-only mode
+    if device.type == "cpu":
+        print("Running in CPU mode")
+        effective_pin_memory = False
+        
     # Load data
-    print(f"Loading data from {args.data_path}")
-    data = load_tensordict(args.data_path)
+    print(f"Loading data from {cfg.data.data_path}")
+    data = load_tensordict(cfg.data.data_path)
     
-    # Extract observations and actions
-    print("Extracting observations and actions...")
+    # Get observation and action dimensions
     observations = data["obs"] if "obs" in data else data["state"]
     actions = data["action"]
-    rewards = data["reward"]
+    state_dim = observations.shape[1]
+    action_dim = actions.shape[1]
     
-    # Report NaN statistics before filtering
-    obs_nans = torch.isnan(observations).any(dim=1).sum().item()
-    action_nans = torch.isnan(actions).any(dim=1).sum().item()
-    reward_nans = torch.isnan(rewards).sum().item()
+    print(f"Observation dimension: {state_dim}, Action dimension: {action_dim}")
     
-    print(f"Before filtering:")
-    print(f"  - Observations with NaNs: {obs_nans}/{observations.shape[0]} ({obs_nans/observations.shape[0]*100:.2f}%)")
-    print(f"  - Actions with NaNs: {action_nans}/{actions.shape[0]} ({action_nans/actions.shape[0]*100:.2f}%)")
-    print(f"  - Rewards with NaNs: {reward_nans}/{rewards.shape[0]} ({reward_nans/rewards.shape[0]*100:.2f}%)")
-    print(f"Observations shape: {observations.shape}, Actions shape: {actions.shape}")
-    
-    # Create segments (now with NaN filtering)
-    print("\nCreating observation-action segments with NaN filtering...")
-    segment_indices = create_state_action_segments(data, args.segment_length, max_segments=args.num_segments)
+    print(f"Creating segments of length {cfg.data.segment_length}...")
+    num_segments = cfg.data.num_segments if cfg.data.num_segments > 0 else None
+    segments, segment_indices = create_segments(data, segment_length=cfg.data.segment_length, max_segments=num_segments)
     
     # Generate preference pairs
-    print("\nGenerating preference pairs (skipping segments with NaNs)...")
-    segment_pairs, preference_labels = generate_synthetic_preferences(
-        segment_indices, rewards, n_pairs=args.num_pairs
+    print(f"Generating {cfg.data.num_pairs} preference pairs...")
+    segment_pairs, preferences = sample_segment_pairs(
+        segments, 
+        segment_indices, 
+        data["reward"], 
+        n_pairs=cfg.data.num_pairs
     )
     
-    # Split into train, validation, and test sets (80%, 10%, 10%)
-    n_pairs = len(segment_pairs)
-    indices = list(range(n_pairs))
-    random.shuffle(indices)
+    # Create dataset
+    preference_dataset = PreferenceDataset(
+        data, 
+        segment_pairs,
+        segment_indices,
+        preferences
+    )
     
-    n_train = int(0.8 * n_pairs)
-    n_val = int(0.1 * n_pairs)
+    # Split into train, validation, and test sets
+    total_size = len(preference_dataset)
+    train_size = int(0.8 * total_size)
+    val_size = int(0.1 * total_size)
+    test_size = total_size - train_size - val_size
     
-    train_indices = indices[:n_train]
-    val_indices = indices[n_train:n_train+n_val]
-    test_indices = indices[n_train+n_val:]
+    # Create random splits
+    train_dataset, val_dataset, test_dataset = random_split(
+        preference_dataset, 
+        [train_size, val_size, test_size],
+        generator=torch.Generator().manual_seed(RANDOM_SEED)
+    )
     
-    # Create datasets and dataloaders
-    print("Creating datasets and dataloaders...")
-    train_pairs = [segment_pairs[i] for i in train_indices]
-    train_prefs = [preference_labels[i] for i in train_indices]
-    val_pairs = [segment_pairs[i] for i in val_indices]
-    val_prefs = [preference_labels[i] for i in val_indices]
-    test_pairs = [segment_pairs[i] for i in test_indices]
-    test_prefs = [preference_labels[i] for i in test_indices]
+    # Log dataset information to wandb
+    if cfg.wandb.use_wandb:
+        wandb.config.update({
+            "dataset": {
+                "name": Path(cfg.data.data_path).stem,
+                "total_pairs": total_size,
+                "train_size": train_size,
+                "val_size": val_size,
+                "test_size": test_size,
+                "observation_dim": state_dim,
+                "action_dim": action_dim
+            }
+        })
     
-    train_dataset = PreferenceDataset(observations, actions, train_pairs, segment_indices, train_prefs)
-    val_dataset = PreferenceDataset(observations, actions, val_pairs, segment_indices, val_prefs)
-    test_dataset = PreferenceDataset(observations, actions, test_pairs, segment_indices, test_prefs)
+    print(f"Split data: Train={train_size}, Validation={val_size}, Test={test_size}")
     
-    # Use DataLoader with multiple workers for faster data loading
-    # Note: for CUDA tensors, num_workers must be 0 when tensors are on GPU
-    # Safety check for GPU tensors
-    on_gpu = (observations.device.type == 'cuda' or actions.device.type == 'cuda')
-    
-    # Choose appropriate num_workers
-    effective_num_workers = 0 if on_gpu else args.num_workers
-    if on_gpu and args.num_workers > 0:
-        print(f"Warning: Data is on GPU but num_workers={args.num_workers}. Setting num_workers=0 for safety.")
-    
-    # If on GPU without workers, pin_memory doesn't help
-    effective_pin_memory = args.pin_memory and not on_gpu
-    
+    # Create data loaders
     train_loader = DataLoader(
         train_dataset, 
-        batch_size=args.batch_size, 
+        batch_size=cfg.training.batch_size, 
         shuffle=True,
         num_workers=effective_num_workers,
         pin_memory=effective_pin_memory,
@@ -784,7 +624,7 @@ def main():
     
     val_loader = DataLoader(
         val_dataset, 
-        batch_size=args.batch_size,
+        batch_size=cfg.training.batch_size,
         num_workers=effective_num_workers,
         pin_memory=effective_pin_memory,
         persistent_workers=effective_num_workers > 0,
@@ -793,22 +633,30 @@ def main():
     
     test_loader = DataLoader(
         test_dataset, 
-        batch_size=args.batch_size,
+        batch_size=cfg.training.batch_size,
         num_workers=effective_num_workers,
         pin_memory=effective_pin_memory,
         persistent_workers=effective_num_workers > 0,
         prefetch_factor=2 if effective_num_workers > 0 else None,
     )
     
-    print(f"Train pairs: {len(train_pairs)}, Validation pairs: {len(val_pairs)}, Test pairs: {len(test_pairs)}")
+    print(f"Train pairs: {len(train_dataset)}, Validation pairs: {len(val_dataset)}, Test pairs: {len(test_dataset)}")
     
     # Initialize reward model
-    state_dim = observations.shape[1]
-    action_dim = actions.shape[1]
+    model = SegmentRewardModel(state_dim, action_dim, hidden_dims=cfg.model.hidden_dims)
     
-    print(f"Observation dimension: {state_dim}, Action dimension: {action_dim}")
-    
-    model = SegmentRewardModel(state_dim, action_dim, hidden_dims=args.hidden_dims)
+    # Log model info to wandb
+    if cfg.wandb.use_wandb:
+        wandb.config.update({
+            "model": {
+                "hidden_dims": cfg.model.hidden_dims,
+                "total_parameters": sum(p.numel() for p in model.parameters())
+            }
+        })
+        
+        # Log model graph if possible
+        if hasattr(wandb, 'watch'):
+            wandb.watch(model, log="all")
     
     print(f"Reward model: {model}")
     print(f"Total parameters: {sum(p.numel() for p in model.parameters())}")
@@ -818,42 +666,106 @@ def main():
     
     # Train the model
     print("\nTraining reward model...")
-    model, train_losses, val_losses = train_reward_model(
+    model, train_losses, val_losses = train_reward_model_with_wandb(
         model, train_loader, val_loader, device, 
-        num_epochs=args.num_epochs, lr=args.lr
+        num_epochs=cfg.training.num_epochs, lr=cfg.model.lr
     )
     
     # Calculate and print training time
     training_time = time.time() - start_time
     hours, remainder = divmod(training_time, 3600)
     minutes, seconds = divmod(remainder, 60)
-    print(f"Training completed in {int(hours)}h {int(minutes)}m {seconds:.2f}s")
     
-    # Evaluate the model
-    print("\nEvaluating reward model...")
-    test_loss, accuracy, avg_logpdf = evaluate_reward_model(model, test_loader, device)
+    print(f"\nTraining completed in {int(hours)}h {int(minutes)}m {int(seconds)}s")
     
-    # Save the model and results
-    torch.save(model.state_dict(), f"{args.output_dir}/state_action_reward_model.pt")
+    # Evaluate on test set
+    print("\nEvaluating on test set...")
+    model.eval()
+    test_loss = 0
+    test_acc = 0
+    test_total = 0
     
-    results = {
-        'args': vars(args),
-        'train_losses': train_losses,
-        'val_losses': val_losses,
-        'test_loss': test_loss,
-        'accuracy': accuracy,
-        'avg_logpdf': avg_logpdf,
-        'state_dim': state_dim,
-        'action_dim': action_dim,
-        'training_time': training_time
+    with torch.no_grad():
+        for obs1, actions1, obs2, actions2, pref in tqdm(test_loader, desc="Testing"):
+            # Skip batches with NaN values
+            if (torch.isnan(obs1).any() or torch.isnan(actions1).any() or 
+                torch.isnan(obs2).any() or torch.isnan(actions2).any()):
+                continue
+                
+            # Move to device
+            obs1, actions1 = obs1.to(device), actions1.to(device)
+            obs2, actions2 = obs2.to(device), actions2.to(device)
+            pref = pref.to(device)
+            
+            # Get reward predictions
+            reward1 = model(obs1, actions1)
+            reward2 = model(obs2, actions2)
+            
+            # Skip if NaN rewards
+            if torch.isnan(reward1).any() or torch.isnan(reward2).any():
+                continue
+                
+            # Compute loss
+            loss = bradley_terry_loss(reward1, reward2, pref)
+            
+            # Skip if NaN loss
+            if torch.isnan(loss).any():
+                continue
+                
+            test_loss += loss.item()
+            
+            # Compute accuracy (prediction matches preference)
+            pred_pref = (reward1 > reward2).long() + 1  # 1 if reward1 > reward2, 2 otherwise
+            test_acc += (pred_pref == pref).sum().item()
+            test_total += pref.size(0)
+    
+    avg_test_loss = test_loss / len(test_loader) if len(test_loader) > 0 else float('nan')
+    test_accuracy = test_acc / test_total if test_total > 0 else 0
+    
+    print(f"Test Loss: {avg_test_loss:.4f}, Accuracy: {test_accuracy:.4f}")
+    
+    # Log final test results to wandb
+    if cfg.wandb.use_wandb:
+        wandb.log({
+            "test_loss": avg_test_loss,
+            "test_accuracy": test_accuracy
+        })
+    
+    # Save model
+    model_path = f"{cfg.output.output_dir}/state_action_reward_model.pt"
+    torch.save(model.state_dict(), model_path)
+    print(f"Model saved to {model_path}")
+    
+    # Log as wandb artifact
+    if cfg.wandb.use_wandb:
+        artifact = wandb.Artifact(f"reward_model_{wandb.run.id}", type="model")
+        artifact.add_file(model_path)
+        wandb.log_artifact(artifact)
+    
+    # Save segment info
+    segment_info = {
+        "segment_length": cfg.data.segment_length,
+        "num_segments": len(segments),
+        "num_pairs": len(segment_pairs),
+        "observation_dim": state_dim,
+        "action_dim": action_dim,
+        "training_losses": train_losses,
+        "validation_losses": val_losses,
+        "test_loss": avg_test_loss,
+        "test_accuracy": test_accuracy,
+        "config": OmegaConf.to_container(cfg, resolve=True)
     }
     
-    with open(f"{args.output_dir}/sa_results.pkl", 'wb') as f:
-        pickle.dump(results, f)
+    with open(f"{cfg.output.output_dir}/reward_model_info.pkl", "wb") as f:
+        pickle.dump(segment_info, f)
     
-    print(f"Model saved to {args.output_dir}/state_action_reward_model.pt")
-    print(f"Results saved to {args.output_dir}/sa_results.pkl")
-    print("\nTraining complete!")
+    print(f"Model information saved to {cfg.output.output_dir}/reward_model_info.pkl")
+    
+    # Finish wandb run
+    if cfg.wandb.use_wandb and wandb.run:
+        wandb.finish()
+        
+    print("\nReward model training complete!")
 
 if __name__ == "__main__":
     main() 

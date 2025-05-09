@@ -16,6 +16,9 @@ from d3rlpy.models.encoders import VectorEncoderFactory
 from pathlib import Path
 import imageio  # For video recording
 import time
+import hydra
+from omegaconf import DictConfig, OmegaConf
+import wandb
 
 # Import utility functions
 from trajectory_utils import (
@@ -444,58 +447,83 @@ def get_d3rlpy_experiment_path(base_logdir, experiment_name, with_timestamp=True
         
     return None
 
-def main():
-    parser = argparse.ArgumentParser(description="Train an IQL policy using learned state-action reward model")
-    parser.add_argument("--data_path", type=str, default=DEFAULT_DATA_PATHS[0],
-                        help="Path to the PT file containing trajectory data")
-    parser.add_argument("--reward_model_path", type=str, default="reward_model/state_action_reward_model.pt",
-                        help="Path to the trained state-action reward model")
-    parser.add_argument("--hidden_dims", nargs="+", type=int, default=[256, 256],
-                        help="Hidden dimensions of the reward model")
-    parser.add_argument("--iql_epochs", type=int, default=100,
-                        help="Number of epochs for IQL training")
-    parser.add_argument("--batch_size", type=int, default=256,
-                        help="Batch size for IQL training")
-    parser.add_argument("--eval_episodes", type=int, default=10,
-                        help="Number of episodes for evaluation")
-    parser.add_argument("--output_dir", type=str, default="iql_model",
-                        help="Directory to save model and results")
-    parser.add_argument("--max_segments", type=int, default=1000,
-                        help="Maximum number of segments to use for dataset creation")
-    parser.add_argument("--reward_batch_size", type=int, default=32,
-                        help="Batch size for reward prediction (higher values speed up processing)")
-    parser.add_argument("--skip_env_creation", action="store_true",
-                        help="Skip environment creation and evaluation (useful if MetaWorld is not available)")
-    parser.add_argument("--eval_interval", type=int, default=10,
-                        help="Interval (in epochs) between policy evaluations during training")
-    parser.add_argument("--record_video", action="store_true",
-                        help="Record videos of policy evaluation")
-    parser.add_argument("--video_dir", type=str, default=None,
-                        help="Directory to save evaluation videos (default: uses d3rlpy's log directory)")
-    parser.add_argument("--parallel_eval", action="store_true",
-                        help="Use parallel processing for policy evaluation")
-    parser.add_argument("--eval_workers", type=int, default=None,
-                        help="Number of workers for parallel evaluation (default: min(n_episodes, cpu_count))")
-    args = parser.parse_args()
+def log_evaluation_to_wandb(metrics, epoch=None, prefix=""):
+    """Log evaluation metrics to wandb."""
+    if not wandb.run:
+        return
+        
+    log_dict = {}
+    
+    # Add prefix to metric names if provided
+    pre = f"{prefix}_" if prefix else ""
+    
+    if epoch is not None:
+        log_dict[f"{pre}epoch"] = epoch
+        
+    # Log numerical metrics
+    for key, value in metrics.items():
+        if isinstance(value, (int, float, np.int64, np.float32, np.float64)):
+            log_dict[f"{pre}{key}"] = value
+            
+    # If returns array is available, log a histogram
+    if "returns" in metrics and isinstance(metrics["returns"], (list, np.ndarray)):
+        if wandb.run:
+            wandb.log({f"{pre}returns_histogram": wandb.Histogram(metrics["returns"])}, step=epoch if epoch is not None else None)
+    
+    # Log to wandb if any metrics to log
+    if log_dict and wandb.run:
+        wandb.log(log_dict, step=epoch if epoch is not None else None)
+
+@hydra.main(config_path="config/train_iql", config_name="config", version_base=None)
+def main(cfg: DictConfig):
+    """Train an IQL policy using learned reward model with Hydra config."""
+    print("\n" + "=" * 50)
+    print("Training IQL policy with learned rewards")
+    print("=" * 50)
+    
+    # Print config for visibility
+    print("\nConfiguration:")
+    print(OmegaConf.to_yaml(cfg))
+    
+    # Initialize wandb
+    if cfg.wandb.use_wandb:
+        # Generate experiment name based on data path
+        dataset_name = Path(cfg.data.data_path).stem
+        
+        # Set up a run name if not specified
+        run_name = cfg.wandb.name
+        if run_name is None:
+            run_name = f"IQL_{dataset_name}_{time.strftime('%Y%m%d_%H%M%S')}"
+        
+        # Initialize wandb
+        wandb.init(
+            project=cfg.wandb.project,
+            entity=cfg.wandb.entity,
+            name=run_name,
+            config=OmegaConf.to_container(cfg, resolve=True),
+            tags=cfg.wandb.tags,
+            notes=cfg.wandb.notes
+        )
+        print(f"Wandb initialized: {wandb.run.name}")
     
     # Create output directory
-    os.makedirs(args.output_dir, exist_ok=True)
+    os.makedirs(cfg.output.output_dir, exist_ok=True)
     
     # Setup device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
     
     # Get experiment name based on data path
-    dataset_name = Path(args.data_path).stem
+    dataset_name = Path(cfg.data.data_path).stem
     experiment_name = f"IQL_{dataset_name}_SA"
     
     # Set up video directories - we'll create them after d3rlpy creates its log dir
-    base_video_dir = args.video_dir  # Store user-provided directory if any
-    d3rlpy_logdir = f"{args.output_dir}/logs"
+    base_video_dir = cfg.output.video_dir  # Store user-provided directory if any
+    d3rlpy_logdir = f"{cfg.output.output_dir}/logs"
     
     # Load data
-    print(f"Loading data from {args.data_path}")
-    data = load_tensordict(args.data_path)
+    print(f"Loading data from {cfg.data.data_path}")
+    data = load_tensordict(cfg.data.data_path)
     
     # Get observation and action dimensions
     observations = data["obs"] if "obs" in data else data["state"]
@@ -504,11 +532,11 @@ def main():
     print(f"Observation dimension: {state_dim}, Action dimension: {action_dim}")
     
     # Load reward model
-    reward_model = SegmentRewardModel(state_dim, action_dim, hidden_dims=args.hidden_dims)
-    reward_model.load_state_dict(torch.load(args.reward_model_path))
+    reward_model = SegmentRewardModel(state_dim, action_dim, hidden_dims=cfg.model.hidden_dims)
+    reward_model.load_state_dict(torch.load(cfg.data.reward_model_path))
     reward_model = reward_model.to(device)
     reward_model.eval()
-    print(f"Loaded reward model from {args.reward_model_path}")
+    print(f"Loaded reward model from {cfg.data.reward_model_path}")
     
     # Create MDP dataset with learned rewards
     print("Creating MDP dataset with learned rewards...")
@@ -516,15 +544,15 @@ def main():
         data, 
         reward_model, 
         device, 
-        max_segments=args.max_segments,
-        batch_size=args.reward_batch_size
+        max_segments=cfg.data.max_segments,
+        batch_size=cfg.data.reward_batch_size
     )
     print(f"Created dataset with {dataset.size()} transitions")
     
     # Create environment for evaluation
     env = None
-    if not args.skip_env_creation:
-        dataset_name = Path(args.data_path).stem
+    if not cfg.evaluation.skip_env_creation:
+        dataset_name = Path(cfg.data.data_path).stem
         try:
             # Create a function that returns a new environment with a different seed each time
             def create_env_with_different_seed():
@@ -547,77 +575,97 @@ def main():
     # Initialize IQL algorithm
     print("Initializing IQL algorithm...")
     iql = IQL(
-        actor_learning_rate=3e-4,
-        critic_learning_rate=3e-4,
-        batch_size=args.batch_size,
-        gamma=0.99,
-        tau=0.005,
-        n_critics=2,
-        expectile=0.7,
-        weight_temp=3.0,
-        encoder_factory=VectorEncoderFactory([256, 256, 256]),
+        actor_learning_rate=cfg.model.actor_learning_rate,
+        critic_learning_rate=cfg.model.critic_learning_rate,
+        batch_size=cfg.model.batch_size,
+        gamma=cfg.model.gamma,
+        tau=cfg.model.tau,
+        n_critics=cfg.model.n_critics,
+        expectile=cfg.model.expectile,
+        weight_temp=cfg.model.weight_temp,
+        encoder_factory=VectorEncoderFactory(cfg.model.encoder_dims),
         use_gpu=torch.cuda.is_available()
     )
     
-    # Create a custom callback to evaluate the policy at regular intervals
+    # For tracking evaluation metrics
     evaluation_results = []
-    
-    # Track the last evaluation epoch to avoid redundant evaluations
     last_eval_epoch = -1
-    video_dir = None  # Will be set once the d3rlpy experiment directory is created
     
+    # If video_dir is None, use d3rlpy's log directory
+    video_dir = None
+    if cfg.evaluation.record_video:
+        import os
+        # Start with user-specified dir if provided
+        if base_video_dir is not None:
+            video_dir = base_video_dir
+        else:
+            # Wait for d3rlpy to create its log dir during training
+            pass
+    
+    # Create a custom callback to evaluate the policy at regular intervals
     def evaluation_callback(algo, epoch, total_step):
         nonlocal last_eval_epoch, video_dir
-        
-        # Only evaluate if this is a new epoch AND it's a multiple of eval_interval
-        if epoch != last_eval_epoch and epoch % args.eval_interval == 0:
-            last_eval_epoch = epoch
             
-            # If this is the first evaluation, try to find the d3rlpy experiment directory
-            if video_dir is None and args.record_video:
-                # Try to find the d3rlpy experiment directory
-                exp_dir = get_d3rlpy_experiment_path(d3rlpy_logdir, experiment_name)
-                
-                if exp_dir is not None:
-                    # Use the d3rlpy experiment directory for videos
-                    video_dir = os.path.join(exp_dir, "videos")
-                    os.makedirs(video_dir, exist_ok=True)
-                    print(f"Videos will be saved to: {video_dir}")
-                elif base_video_dir is not None:
-                    # If d3rlpy directory not found but user specified a directory, use that
-                    video_dir = base_video_dir
-                    os.makedirs(video_dir, exist_ok=True)
-                    print(f"Using user-specified video directory: {video_dir}")
+        # Only evaluate at specified intervals
+        if epoch <= last_eval_epoch or (epoch % cfg.training.eval_interval != 0 and epoch != cfg.training.iql_epochs - 1):
+            return
+            
+        # Update last evaluated epoch
+        last_eval_epoch = epoch
+            
+        # Check if environment is available
+        if env is None:
+            print(f"Epoch {epoch}: Skipping evaluation (no environment available)")
+            return
+            
+        # Set up video path if recording is enabled
+        video_path = None
+        if cfg.evaluation.record_video:
+            # Lazy initialization of video_dir
+            if video_dir is None:
+                # Check if d3rlpy has created its log directory yet
+                if not os.path.exists(d3rlpy_logdir):
+                    # Create a fallback directory for videos
+                    os.makedirs(f"{cfg.output.output_dir}/videos", exist_ok=True)
+                    video_dir = f"{cfg.output.output_dir}/videos"
                 else:
-                    # Fallback to a default directory
-                    video_dir = os.path.join(args.output_dir, "videos")
-                    os.makedirs(video_dir, exist_ok=True)
-                    print(f"Using fallback video directory: {video_dir}")
-            
-            print(f"\n--- Evaluating policy at epoch {epoch} ---")
-            
-            # Create video path with experiment name and epoch
-            if args.record_video and video_dir is not None:
-                video_path = f"{video_dir}/epoch_{epoch}"
-            else:
-                video_path = None
+                    # Find the most recent experiment directory
+                    experiment_dirs = [d for d in os.listdir(d3rlpy_logdir) if experiment_name in d]
+                    experiment_dirs.sort()  # Sort by name which includes timestamp
+                    if experiment_dirs:
+                        video_dir = f"{d3rlpy_logdir}/{experiment_dirs[-1]}/videos"
+                        os.makedirs(video_dir, exist_ok=True)
+                    else:
+                        # Fallback if no experiment dir found
+                        os.makedirs(f"{cfg.output.output_dir}/videos", exist_ok=True)
+                        video_dir = f"{cfg.output.output_dir}/videos"
+                            
+            # Create epoch-specific video path
+            video_path = f"{video_dir}/epoch_{epoch}"
                 
-            metrics = evaluate_policy_manual(
-                env, 
-                algo, 
-                n_episodes=args.eval_episodes, 
-                verbose=False,
-                record_video=args.record_video,
-                video_path=video_path,
-                video_fps=30,
-                parallel=args.parallel_eval,
-                num_workers=args.eval_workers
-            )
-            print(f"Mean return: {metrics['mean_return']:.2f}, Success rate: {metrics['success_rate']:.2f}")
-            evaluation_results.append((epoch, metrics))
+        # Evaluate policy
+        print(f"\nEvaluating policy at epoch {epoch}...")
+            
+        metrics = evaluate_policy_manual(
+            env, 
+            algo, 
+            n_episodes=cfg.training.eval_episodes, 
+            verbose=False,
+            record_video=cfg.evaluation.record_video,
+            video_path=video_path,
+            video_fps=30,
+            parallel=cfg.evaluation.parallel_eval,
+            num_workers=cfg.evaluation.eval_workers
+        )
+        print(f"Mean return: {metrics['mean_return']:.2f}, Success rate: {metrics['success_rate']:.2f}")
+        evaluation_results.append((epoch, metrics))
+        
+        # Log to wandb if enabled
+        if cfg.wandb.use_wandb:
+            log_evaluation_to_wandb(metrics, epoch=epoch, prefix="eval")
     
     # Train IQL
-    print(f"Training IQL for {args.iql_epochs} epochs...")
+    print(f"Training IQL for {cfg.training.iql_epochs} epochs...")
     training_metrics = []
     try:
         # Define scorers based on environment availability
@@ -633,7 +681,7 @@ def main():
         # Train the model
         training_metrics = iql.fit(
             dataset,
-            n_epochs=args.iql_epochs,
+            n_epochs=cfg.training.iql_epochs,
             eval_episodes=None,  # Don't use the built-in eval which expects episodes format
             save_interval=10,
             scorers=scorers,
@@ -657,7 +705,7 @@ def main():
         print("Continuing with trained model so far...")
     
     # Save the model
-    model_path = f"{args.output_dir}/iql_{Path(args.data_path).stem}_sa.pt"
+    model_path = f"{cfg.output.output_dir}/iql_{Path(cfg.data.data_path).stem}_sa.pt"
     iql.save_model(model_path)
     print(f"Model saved to {model_path}")
     
@@ -665,7 +713,7 @@ def main():
     print("\nRunning final comprehensive evaluation...")
     if env is not None:
         # Create descriptive video path for final evaluation
-        if args.record_video and video_dir is not None:
+        if cfg.evaluation.record_video and video_dir is not None:
             video_path = f"{video_dir}/final_eval"
         else:
             video_path = None
@@ -673,14 +721,18 @@ def main():
         evaluation_metrics = evaluate_policy_manual(
             env, 
             iql, 
-            n_episodes=args.eval_episodes, 
+            n_episodes=cfg.training.eval_episodes, 
             verbose=True,
-            record_video=args.record_video,
+            record_video=cfg.evaluation.record_video,
             video_path=video_path,
             video_fps=30,
-            parallel=args.parallel_eval,
-            num_workers=args.eval_workers
+            parallel=cfg.evaluation.parallel_eval,
+            num_workers=cfg.evaluation.eval_workers
         )
+        
+        # Log final evaluation to wandb
+        if cfg.wandb.use_wandb:
+            log_evaluation_to_wandb(evaluation_metrics, prefix="final")
     else:
         print("\nSkipping evaluation (no environment available)")
         evaluation_metrics = {
@@ -691,19 +743,30 @@ def main():
     
     # Save results
     results = {
-        'args': vars(args),
+        'config': OmegaConf.to_container(cfg, resolve=True),
         'final_evaluation': evaluation_metrics,
         'training_metrics': training_metrics,
         'evaluation_during_training': evaluation_results,
         'dataset_size': dataset.size()
     }
     
-    results_path = f"{args.output_dir}/sa_results.pkl"
+    results_path = f"{cfg.output.output_dir}/sa_results.pkl"
     with open(results_path, 'wb') as f:
         pickle.dump(results, f)
     
     print(f"Results saved to {results_path}")
     print("\nTraining complete!")
+    
+    # Finish wandb run
+    if cfg.wandb.use_wandb and wandb.run:
+        # Upload the model file if it exists
+        if os.path.exists(model_path):
+            artifact = wandb.Artifact(f"iql_model_{wandb.run.id}", type="model")
+            artifact.add_file(model_path)
+            wandb.log_artifact(artifact)
+            
+        # Close wandb run
+        wandb.finish()
 
 if __name__ == "__main__":
     main() 
