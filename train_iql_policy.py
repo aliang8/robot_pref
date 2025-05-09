@@ -14,6 +14,8 @@ from d3rlpy.datasets import MDPDataset
 from d3rlpy.metrics.scorer import evaluate_on_environment
 from d3rlpy.models.encoders import VectorEncoderFactory
 from pathlib import Path
+import imageio  # For video recording
+import time
 
 # Import utility functions
 from trajectory_utils import (
@@ -24,6 +26,15 @@ from trajectory_utils import (
 
 # Import reward models
 from train_reward_model import SegmentRewardModel, StateActionRewardModel
+
+# Import evaluation and rendering utilities
+from utils.eval_utils import (
+    SimpleVideoRecorder,
+    RenderWrapper,
+    evaluate_policy_manual,
+    custom_evaluate_on_environment,
+    create_video_recorder
+)
 
 # Set seed for reproducibility
 torch.manual_seed(RANDOM_SEED)
@@ -237,8 +248,16 @@ def create_mdp_dataset_with_sa_reward(data, reward_model, device, max_segments=1
     
     return dataset
 
-def get_metaworld_env(task_name):
-    """Create a MetaWorld environment for the given task."""
+def get_metaworld_env(task_name, seed=42):
+    """Create a MetaWorld environment for the given task.
+    
+    Args:
+        task_name: Name of the MetaWorld task to create
+        seed: Random seed for the environment
+    
+    Returns:
+        MetaWorld environment instance
+    """
     
     # Clean up task name from file path or other formats
     original_task_name = task_name
@@ -296,7 +315,7 @@ def get_metaworld_env(task_name):
         
         # If we found a constructor directly, use it
         if env_constructor is not None:
-            env = env_constructor(seed=42)  # Use consistent seed
+            env = env_constructor(seed=seed)  # Use provided seed
             print(f"Successfully created environment: {found_env_name}")
             print(f"Observation space: {env.observation_space}")
             print(f"Action space: {env.action_space}")
@@ -328,7 +347,7 @@ def get_metaworld_env(task_name):
         if best_match:
             env_name, constructor = best_match
             print(f"Found closest matching environment: {env_name}")
-            env = constructor(seed=42)
+            env = constructor(seed=seed)  # Use provided seed
             print(f"Successfully created environment: {env_name}")
             print(f"Observation space: {env.observation_space}")
             print(f"Action space: {env.action_space}")
@@ -362,6 +381,10 @@ def get_metaworld_env(task_name):
         task = ml1.train_tasks[0]
         env.set_task(task)
         
+        # Set seed manually since ML1 doesn't take seed directly in constructor
+        if hasattr(env, 'seed'):
+            env.seed(seed)
+        
         print(f"Successfully created environment with ML1: {task_name}")
         print(f"Observation space: {env.observation_space}")
         print(f"Action space: {env.action_space}")
@@ -387,175 +410,39 @@ def get_metaworld_env(task_name):
             
         raise ValueError(f"Could not create environment for task: {original_task_name}")
 
-def custom_evaluate_on_environment(env):
-    """Custom environment evaluation function that handles observation conversion properly."""
-    def scorer(algo, *args, **kwargs):
-        # Check environment compatibility with the model
-        env_obs_dim = env.observation_space.shape[0]
-        
-        # Get model's expected observation dimension through various ways
-        model_obs_dim = None
-        if hasattr(algo, 'observation_shape'):
-            model_obs_dim = algo.observation_shape[0]
-        elif hasattr(algo, '_impl') and hasattr(algo._impl, 'observation_shape'):
-            model_obs_dim = algo._impl.observation_shape[0]
-        
-        if model_obs_dim is not None and env_obs_dim != model_obs_dim:
-            print(f"Warning: Environment observation dimension ({env_obs_dim}) doesn't match model's expected dimension ({model_obs_dim})")
-            print("Skipping evaluation with incompatible environment")
-            return 0.0
-        
-        total_reward = 0.0
-        n_episodes = 5  # Number of episodes to evaluate on for each call
-        
-        for episode in range(n_episodes):
-            observation = env.reset()
-            episode_reward = 0.0
-            done = False
-            
-            while not done:
-                # Extract observation if it's a tuple
-                if isinstance(observation, tuple):
-                    obs_array = observation[0]
-                else:
-                    obs_array = observation
-                    
-                # Ensure observation is a numpy array with batch dimension
-                if not isinstance(obs_array, np.ndarray):
-                    obs_array = np.array(obs_array, dtype=np.float32)
-                
-                if len(obs_array.shape) == 1:
-                    obs_array = np.expand_dims(obs_array, axis=0)
-                
-                action = algo.predict(obs_array)[0]
-                
-                # Handle different step return formats
-                step_result = env.step(action)
-                
-                # MetaWorld environments return 4 values: obs, reward, done, info
-                if len(step_result) == 4:
-                    observation, reward, done, _ = step_result
-                # Some environments might return 5 values including truncated flag (gym>=0.26)
-                elif len(step_result) == 5:
-                    observation, reward, terminated, truncated, _ = step_result
-                    done = terminated or truncated
-                else:
-                    print(f"Warning: Unexpected step result format: {step_result}")
-                    break
-                    
-                episode_reward += reward
-            
-            total_reward += episode_reward
-            
-        # Return average reward across episodes
-        avg_reward = total_reward / n_episodes
-        print(f"Evaluation during training: {avg_reward:.2f} average reward over {n_episodes} episodes")
-        return avg_reward
+def get_d3rlpy_experiment_path(base_logdir, experiment_name, with_timestamp=True):
+    """Get the path to the d3rlpy experiment directory.
     
-    return scorer
-
-def evaluate_policy_manual(env, algo, n_episodes=10, verbose=True):
-    """Manually evaluate policy on environment and return detailed metrics."""
-    returns = []
-    success_rate = 0
-    steps_to_complete = []
-    
-    # Check if we can even run evaluation
-    if env is None:
-        print("No environment available for evaluation.")
-        return {
-            'mean_return': 0.0,
-            'std_return': 0.0,
-            'success_rate': 0.0,
-            'num_episodes': 0
-        }
-    
-    # Print environment info
-    if verbose:
-        print(f"Evaluating on environment with:")
-        print(f"  Observation space: {env.observation_space}")
-        print(f"  Action space: {env.action_space}")
-    
-    for episode in tqdm(range(n_episodes), desc="Evaluating policy"):
-        observation = env.reset()
-        done = False
-        episode_return = 0
-        steps = 0
+    Args:
+        base_logdir: Base logging directory
+        experiment_name: Name of the experiment
+        with_timestamp: Whether the directory has a timestamp
         
-        while not done and steps < 1000:  # Add step limit to prevent infinite loops
-            # Extract observation if it's a tuple (some environments return additional info)
-            if isinstance(observation, tuple):
-                obs_array = observation[0]  # Use only the observation part
-            else:
-                obs_array = observation
-                
-            # Ensure observation is a numpy array with batch dimension
-            if not isinstance(obs_array, np.ndarray):
-                obs_array = np.array(obs_array, dtype=np.float32)
-            
-            if len(obs_array.shape) == 1:
-                obs_array = np.expand_dims(obs_array, axis=0)
-                
-            # Run prediction
-            action = algo.predict(obs_array)[0]
-            
-            # Handle different step return formats
-            step_result = env.step(action)
-            
-            # MetaWorld environments return 4 values: obs, reward, done, info
-            if len(step_result) == 4:
-                observation, reward, done, info = step_result
-            # Some environments might return 5 values including truncated flag (gym>=0.26)
-            elif len(step_result) == 5:
-                observation, reward, terminated, truncated, info = step_result
-                done = terminated or truncated
-            else:
-                if verbose:
-                    print(f"Warning: Unexpected step result format: {len(step_result)} values")
-                break
-                
-            episode_return += reward
-            steps += 1
-            
-            # Check for success
-            if isinstance(info, dict) and 'success' in info and info['success']:
-                success_rate += 1
-                break
-        
-        returns.append(episode_return)
-        steps_to_complete.append(steps)
+    Returns:
+        Path to the experiment directory (or None if not found)
+    """
+    # If timestamp is used, the format is {experiment_name}_{timestamp}
+    # If no timestamp, just use the experiment name
     
-    if len(returns) > 0:
-        success_rate_pct = 100.0 * success_rate / n_episodes
-        mean_return = np.mean(returns)
-        std_return = np.std(returns)
-        mean_steps = np.mean(steps_to_complete)
+    experiment_dir = Path(base_logdir)
+    if not experiment_dir.exists():
+        return None
         
-        if verbose:
-            print(f"\nEvaluation Results:")
-            print(f"  Mean return: {mean_return:.2f} ± {std_return:.2f}")
-            print(f"  Success rate: {success_rate_pct:.1f}%")
-            print(f"  Average steps per episode: {mean_steps:.1f}")
-            print(f"  Evaluated over {n_episodes} episodes")
+    # If with_timestamp is False, just use the experiment name directly
+    if not with_timestamp:
+        return experiment_dir / experiment_name
+    
+    # Look for directories that start with the experiment name
+    matching_dirs = list(experiment_dir.glob(f"{experiment_name}_*"))
+    
+    # Sort by creation time (most recent first)
+    matching_dirs.sort(key=lambda p: p.stat().st_ctime, reverse=True)
+    
+    # Return the most recent one if any exists
+    if matching_dirs:
+        return matching_dirs[0]
         
-        return {
-            'mean_return': mean_return,
-            'std_return': std_return,
-            'success_rate': success_rate / n_episodes,
-            'mean_steps': mean_steps,
-            'num_episodes': n_episodes,
-            'returns': returns,
-            'steps': steps_to_complete
-        }
-    else:
-        if verbose:
-            print("No complete episodes during evaluation.")
-        return {
-            'mean_return': 0.0,
-            'std_return': 0.0,
-            'success_rate': 0.0,
-            'num_episodes': 0
-        }
+    return None
 
 def main():
     parser = argparse.ArgumentParser(description="Train an IQL policy using learned state-action reward model")
@@ -581,6 +468,14 @@ def main():
                         help="Skip environment creation and evaluation (useful if MetaWorld is not available)")
     parser.add_argument("--eval_interval", type=int, default=10,
                         help="Interval (in epochs) between policy evaluations during training")
+    parser.add_argument("--record_video", action="store_true",
+                        help="Record videos of policy evaluation")
+    parser.add_argument("--video_dir", type=str, default=None,
+                        help="Directory to save evaluation videos (default: uses d3rlpy's log directory)")
+    parser.add_argument("--parallel_eval", action="store_true",
+                        help="Use parallel processing for policy evaluation")
+    parser.add_argument("--eval_workers", type=int, default=None,
+                        help="Number of workers for parallel evaluation (default: min(n_episodes, cpu_count))")
     args = parser.parse_args()
     
     # Create output directory
@@ -589,6 +484,14 @@ def main():
     # Setup device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
+    
+    # Get experiment name based on data path
+    dataset_name = Path(args.data_path).stem
+    experiment_name = f"IQL_{dataset_name}_SA"
+    
+    # Set up video directories - we'll create them after d3rlpy creates its log dir
+    base_video_dir = args.video_dir  # Store user-provided directory if any
+    d3rlpy_logdir = f"{args.output_dir}/logs"
     
     # Load data
     print(f"Loading data from {args.data_path}")
@@ -623,8 +526,20 @@ def main():
     if not args.skip_env_creation:
         dataset_name = Path(args.data_path).stem
         try:
-            env = get_metaworld_env(dataset_name)
+            # Create a function that returns a new environment with a different seed each time
+            def create_env_with_different_seed():
+                # Generate a unique seed each time this function is called
+                # Uses a combination of current time and random number to create diversity
+                unique_seed = int(time.time() * 1000) % 100000 + random.randint(0, 10000)
+                return get_metaworld_env(dataset_name, seed=unique_seed)
+                
+            # Create one environment to verify it works
+            test_env = create_env_with_different_seed()
             print("Successfully created environment for evaluation")
+            
+            # Return the function instead of a single environment instance
+            # This allows new environment instances with different seeds to be created for each episode
+            env = create_env_with_different_seed
         except Exception as e:
             print(f"Warning: Could not create environment for evaluation: {str(e)}")
             print("Will train without environment evaluation.")
@@ -647,10 +562,57 @@ def main():
     # Create a custom callback to evaluate the policy at regular intervals
     evaluation_results = []
     
+    # Track the last evaluation epoch to avoid redundant evaluations
+    last_eval_epoch = -1
+    video_dir = None  # Will be set once the d3rlpy experiment directory is created
+    
     def evaluation_callback(algo, epoch, total_step):
-        if epoch % args.eval_interval == 0 and env is not None:
+        nonlocal last_eval_epoch, video_dir
+        
+        # Only evaluate if this is a new epoch AND it's a multiple of eval_interval
+        if epoch != last_eval_epoch and epoch % args.eval_interval == 0:
+            last_eval_epoch = epoch
+            
+            # If this is the first evaluation, try to find the d3rlpy experiment directory
+            if video_dir is None and args.record_video:
+                # Try to find the d3rlpy experiment directory
+                exp_dir = get_d3rlpy_experiment_path(d3rlpy_logdir, experiment_name)
+                
+                if exp_dir is not None:
+                    # Use the d3rlpy experiment directory for videos
+                    video_dir = os.path.join(exp_dir, "videos")
+                    os.makedirs(video_dir, exist_ok=True)
+                    print(f"Videos will be saved to: {video_dir}")
+                elif base_video_dir is not None:
+                    # If d3rlpy directory not found but user specified a directory, use that
+                    video_dir = base_video_dir
+                    os.makedirs(video_dir, exist_ok=True)
+                    print(f"Using user-specified video directory: {video_dir}")
+                else:
+                    # Fallback to a default directory
+                    video_dir = os.path.join(args.output_dir, "videos")
+                    os.makedirs(video_dir, exist_ok=True)
+                    print(f"Using fallback video directory: {video_dir}")
+            
             print(f"\n--- Evaluating policy at epoch {epoch} ---")
-            metrics = evaluate_policy_manual(env, algo, n_episodes=args.eval_episodes, verbose=False)
+            
+            # Create video path with experiment name and epoch
+            if args.record_video and video_dir is not None:
+                video_path = f"{video_dir}/epoch_{epoch}"
+            else:
+                video_path = None
+                
+            metrics = evaluate_policy_manual(
+                env, 
+                algo, 
+                n_episodes=args.eval_episodes, 
+                verbose=False,
+                record_video=args.record_video,
+                video_path=video_path,
+                video_fps=30,
+                parallel=args.parallel_eval,
+                num_workers=args.eval_workers
+            )
             print(f"Mean return: {metrics['mean_return']:.2f}, Success rate: {metrics['success_rate']:.2f}")
             evaluation_results.append((epoch, metrics))
     
@@ -675,9 +637,9 @@ def main():
             eval_episodes=None,  # Don't use the built-in eval which expects episodes format
             save_interval=10,
             scorers=scorers,
-            experiment_name=f"IQL_{Path(args.data_path).stem}_SA",
+            experiment_name=experiment_name,
             with_timestamp=True,
-            logdir=f"{args.output_dir}/logs",
+            logdir=d3rlpy_logdir,
             verbose=True,
             callback=evaluation_callback
         )
@@ -702,7 +664,23 @@ def main():
     # Run final comprehensive evaluation
     print("\nRunning final comprehensive evaluation...")
     if env is not None:
-        evaluation_metrics = evaluate_policy_manual(env, iql, n_episodes=args.eval_episodes, verbose=True)
+        # Create descriptive video path for final evaluation
+        if args.record_video and video_dir is not None:
+            video_path = f"{video_dir}/final_eval"
+        else:
+            video_path = None
+            
+        evaluation_metrics = evaluate_policy_manual(
+            env, 
+            iql, 
+            n_episodes=args.eval_episodes, 
+            verbose=True,
+            record_video=args.record_video,
+            video_path=video_path,
+            video_fps=30,
+            parallel=args.parallel_eval,
+            num_workers=args.eval_workers
+        )
     else:
         print("\nSkipping evaluation (no environment available)")
         evaluation_metrics = {
