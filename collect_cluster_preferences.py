@@ -122,7 +122,7 @@ def present_preference_query(data, segment1, segment2, query_id=None, skip_video
         segment1: (idx1, start_idx1, end_idx1) for first segment
         segment2: (idx2, start_idx2, end_idx2) for second segment
         query_id: Optional ID for the query
-        skip_videos: If True, skip generating videos to save time
+        skip_videos: If True, skip generating visualizations to save time
         
     Returns:
         int: 1 if segment1 is preferred, 2 if segment2 is preferred, 0 if equal
@@ -146,16 +146,22 @@ def present_preference_query(data, segment1, segment2, query_id=None, skip_video
     print(f"Segment 1: {start_idx1}-{end_idx1} (Length: {end_idx1-start_idx1+1})")
     print(f"Segment 2: {start_idx2}-{end_idx2} (Length: {end_idx2-start_idx2+1})")
     
-    # Display animations and video only if not skipping
+    # Track all generated files
+    generated_files = []
+    
+    # Display visualizations only if not skipping
     if not skip_videos:
-        print("\nRendering trajectories...")
+        print("\nGenerating trajectory visualizations...")
         
-        # Create two EEF trajectory animations
-        import matplotlib.pyplot as plt
-        from matplotlib import animation
-        import matplotlib.gridspec as gridspec
+        # Create directory for trajectory frames
+        frames_dir = "comparison_frames"
+        os.makedirs(frames_dir, exist_ok=True)
         
-        # 3D animations of EEF positions
+        # Get trajectory data
+        traj1 = eef_positions[start_idx1:end_idx1+1].cpu().numpy()
+        traj2 = eef_positions[start_idx2:end_idx2+1].cpu().numpy()
+        
+        # Create 3D figure for trajectory comparison
         fig = plt.figure(figsize=(12, 6))
         gs = gridspec.GridSpec(1, 2, width_ratios=[1, 1])
         
@@ -166,10 +172,6 @@ def present_preference_query(data, segment1, segment2, query_id=None, skip_video
         # Second trajectory
         ax2 = fig.add_subplot(gs[1], projection='3d')
         ax2.set_title("Segment 2")
-        
-        # Get trajectory data
-        traj1 = eef_positions[start_idx1:end_idx1+1].cpu().numpy()
-        traj2 = eef_positions[start_idx2:end_idx2+1].cpu().numpy()
         
         # Set the same scale for both plots to make comparison fair
         all_points = np.vstack([traj1, traj2])
@@ -198,223 +200,157 @@ def present_preference_query(data, segment1, segment2, query_id=None, skip_video
             ax.set_ylabel('Y')
             ax.set_zlabel('Z')
         
-        # Initialize lines
-        line1, = ax1.plot([], [], [], 'r-', linewidth=2)
-        point1 = ax1.scatter([], [], [], color='blue', s=50)
+        # Save key frames as PNGs
+        num_frames = max(len(traj1), len(traj2))
+        key_frames = [0, num_frames // 4, num_frames // 2, 3 * num_frames // 4, num_frames - 1]
+        key_frames = [min(f, num_frames - 1) for f in key_frames]  # Ensure within bounds
         
-        line2, = ax2.plot([], [], [], 'r-', linewidth=2)
-        point2 = ax2.scatter([], [], [], color='blue', s=50)
-        
-        # Function to initialize animation
-        def init():
-            line1.set_data([], [])
-            line1.set_3d_properties([])
-            point1._offsets3d = ([], [], [])
+        for i, frame in enumerate(key_frames):
+            # Frame index for each trajectory
+            idx1 = min(frame, len(traj1) - 1)
+            idx2 = min(frame, len(traj2) - 1)
             
-            line2.set_data([], [])
-            line2.set_3d_properties([])
-            point2._offsets3d = ([], [], [])
+            # Update first trajectory plot
+            ax1.clear()
+            ax1.set_title("Segment 1")
+            ax1.set_xlim(x_min, x_max)
+            ax1.set_ylim(y_min, y_max)
+            ax1.set_zlim(z_min, z_max)
+            ax1.set_xlabel('X')
+            ax1.set_ylabel('Y')
+            ax1.set_zlabel('Z')
             
-            return line1, point1, line2, point2
-        
-        # Animation function
-        def animate(i):
-            # Update first trajectory
-            frame_idx1 = min(i, len(traj1) - 1)
-            x1, y1, z1 = traj1[:frame_idx1+1, 0], traj1[:frame_idx1+1, 1], traj1[:frame_idx1+1, 2]
-            line1.set_data(x1, y1)
-            line1.set_3d_properties(z1)
-            point1._offsets3d = ([traj1[frame_idx1, 0]], [traj1[frame_idx1, 1]], [traj1[frame_idx1, 2]])
+            # Plot trajectory up to current frame
+            ax1.plot(traj1[:idx1+1, 0], traj1[:idx1+1, 1], traj1[:idx1+1, 2], 'r-', linewidth=2)
+            ax1.scatter([traj1[idx1, 0]], [traj1[idx1, 1]], [traj1[idx1, 2]], color='blue', s=50)
             
-            # Update second trajectory
-            frame_idx2 = min(i, len(traj2) - 1)
-            x2, y2, z2 = traj2[:frame_idx2+1, 0], traj2[:frame_idx2+1, 1], traj2[:frame_idx2+1, 2]
-            line2.set_data(x2, y2)
-            line2.set_3d_properties(z2)
-            point2._offsets3d = ([traj2[frame_idx2, 0]], [traj2[frame_idx2, 1]], [traj2[frame_idx2, 2]])
+            # Update second trajectory plot
+            ax2.clear()
+            ax2.set_title("Segment 2")
+            ax2.set_xlim(x_min, x_max)
+            ax2.set_ylim(y_min, y_max)
+            ax2.set_zlim(z_min, z_max)
+            ax2.set_xlabel('X')
+            ax2.set_ylabel('Y')
+            ax2.set_zlabel('Z')
             
-            # Rotate the view for better visualization
+            # Plot trajectory up to current frame
+            ax2.plot(traj2[:idx2+1, 0], traj2[:idx2+1, 1], traj2[:idx2+1, 2], 'r-', linewidth=2)
+            ax2.scatter([traj2[idx2, 0]], [traj2[idx2, 1]], [traj2[idx2, 2]], color='blue', s=50)
+            
+            # Rotate view
             for ax in [ax1, ax2]:
-                ax.view_init(elev=30, azim=i % 360)
+                ax.view_init(elev=30, azim=(frame % 360))
             
-            return line1, point1, line2, point2
+            # Save the frame
+            frame_path = os.path.join(frames_dir, f"traj_frame_{i}_step_{frame}.png")
+            plt.savefig(frame_path, dpi=100)
+            print(f"Saved trajectory frame {i} (step {frame}) to {frame_path}")
+            
+            # Add to generated files list
+            generated_files.append(frame_path)
         
-        # Create animation
-        max_frames = max(len(traj1), len(traj2))
-        ani = animation.FuncAnimation(
-            fig, animate, init_func=init, frames=max_frames,
-            interval=100, blit=True
-        )
+        # Create a combined image showing all key frames
+        combined_fig = plt.figure(figsize=(15, 10))
+        for i, frame in enumerate(key_frames):
+            ax = combined_fig.add_subplot(len(key_frames), 1, i+1)
+            frame_path = os.path.join(frames_dir, f"traj_frame_{i}_step_{frame}.png")
+            img = plt.imread(frame_path)
+            ax.imshow(img)
+            ax.set_title(f"Step {frame}")
+            ax.axis('off')
         
+        combined_path = os.path.join(frames_dir, "all_trajectory_frames.png")
         plt.tight_layout()
-        
-        # Try saving animation using multiple codec options
-        temp_anim_path = "temp_comparison_3d.mp4"
-        success = False
-        
-        # Try a sequence of codec configurations, from more advanced to simpler ones
-        codec_configs = [
-            # Try with default settings first
-            {'fps': 15, 'bitrate': 1800},
-            # Try with H.264 explicitly
-            {'fps': 15, 'bitrate': 1800, 'codec': 'h264', 'extra_args': ['-pix_fmt', 'yuv420p']},
-            # Try with MPEG4 codec
-            {'fps': 15, 'bitrate': 1800, 'codec': 'mpeg4'},
-            # Try a lower quality setting that might be more compatible
-            {'fps': 10, 'bitrate': 1000}
-        ]
-        
-        for config in codec_configs:
-            try:
-                print(f"Trying video encoding with config: {config}")
-                writer = animation.FFMpegWriter(**config)
-                ani.save(temp_anim_path, writer=writer)
-                success = True
-                print(f"Successfully saved 3D trajectory animation to {temp_anim_path}")
-                break
-            except Exception as e:
-                print(f"Failed with config {config}: {e}")
-        
-        # If all video attempts fail, save as a sequence of PNG frames
-        if not success:
-            print("Video encoding failed. Saving key frames as PNG images instead...")
-            frames_dir = "comparison_frames"
-            os.makedirs(frames_dir, exist_ok=True)
-            
-            # Save key frames as PNGs
-            num_frames = max(len(traj1), len(traj2))
-            key_frames = [0, num_frames // 4, num_frames // 2, 3 * num_frames // 4, num_frames - 1]
-            key_frames = [min(f, num_frames - 1) for f in key_frames]  # Ensure within bounds
-            
-            for i, frame in enumerate(key_frames):
-                # Update the figure for this frame
-                animate(frame)
-                
-                # Save the frame
-                frame_path = os.path.join(frames_dir, f"frame_{i}_step_{frame}.png")
-                plt.savefig(frame_path, dpi=100)
-                print(f"Saved frame {i} (step {frame}) to {frame_path}")
-                
-                # Add to generated videos list so it can be opened
-                generated_videos.append(frame_path)
-            
-            # Create a combined image showing all key frames
-            combined_fig = plt.figure(figsize=(15, 10))
-            for i, frame in enumerate(key_frames):
-                ax = combined_fig.add_subplot(len(key_frames), 1, i+1)
-                frame_path = os.path.join(frames_dir, f"frame_{i}_step_{frame}.png")
-                img = plt.imread(frame_path)
-                ax.imshow(img)
-                ax.set_title(f"Step {frame}")
-                ax.axis('off')
-            
-            combined_path = os.path.join(frames_dir, "all_frames.png")
-            plt.tight_layout()
-            plt.savefig(combined_path, dpi=100)
-            print(f"Saved combined frames to {combined_path}")
-            generated_videos.append(combined_path)
-            
-            # Replace the failed video path with the combined image
-            if temp_anim_path in generated_videos:
-                generated_videos.remove(temp_anim_path)
+        plt.savefig(combined_path, dpi=100)
+        print(f"Saved combined trajectory frames to {combined_path}")
+        generated_files.append(combined_path)
         
         plt.close(fig)
+        plt.close(combined_fig)
         
-        # Track generated videos
-        generated_videos = [temp_anim_path]
-        
-        # Also create observation video if images are available
+        # Also create observation visualization if images are available
         if "image" in data:
-            print("Creating observation video...")
+            print("Creating observation visualizations...")
             
-            # Create side-by-side video with observations
-            temp_video = "temp_comparison_obs.mp4"
-            try:
-                create_comparison_video(
-                    eef_positions,
-                    (start_idx1, end_idx1),
-                    [(start_idx2, end_idx2)], 
-                    [0],  # Placeholder for distance
-                    dataset_indicators=None,
-                    output_file=temp_video,
-                    data=data
-                )
-                print(f"Saved observation video to {temp_video}")
-                generated_videos.append(temp_video)
-            except Exception as e:
-                print(f"Error creating observation video: {e}")
-                print("Saving observation frames as images instead...")
+            # Create a directory for the observation frames
+            obs_frames_dir = "observation_frames"
+            os.makedirs(obs_frames_dir, exist_ok=True)
+            
+            # Get image sequences
+            img_seq1 = data["image"][start_idx1:end_idx1+1].cpu().numpy()
+            img_seq2 = data["image"][start_idx2:end_idx2+1].cpu().numpy()
+            
+            # Determine key frames to save
+            max_frames = max(len(img_seq1), len(img_seq2))
+            key_frames = [0, max_frames // 4, max_frames // 2, 3 * max_frames // 4, min(max_frames - 1, max_frames - 1)]
+            
+            # Create a combined figure for each key frame
+            for i, frame_idx in enumerate(key_frames):
+                # Get the appropriate frame index for each sequence
+                idx1 = min(frame_idx, len(img_seq1) - 1)
+                idx2 = min(frame_idx, len(img_seq2) - 1)
                 
-                # Create a directory for the observation frames
-                frames_dir = "observation_frames"
-                os.makedirs(frames_dir, exist_ok=True)
+                # Create a figure with the two images side by side
+                fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10, 5))
                 
-                # Get image sequences
-                img_seq1 = data["image"][start_idx1:end_idx1+1].cpu().numpy()
-                img_seq2 = data["image"][start_idx2:end_idx2+1].cpu().numpy()
+                # Show the images
+                ax1.imshow(img_seq1[idx1])
+                ax1.set_title(f"Segment 1 - Frame {idx1}")
+                ax1.axis('off')
                 
-                # Determine key frames to save
-                max_frames = max(len(img_seq1), len(img_seq2))
-                key_frames = [0, max_frames // 4, max_frames // 2, 3 * max_frames // 4, min(max_frames - 1, max_frames - 1)]
+                ax2.imshow(img_seq2[idx2])
+                ax2.set_title(f"Segment 2 - Frame {idx2}")
+                ax2.axis('off')
                 
-                # Create a combined figure for each key frame
-                for i, frame_idx in enumerate(key_frames):
-                    # Get the appropriate frame index for each sequence
-                    idx1 = min(frame_idx, len(img_seq1) - 1)
-                    idx2 = min(frame_idx, len(img_seq2) - 1)
-                    
-                    # Create a figure with the two images side by side
-                    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10, 5))
-                    
-                    # Show the images
-                    ax1.imshow(img_seq1[idx1])
-                    ax1.set_title(f"Segment 1 - Frame {idx1}")
-                    ax1.axis('off')
-                    
-                    ax2.imshow(img_seq2[idx2])
-                    ax2.set_title(f"Segment 2 - Frame {idx2}")
-                    ax2.axis('off')
-                    
-                    # Save the figure
-                    frame_path = os.path.join(frames_dir, f"obs_frame_{i}_step_{frame_idx}.png")
-                    plt.savefig(frame_path, dpi=100)
-                    plt.close(fig)
-                    print(f"Saved observation frame {i} (step {frame_idx}) to {frame_path}")
-                    
-                    # Add to generated videos list
-                    generated_videos.append(frame_path)
-                
-                # Create a combined figure showing all key frames
-                fig = plt.figure(figsize=(15, 10))
-                gs = gridspec.GridSpec(len(key_frames), 2)
-                
-                for i, frame_idx in enumerate(key_frames):
-                    # Get the appropriate frame index for each sequence
-                    idx1 = min(frame_idx, len(img_seq1) - 1)
-                    idx2 = min(frame_idx, len(img_seq2) - 1)
-                    
-                    # Add subplots for this frame
-                    ax1 = fig.add_subplot(gs[i, 0])
-                    ax2 = fig.add_subplot(gs[i, 1])
-                    
-                    # Show the images
-                    ax1.imshow(img_seq1[idx1])
-                    ax1.set_title(f"Segment 1 - Frame {idx1}")
-                    ax1.axis('off')
-                    
-                    ax2.imshow(img_seq2[idx2])
-                    ax2.set_title(f"Segment 2 - Frame {idx2}")
-                    ax2.axis('off')
-                
-                # Save the combined figure
-                combined_path = os.path.join(frames_dir, "all_observation_frames.png")
-                plt.tight_layout()
-                plt.savefig(combined_path, dpi=100)
+                # Save the figure
+                frame_path = os.path.join(obs_frames_dir, f"obs_frame_{i}_step_{frame_idx}.png")
+                plt.savefig(frame_path, dpi=100)
                 plt.close(fig)
-                print(f"Saved combined observation frames to {combined_path}")
-                generated_videos.append(combined_path)
+                print(f"Saved observation frame {i} (step {frame_idx}) to {frame_path}")
+                
+                # Add to generated files list
+                generated_files.append(frame_path)
+            
+            # Create a combined figure showing all key frames
+            fig = plt.figure(figsize=(15, 10))
+            gs = gridspec.GridSpec(len(key_frames), 2)
+            
+            for i, frame_idx in enumerate(key_frames):
+                # Get the appropriate frame index for each sequence
+                idx1 = min(frame_idx, len(img_seq1) - 1)
+                idx2 = min(frame_idx, len(img_seq2) - 1)
+                
+                # Add subplots for this frame
+                ax1 = fig.add_subplot(gs[i, 0])
+                ax2 = fig.add_subplot(gs[i, 1])
+                
+                # Show the images
+                ax1.imshow(img_seq1[idx1])
+                ax1.set_title(f"Segment 1 - Frame {idx1}")
+                ax1.axis('off')
+                
+                ax2.imshow(img_seq2[idx2])
+                ax2.set_title(f"Segment 2 - Frame {idx2}")
+                ax2.axis('off')
+            
+            # Save the combined figure
+            combined_path = os.path.join(obs_frames_dir, "all_observation_frames.png")
+            plt.tight_layout()
+            plt.savefig(combined_path, dpi=100)
+            plt.close(fig)
+            print(f"Saved combined observation frames to {combined_path}")
+            generated_files.append(combined_path)
+        
+        # Offer to open visualizations if not in notebook
+        if not is_notebook:
+            for file_path in generated_files:
+                if os.path.exists(file_path) and os.path.getsize(file_path) > 0:
+                    open_file = input(f"Open {file_path}? (y/n): ").strip().lower()
+                    if open_file == 'y':
+                        open_video_file(file_path)
     else:
-        print("\n[Videos skipped to save time]")
+        print("\n[Visualizations skipped to save time]")
     
     # Get user preference
     while True:
