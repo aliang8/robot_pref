@@ -521,6 +521,43 @@ def train_reward_model(model, train_loader, val_loader, device, num_epochs=50, l
     
     return model, train_losses, val_losses
 
+def load_preferences_data(file_path):
+    """Load preference data saved from collect_cluster_preferences.py.
+    
+    Args:
+        file_path: Path to saved preference data pickle file
+        
+    Returns:
+        Tuple of (segment_pairs, segment_indices, preferences, segments)
+    """
+    print(f"Loading preference data from {file_path}")
+    with open(file_path, 'rb') as f:
+        pref_data = pickle.load(f)
+    
+    # Extract the necessary components
+    segment_pairs = pref_data['segment_pairs']
+    segment_indices = pref_data['segment_indices']
+    
+    # Check if we have collected human preferences or need to use synthetic ones
+    if 'human_preferences' in pref_data and len(pref_data['human_preferences']) > 0:
+        print("Using collected human preferences")
+        preferences = pref_data['human_preferences']
+    else:
+        print("Using synthetic preferences (based on rewards)")
+        preferences = pref_data['synthetic_preferences']
+    
+    # Check if segments are included in the preference data
+    segments = None
+    if 'segments' in pref_data:
+        segments = pref_data['segments']
+        print(f"Found {len(segments)} segments in preference data")
+    elif 'original_segments' in pref_data:
+        segments = pref_data['original_segments']
+        print(f"Found {len(segments)} original segments in preference data")
+    
+    print(f"Loaded {len(segment_pairs)} preference pairs")
+    return segment_pairs, segment_indices, preferences, segments
+
 @hydra.main(config_path="config/train_reward_model", config_name="config", version_base=None)
 def main(cfg: DictConfig):
     """Train a state-action reward model using BT loss with Hydra config."""
@@ -573,7 +610,10 @@ def main(cfg: DictConfig):
     if device.type == "cpu":
         print("Running in CPU mode")
         effective_pin_memory = False
-        
+    
+    # Initialize variables
+    segments = None
+    
     # Load data
     print(f"Loading data from {cfg.data.data_path}")
     data = load_tensordict(cfg.data.data_path)
@@ -586,22 +626,46 @@ def main(cfg: DictConfig):
     
     print(f"Observation dimension: {state_dim}, Action dimension: {action_dim}")
     
-    print(f"Creating segments of length {cfg.data.segment_length}...")
-    num_segments = cfg.data.num_segments if cfg.data.num_segments > 0 else None
-    
     # Ensure data is on CPU before creating segments to avoid device mismatch issues
     data_cpu = {k: v.cpu() if isinstance(v, torch.Tensor) else v for k, v in data.items()}
     
-    segments, segment_indices = create_segments(data_cpu, segment_length=cfg.data.segment_length, max_segments=num_segments)
-    
-    # Generate preference pairs
-    print(f"Generating {cfg.data.num_pairs} preference pairs...")
-    segment_pairs, preferences = sample_segment_pairs(
-        segments, 
-        segment_indices, 
-        data_cpu["reward"], 
-        n_pairs=cfg.data.num_pairs
-    )
+    # Check if we have pre-collected preference data
+    if hasattr(cfg.data, 'preferences_data_path') and cfg.data.preferences_data_path:
+        # Load pre-collected preferences
+        try:
+            segment_pairs, segment_indices, preferences, loaded_segments = load_preferences_data(cfg.data.preferences_data_path)
+            segments = loaded_segments  # Use loaded segments if available
+        except Exception as e:
+            print(f"Error loading preference data: {e}")
+            print("Falling back to generating preferences from data")
+            
+            # Generate segments and preference pairs from scratch
+            print(f"Creating segments of length {cfg.data.segment_length}...")
+            num_segments = cfg.data.num_segments if cfg.data.num_segments > 0 else None
+            segments, segment_indices = create_segments(data_cpu, segment_length=cfg.data.segment_length, max_segments=num_segments)
+            
+            # Generate preference pairs
+            print(f"Generating {cfg.data.num_pairs} preference pairs...")
+            segment_pairs, preferences = sample_segment_pairs(
+                segments, 
+                segment_indices, 
+                data_cpu["reward"], 
+                n_pairs=cfg.data.num_pairs
+            )
+    else:
+        # Generate segments and preference pairs from scratch
+        print(f"Creating segments of length {cfg.data.segment_length}...")
+        num_segments = cfg.data.num_segments if cfg.data.num_segments > 0 else None
+        segments, segment_indices = create_segments(data_cpu, segment_length=cfg.data.segment_length, max_segments=num_segments)
+        
+        # Generate preference pairs
+        print(f"Generating {cfg.data.num_pairs} preference pairs...")
+        segment_pairs, preferences = sample_segment_pairs(
+            segments, 
+            segment_indices, 
+            data_cpu["reward"], 
+            n_pairs=cfg.data.num_pairs
+        )
     
     # Create dataset
     preference_dataset = PreferenceDataset(
