@@ -6,6 +6,8 @@ import pickle
 import argparse
 import itertools
 import sys
+import subprocess
+import platform
 from pathlib import Path
 from tqdm import tqdm
 import matplotlib.pyplot as plt
@@ -253,6 +255,9 @@ def present_preference_query(data, segment1, segment2, query_id=None, skip_video
         plt.close(fig)
         print(f"Saved 3D trajectory animation to {temp_anim_path}")
         
+        # Track generated videos
+        generated_videos = [temp_anim_path]
+        
         # Also create observation video if images are available
         if "image" in data:
             print("Creating observation video...")
@@ -269,6 +274,14 @@ def present_preference_query(data, segment1, segment2, query_id=None, skip_video
                 data=data
             )
             print(f"Saved observation video to {temp_video}")
+            generated_videos.append(temp_video)
+        
+        # Offer to open videos if not in notebook
+        if not is_notebook:
+            for video_path in generated_videos:
+                open_video = input(f"Open {video_path}? (y/n): ").strip().lower()
+                if open_video == 'y':
+                    open_video_file(video_path)
     else:
         print("\n[Videos skipped to save time]")
     
@@ -500,6 +513,37 @@ def create_preference_dataset(data, segment_indices, augmented_preferences, outp
     print(f"Saved preference dataset with {len(preference_labels)} preferences")
     
     return preference_dataset
+
+def open_video_file(video_path):
+    """Open a video file using the system's default video player.
+    
+    Args:
+        video_path: Path to the video file
+    """
+    try:
+        # Check if file exists
+        if not os.path.exists(video_path):
+            print(f"Video file not found: {video_path}")
+            return False
+            
+        # Get the operating system
+        system = platform.system()
+        
+        if system == 'Windows':
+            # Windows
+            os.startfile(video_path)
+        elif system == 'Darwin':
+            # macOS
+            subprocess.call(['open', video_path])
+        else:
+            # Linux or other Unix-like systems
+            subprocess.call(['xdg-open', video_path])
+            
+        print(f"Opened video: {video_path}")
+        return True
+    except Exception as e:
+        print(f"Error opening video: {e}")
+        return False
 
 def main():
     parser = argparse.ArgumentParser(description="Collect and augment preferences based on cluster representatives")
