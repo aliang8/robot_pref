@@ -250,7 +250,13 @@ def present_preference_query(data, segment1, segment2, query_id=None, skip_video
         
         # Save animation to file
         temp_anim_path = "temp_comparison_3d.mp4"
-        writer = animation.FFMpegWriter(fps=15, metadata=dict(artist='Me'), bitrate=1800)
+        writer = animation.FFMpegWriter(
+            fps=15, 
+            metadata=dict(artist='Me'), 
+            bitrate=1800,
+            codec='libvpx',  # Use VP8 instead of H.264
+            extra_args=['-pix_fmt', 'yuv420p']  # Ensure pixel format compatibility
+        )
         ani.save(temp_anim_path, writer=writer)
         plt.close(fig)
         print(f"Saved 3D trajectory animation to {temp_anim_path}")
