@@ -614,45 +614,27 @@ def main(cfg: DictConfig):
     # Initialize variables
     segments = None
     
-    # Load data
-    print(f"Loading data from {cfg.data.data_path}")
-    data = load_tensordict(cfg.data.data_path)
-    
-    # Get observation and action dimensions
-    observations = data["obs"] if "obs" in data else data["state"]
-    actions = data["action"]
-    state_dim = observations.shape[1]
-    action_dim = actions.shape[1]
-    
-    print(f"Observation dimension: {state_dim}, Action dimension: {action_dim}")
-    
-    # Ensure data is on CPU before creating segments to avoid device mismatch issues
-    data_cpu = {k: v.cpu() if isinstance(v, torch.Tensor) else v for k, v in data.items()}
-    
     # Check if we have pre-collected preference data
     if hasattr(cfg.data, 'preferences_data_path') and cfg.data.preferences_data_path:
         # Load pre-collected preferences
-        try:
-            segment_pairs, segment_indices, preferences, loaded_segments = load_preferences_data(cfg.data.preferences_data_path)
-            segments = loaded_segments  # Use loaded segments if available
-        except Exception as e:
-            print(f"Error loading preference data: {e}")
-            print("Falling back to generating preferences from data")
-            
-            # Generate segments and preference pairs from scratch
-            print(f"Creating segments of length {cfg.data.segment_length}...")
-            num_segments = cfg.data.num_segments if cfg.data.num_segments > 0 else None
-            segments, segment_indices = create_segments(data_cpu, segment_length=cfg.data.segment_length, max_segments=num_segments)
-            
-            # Generate preference pairs
-            print(f"Generating {cfg.data.num_pairs} preference pairs...")
-            segment_pairs, preferences = sample_segment_pairs(
-                segments, 
-                segment_indices, 
-                data_cpu["reward"], 
-                n_pairs=cfg.data.num_pairs
-            )
+        segment_pairs, segment_indices, preferences, loaded_segments = load_preferences_data(cfg.data.preferences_data_path)
+        segments = loaded_segments  # Use loaded segments if available
     else:
+        # Load data
+        print(f"Loading data from {cfg.data.data_path}")
+        data = load_tensordict(cfg.data.data_path)
+        
+        # Get observation and action dimensions
+        observations = data["obs"] if "obs" in data else data["state"]
+        actions = data["action"]
+        state_dim = observations.shape[1]
+        action_dim = actions.shape[1]
+        
+        print(f"Observation dimension: {state_dim}, Action dimension: {action_dim}")
+        
+        # Ensure data is on CPU before creating segments to avoid device mismatch issues
+        data_cpu = {k: v.cpu() if isinstance(v, torch.Tensor) else v for k, v in data.items()}
+        
         # Generate segments and preference pairs from scratch
         print(f"Creating segments of length {cfg.data.segment_length}...")
         num_segments = cfg.data.num_segments if cfg.data.num_segments > 0 else None

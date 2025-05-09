@@ -6,6 +6,7 @@ data:
   segment_length: 20
   num_segments: 5000
   num_pairs: 5000
+  preferences_data_path: "/scr/aliang80/robot_pref/results/preferences/preference_dataset.pkl"
   
 # Model architecture
 model:
