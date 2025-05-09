@@ -138,7 +138,7 @@ def present_preference_query(data, segment1, segment2, query_id=None, skip_video
     print("=" * 40)
     
     # Get end-effector trajectories
-    eef_positions = data["obs"][:, :3]
+    eef_positions = data["obs"][:, :3] if "obs" in data else data["state"][:, :3]
     
     # Display the two segments textually
     print(f"Segment 1: {start_idx1}-{end_idx1} (Length: {end_idx1-start_idx1+1})")
@@ -146,31 +146,129 @@ def present_preference_query(data, segment1, segment2, query_id=None, skip_video
     
     # Display animations and video only if not skipping
     if not skip_videos:
-        print("\nCreating trajectory animations...")
+        print("\nRendering trajectories...")
         
-        print("Segment 1:")
-        anim1 = create_eef_trajectory_animation(eef_positions, start_idx1, end_idx1, title="Segment 1")
+        # Create two EEF trajectory animations
+        import matplotlib.pyplot as plt
+        from matplotlib import animation
+        import matplotlib.gridspec as gridspec
         
-        print("Segment 2:")
-        anim2 = create_eef_trajectory_animation(eef_positions, start_idx2, end_idx2, title="Segment 2")
+        # 3D animations of EEF positions
+        fig = plt.figure(figsize=(12, 6))
+        gs = gridspec.GridSpec(1, 2, width_ratios=[1, 1])
         
-        if is_notebook:
-            display(HTML(anim1.to_jshtml()))
-            display(HTML(anim2.to_jshtml()))
+        # First trajectory
+        ax1 = fig.add_subplot(gs[0], projection='3d')
+        ax1.set_title("Segment 1")
         
-        # If running in interactive mode, create side-by-side video
-        temp_video = "temp_comparison.mp4"
-        create_comparison_video(
-            eef_positions,
-            (start_idx1, end_idx1),
-            [(start_idx2, end_idx2)], 
-            [0],  # Placeholder for distance
-            dataset_indicators=None,
-            output_file=temp_video,
-            data=data if "image" in data else None
+        # Second trajectory
+        ax2 = fig.add_subplot(gs[1], projection='3d')
+        ax2.set_title("Segment 2")
+        
+        # Get trajectory data
+        traj1 = eef_positions[start_idx1:end_idx1+1].cpu().numpy()
+        traj2 = eef_positions[start_idx2:end_idx2+1].cpu().numpy()
+        
+        # Set the same scale for both plots to make comparison fair
+        all_points = np.vstack([traj1, traj2])
+        x_min, y_min, z_min = np.min(all_points, axis=0)
+        x_max, y_max, z_max = np.max(all_points, axis=0)
+        
+        # Add padding
+        padding = 0.1
+        x_range = max(x_max - x_min, 0.01)
+        y_range = max(y_max - y_min, 0.01)
+        z_range = max(z_max - z_min, 0.01)
+        
+        x_min -= padding * x_range
+        y_min -= padding * y_range
+        z_min -= padding * z_range
+        x_max += padding * x_range
+        y_max += padding * y_range
+        z_max += padding * z_range
+        
+        # Set limits for both axes
+        for ax in [ax1, ax2]:
+            ax.set_xlim(x_min, x_max)
+            ax.set_ylim(y_min, y_max)
+            ax.set_zlim(z_min, z_max)
+            ax.set_xlabel('X')
+            ax.set_ylabel('Y')
+            ax.set_zlabel('Z')
+        
+        # Initialize lines
+        line1, = ax1.plot([], [], [], 'r-', linewidth=2)
+        point1 = ax1.scatter([], [], [], color='blue', s=50)
+        
+        line2, = ax2.plot([], [], [], 'r-', linewidth=2)
+        point2 = ax2.scatter([], [], [], color='blue', s=50)
+        
+        # Function to initialize animation
+        def init():
+            line1.set_data([], [])
+            line1.set_3d_properties([])
+            point1._offsets3d = ([], [], [])
+            
+            line2.set_data([], [])
+            line2.set_3d_properties([])
+            point2._offsets3d = ([], [], [])
+            
+            return line1, point1, line2, point2
+        
+        # Animation function
+        def animate(i):
+            # Update first trajectory
+            frame_idx1 = min(i, len(traj1) - 1)
+            x1, y1, z1 = traj1[:frame_idx1+1, 0], traj1[:frame_idx1+1, 1], traj1[:frame_idx1+1, 2]
+            line1.set_data(x1, y1)
+            line1.set_3d_properties(z1)
+            point1._offsets3d = ([traj1[frame_idx1, 0]], [traj1[frame_idx1, 1]], [traj1[frame_idx1, 2]])
+            
+            # Update second trajectory
+            frame_idx2 = min(i, len(traj2) - 1)
+            x2, y2, z2 = traj2[:frame_idx2+1, 0], traj2[:frame_idx2+1, 1], traj2[:frame_idx2+1, 2]
+            line2.set_data(x2, y2)
+            line2.set_3d_properties(z2)
+            point2._offsets3d = ([traj2[frame_idx2, 0]], [traj2[frame_idx2, 1]], [traj2[frame_idx2, 2]])
+            
+            # Rotate the view for better visualization
+            for ax in [ax1, ax2]:
+                ax.view_init(elev=30, azim=i % 360)
+            
+            return line1, point1, line2, point2
+        
+        # Create animation
+        max_frames = max(len(traj1), len(traj2))
+        ani = animation.FuncAnimation(
+            fig, animate, init_func=init, frames=max_frames,
+            interval=100, blit=True
         )
         
-        print("\nCreated comparison video:", temp_video)
+        plt.tight_layout()
+        
+        # Save animation to file
+        temp_anim_path = "temp_comparison_3d.mp4"
+        writer = animation.FFMpegWriter(fps=15, metadata=dict(artist='Me'), bitrate=1800)
+        ani.save(temp_anim_path, writer=writer)
+        plt.close(fig)
+        print(f"Saved 3D trajectory animation to {temp_anim_path}")
+        
+        # Also create observation video if images are available
+        if "image" in data:
+            print("Creating observation video...")
+            
+            # Create side-by-side video with observations
+            temp_video = "temp_comparison_obs.mp4"
+            create_comparison_video(
+                eef_positions,
+                (start_idx1, end_idx1),
+                [(start_idx2, end_idx2)], 
+                [0],  # Placeholder for distance
+                dataset_indicators=None,
+                output_file=temp_video,
+                data=data
+            )
+            print(f"Saved observation video to {temp_video}")
     else:
         print("\n[Videos skipped to save time]")
     
