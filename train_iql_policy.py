@@ -411,6 +411,23 @@ def log_evaluation_to_wandb(metrics, epoch=None, prefix=""):
     if log_dict and wandb.run:
         wandb.log(log_dict, step=epoch if epoch is not None else None)
 
+def create_env_with_different_seed(dataset_name):
+    """Create a function that returns a new environment with a different seed each time.
+    
+    Args:
+        dataset_name: Name of the dataset to create an environment for
+        
+    Returns:
+        A function that creates a new environment with a random seed
+    """
+    # Define and return a creator function
+    def env_creator():
+        # Generate a unique seed each time this function is called
+        unique_seed = int(time.time() * 1000) % 100000 + random.randint(0, 10000)
+        return get_metaworld_env(dataset_name, seed=unique_seed)
+        
+    return env_creator
+
 @hydra.main(config_path="config/train_iql", config_name="config", version_base=None)
 def main(cfg: DictConfig):
     """Train an IQL policy using learned reward model with Hydra config."""
@@ -491,18 +508,15 @@ def main(cfg: DictConfig):
         dataset_name = Path(cfg.data.data_path).stem
         print(f"Creating environment for evaluation using dataset: {dataset_name}")
         
-        # Create a function that returns a new environment with a different seed each time
-        def create_env_with_different_seed():
-            # Generate a unique seed each time this function is called
-            unique_seed = int(time.time() * 1000) % 100000 + random.randint(0, 10000)
-            return get_metaworld_env(dataset_name, seed=unique_seed)
+        # Get the environment creator function
+        env_creator = create_env_with_different_seed(dataset_name)
         
         # Create one environment to verify it works
-        test_env = create_env_with_different_seed()
+        test_env = env_creator()
         print("Successfully created environment for evaluation")
         
-        # Use the function as the environment for evaluation
-        env = create_env_with_different_seed
+        # Use the function itself as the environment creator for evaluation
+        env = env_creator
 
     # Initialize IQL algorithm
     print("Initializing IQL algorithm...")
