@@ -32,6 +32,7 @@ evaluation:
   record_video: false
   parallel_eval: true
   eval_workers: null  # null will use min(n_episodes, cpu_count)
+  video_fps: 30  # Frames per second for recorded videos
 
 # Output parameters
 output:
