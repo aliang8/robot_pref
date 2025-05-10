@@ -531,44 +531,30 @@ def load_preferences_data(file_path):
         Tuple of (segment_pairs, segment_indices, preferences, segments)
     """
     print(f"Loading preference data from {file_path}")
-    try:
-        with open(file_path, 'rb') as f:
-            pref_data = pickle.load(f)
-        
-        # Extract the necessary components
-        segment_pairs = pref_data['segment_pairs']
-        segment_indices = pref_data['segment_indices']
-        
-        # Get preferences - different files might have different keys
-        if 'preference_labels' in pref_data:
-            print("Using preference_labels from dataset")
-            preferences = pref_data['preference_labels']
-        elif 'human_preferences' in pref_data and len(pref_data['human_preferences']) > 0:
-            print("Using collected human preferences")
-            preferences = pref_data['human_preferences']
-        elif 'synthetic_preferences' in pref_data:
-            print("Using synthetic preferences (based on rewards)")
-            preferences = pref_data['synthetic_preferences']
-        else:
-            print("Could not find preferences in dataset! Available keys:", list(pref_data.keys()))
-            raise KeyError("No preference data found in file")
-        
-        # Check if segments are included in the preference data
-        segments = None
-        if 'segments' in pref_data:
-            segments = pref_data['segments']
-            print(f"Found {len(segments)} segments in preference data")
-        elif 'original_segments' in pref_data:
-            segments = pref_data['original_segments']
-            print(f"Found {len(segments)} original segments in preference data")
-        
-        print(f"Loaded {len(segment_pairs)} preference pairs")
-        return segment_pairs, segment_indices, preferences, segments
-    except Exception as e:
-        print(f"Error loading preference data: {e}")
-        import traceback
-        traceback.print_exc()
-        raise ValueError(f"Failed to load preference data from {file_path}: {e}")
+    
+    # Load data with torch.load instead of pickle
+    pref_data = torch.load(file_path)
+    
+    # Extract the necessary components
+    segment_pairs = pref_data['segment_pairs']
+    segment_indices = pref_data['segment_indices']
+    
+    # Get preferences
+    if 'preference_labels' in pref_data:
+        print("Using preference_labels from dataset")
+        preferences = pref_data['preference_labels']
+    else:
+        print("Could not find preferences in dataset! Available keys:", list(pref_data.keys()))
+        raise KeyError("No preference data found in file")
+    
+    # Check if data is included in the preference data
+    data = None
+    if 'data' in pref_data:
+        data = pref_data['data']
+        print(f"Found embedded data with fields: {list(data.keys())}")
+    
+    print(f"Loaded {len(segment_pairs)} preference pairs")
+    return segment_pairs, segment_indices, preferences, data
 
 @hydra.main(config_path="config/train_reward_model", config_name="config", version_base=None)
 def main(cfg: DictConfig):
@@ -634,57 +620,32 @@ def main(cfg: DictConfig):
     
     # First, try to load from preference data if specified
     if hasattr(cfg.data, 'preferences_data_path') and cfg.data.preferences_data_path:
-        try:
-            print(f"Loading preference data from {cfg.data.preferences_data_path}")
+        print(f"Loading preference data from {cfg.data.preferences_data_path}")
+        
+        # Load the preference data
+        segment_pairs, segment_indices, preferences, embedded_data = load_preferences_data(cfg.data.preferences_data_path)
+        
+        # Use embedded data if available
+        if embedded_data is not None:
+            print("Using embedded data from preference file")
+            data_cpu = embedded_data
             
-            # Load the preference data file
-            with open(cfg.data.preferences_data_path, 'rb') as f:
-                pref_data = pickle.load(f)
+            # Get observation and action dimensions from embedded data
+            if 'obs' in data_cpu:
+                observations = data_cpu['obs']
+                state_dim = observations.shape[1]
+            elif 'state' in data_cpu:
+                observations = data_cpu['state']
+                state_dim = observations.shape[1]
             
-            # Check if it contains embedded data
-            if 'data' in pref_data:
-                print("Found embedded data in preference file, using it directly")
-                data_cpu = pref_data['data']
-                
-                # Get observation and action dimensions from embedded data
-                if 'obs' in data_cpu:
-                    observations = data_cpu['obs']
-                    state_dim = observations.shape[1]
-                elif 'state' in data_cpu:
-                    observations = data_cpu['state']
-                    state_dim = observations.shape[1]
-                
-                if 'action' in data_cpu:
-                    actions = data_cpu['action']
-                    action_dim = actions.shape[1]
-                
-                print(f"Using embedded data with fields: {list(data_cpu.keys())}")
-                print(f"Observation shape: {observations.shape}, Action shape: {actions.shape if 'action' in data_cpu else 'N/A'}")
+            if 'action' in data_cpu:
+                actions = data_cpu['action']
+                action_dim = actions.shape[1]
             
-            # Extract other necessary components
-            if 'segment_pairs' in pref_data:
-                segment_pairs = pref_data['segment_pairs']
-            if 'segment_indices' in pref_data:
-                segment_indices = pref_data['segment_indices']
-            if 'preference_labels' in pref_data:
-                preferences = pref_data['preference_labels']
-            elif 'preferences' in pref_data:
-                preferences = pref_data['preferences']
-            
-            # Extract segments if available
-            if 'segments' in pref_data:
-                segments = pref_data['segments']
-                print(f"Found {len(segments)} extracted segments in preference data")
-            
-            # Print some stats
-            if segment_pairs is not None:
-                print(f"Loaded {len(segment_pairs)} preference pairs")
-            if segment_indices is not None:
-                print(f"Loaded {len(segment_indices)} segment indices")
-            
-        except Exception as e:
-            print(f"Error loading preference data: {e}")
-            print("Will fall back to original data file")
+            print(f"Embedded data contains fields: {list(data_cpu.keys())}")
+            print(f"Observation shape: {observations.shape}, Action shape: {actions.shape if 'action' in data_cpu else 'N/A'}")
+        else:
+            print("No embedded data found in preference file. Will load from original data file.")
     
     # If we don't have data yet, load from the original file
     if data_cpu is None:
@@ -729,7 +690,7 @@ def main(cfg: DictConfig):
             )
     
     print(f"Final data stats - Observation dimension: {state_dim}, Action dimension: {action_dim}")
-    print(f"Working with {len(segment_pairs)} preference pairs across {len(segment_indices)} segments")
+    print(f"Working with {len(segment_pairs) if segment_pairs is not None else 0} preference pairs across {len(segment_indices) if segment_indices is not None else 0} segments")
     
     # Create dataset
     preference_dataset = PreferenceDataset(
@@ -904,8 +865,8 @@ def main(cfg: DictConfig):
     # Save segment info
     segment_info = {
         "segment_length": cfg.data.segment_length,
-        "num_segments": len(segments),
-        "num_pairs": len(segment_pairs),
+        "num_segments": len(segments) if segments is not None else 0,
+        "num_pairs": len(segment_pairs) if segment_pairs is not None else 0,
         "observation_dim": state_dim,
         "action_dim": action_dim,
         "training_losses": train_losses,

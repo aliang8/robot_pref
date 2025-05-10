@@ -14,6 +14,7 @@ import matplotlib.pyplot as plt
 from matplotlib import animation
 import matplotlib.gridspec as gridspec
 from IPython.display import HTML, display
+import time
 
 # For running in interactive environments
 is_notebook = 'ipykernel' in sys.modules
@@ -377,7 +378,6 @@ def create_preference_dataset(data, segment_indices, augmented_preferences, outp
         preference_labels.append(pref)
     
     # Create compact data representation with only necessary fields
-    # This avoids storing large image data but keeps needed fields like obs and action
     compact_data = {}
     essential_fields = ['obs', 'action', 'episode', 'reward']
     
@@ -388,43 +388,28 @@ def create_preference_dataset(data, segment_indices, augmented_preferences, outp
             # Clone to avoid modifying original data and ensure it's on CPU
             compact_data[field] = data[field].clone().cpu() if isinstance(data[field], torch.Tensor) else data[field]
     
-    # Create dataset
+    # Create standardized dataset structure
     preference_dataset = {
-        'data': compact_data,           # Include the compact data directly
-        'segment_indices': segment_indices,
-        'segment_pairs': segment_pairs,
-        'preference_labels': preference_labels,
+        'data': compact_data,                # Essential tensor data
+        'segment_indices': segment_indices,  # Indices for segments
+        'segment_pairs': segment_pairs,      # Pairs for preference learning 
+        'preference_labels': preference_labels,  # Preference labels (1=first preferred, 2=second)
         'metadata': {
+            'source_file': data.get('_source_path', 'unknown'),
             'n_segments': len(segment_indices),
-            'n_preferences': len(preference_labels),
-            'data_path': data.get('_source_path', 'unknown'),
+            'n_pairs': len(preference_labels),
+            'creation_date': time.strftime("%Y-%m-%d %H:%M:%S"),
             'included_fields': list(compact_data.keys())
         }
     }
     
-    # Save dataset
+    # Create directory if needed
     os.makedirs(os.path.dirname(output_file), exist_ok=True)
     
-    try:
-        print(f"Saving preference dataset to {output_file}...")
-        with open(output_file, 'wb') as f:
-            pickle.dump(preference_dataset, f)
-        
-        print(f"Successfully saved preference dataset with {len(preference_labels)} preferences")
-        print(f"Included essential data fields: {list(compact_data.keys())}")
-        
-    except Exception as e:
-        print(f"Error saving full dataset: {e}")
-        print("Trying to save without data field...")
-        
-        # Create a lightweight version without the data field
-        light_dataset = preference_dataset.copy()
-        light_dataset.pop('data', None)
-        light_file = os.path.splitext(output_file)[0] + "_light.pkl"
-        
-        with open(light_file, 'wb') as f:
-            pickle.dump(light_dataset, f)
-        print(f"Saved lightweight version to {light_file}")
+    # Save dataset directly
+    print(f"Saving preference dataset to {output_file} with {len(preference_labels)} preferences")
+    torch.save(preference_dataset, output_file)
+    print(f"Successfully saved preference dataset with included fields: {list(compact_data.keys())}")
     
     return preference_dataset
 
@@ -695,7 +680,7 @@ def main():
         data = {}
         
         # Check which fields are available in preprocessed data
-        essential_fields = ['obs', 'state', 'image', 'episode', 'reward']
+        essential_fields = ['obs', 'state', 'image', 'episode', 'reward', 'action']
         missing_fields = []
         
         for field in essential_fields:
