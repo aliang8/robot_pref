@@ -1,12 +1,15 @@
-# Hydra config for IQL policy training
+# Complete IQL configuration file
+algorithm: iql
 
-run_id: null
-debug: false
+# Include common settings
+defaults:
+  - common
+  - _self_  # Allow this config to override common settings
 
 # Data parameters
 data:
   data_path: "/scr2/shared/pref/datasets/robomimic/lift/mg_image_dense.pt"
-  reward_model_path: "reward_model/state_action_reward_model.pt"
+  reward_model_path: "/scr/matthewh6/robot_pref/reward_model/state_action_reward_model.pt"
   max_segments: 0
   reward_batch_size: 32
 
@@ -26,32 +29,29 @@ iql:
   expectile: 0.7
   weight_temp: 3.0
 
-# Training parameters
+# Training parameters specific to IQL
 training:
-  iql_epochs: 100
+  n_epochs: 100
   n_steps_per_epoch: 1000
   eval_interval: 10
   eval_episodes: 10
   save_interval: 10
-  logging_steps: 100
 
 # Evaluation settings
 evaluation:
-  skip_env_creation: false
   record_video: true
   parallel_eval: false
-  eval_workers: null  # null will use min(n_episodes, cpu_count)
 
 # Output parameters
 output:
   output_dir: "iql_model"
   video_dir: null
 
-# Wandb configuration
+# Wandb configuration specific to IQL
 wandb:
   use_wandb: true
   project: robot_pref
   entity: clvr
   name: null  # Will be auto-generated if null
-  tags: ["iql", "${run_id}"]
-  notes: "IQL policy training with learned reward function" 
+  tags: ["iql", "preference_learning"]
+  notes: "IQL policy training with learned reward function"

@@ -44,16 +44,14 @@ python collect_preferences.py --data_path "/path/to/dataset.pt" --num_pairs 1000
 # Save to a specific output file
 python collect_preferences.py --data_path "/path/to/dataset.pt" --num_pairs 1000 --output_file "my_preferences.pkl"
 ```
-#### robomimic
-```bash
-python train_iql_policy.py --config_name=robomimic_config
-```
 
 ## Train Reward Model
 
 ```bash
 # Basic reward model training
 python train_reward_model.py data.data_path="/scr/shared/clam/datasets/metaworld/assembly-v2/buffer_assembly-v2.pt"
+
+python train_reward_model.py data.data_path="/scr2/shared/pref/datasets/robomimic/lift/mg_image_dense.pt"
 
 # Custom parameters
 python train_reward_model.py data.data_path="/path/to/dataset.pt" model.hidden_dims=[256,256] training.num_epochs=50

@@ -811,7 +811,7 @@ def main(cfg: DictConfig):
         wandb.log({"test_loss": avg_test_loss, "test_accuracy": test_accuracy})
 
     # Save model
-    model_path = f"{cfg.output.output_dir}/state_action_reward_model.pt"
+    model_path = f"{cfg.output.output_dir}/reward_model_{cfg.data.num_pairs}.pt"
     torch.save(model.state_dict(), model_path)
     print(f"Model saved to {model_path}")
 

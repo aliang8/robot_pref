@@ -8,29 +8,35 @@ defaults:
 
 # Data parameters
 data:
-  data_path: "/scr/shared/clam/datasets/metaworld/assembly-v2/buffer_assembly-v2.pt"
+  data_path: "/scr2/shared/pref/datasets/robomimic/lift/mg_image_dense.pt"
   reward_model_path: null  # Not needed for BC since we learn directly from demonstrations
-  max_segments: 1000
+  max_segments: 0
   reward_batch_size: 32
 
 # Model architecture
 model:
   hidden_dims: [256, 256]
-  learning_rate: 3e-4
-  batch_size: 256
   use_weight_decay: false
   weight_decay: 0.0
   encoder_dims: [256, 256, 256]
 
+bc:
+  learning_rate: 3e-4
+  batch_size: 256
+
 # Training parameters specific to BC
 training:
   n_epochs: 100
+  n_steps_per_epoch: 1000
+  eval_interval: 10
+  eval_episodes: 10
+  save_interval: 10
 
 # Output parameters
 output:
-  output_dir: "bc_model"
+  output_dir: "bc_robomimic_model"
 
 # Wandb configuration specific to BC
 wandb:
   tags: ["bc", "behavioral_cloning"]
-notes: "BC policy training directly from demonstrations" 
+  notes: "BC policy training directly from demonstrations" 

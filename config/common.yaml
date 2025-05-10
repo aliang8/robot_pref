@@ -1,5 +1,6 @@
 # Common settings shared across different algorithms
 
+debug: false
 # Training parameters
 training:
   eval_interval: 10

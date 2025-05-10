@@ -6,9 +6,8 @@ from tqdm import tqdm
 import pickle
 import metaworld
 import d3rlpy
-from d3rlpy.algos import IQL, BC
+from d3rlpy.algos import IQL, BC, IQLConfig, BCConfig
 from d3rlpy.datasets import MDPDataset
-from d3rlpy.metrics.scorer import evaluate_on_environment
 from d3rlpy.models.encoders import VectorEncoderFactory
 from pathlib import Path
 import time
@@ -31,6 +30,11 @@ from utils.eval_utils import (
     evaluate_policy_manual,
     custom_evaluate_on_environment
 )
+
+from env.robomimic_lowdim import RobomimicLowdimWrapper
+import robomimic.utils.file_utils as FileUtils
+import robomimic.utils.obs_utils as ObsUtils
+import robomimic.utils.env_utils as EnvUtils
 
 # Set seed for reproducibility
 torch.manual_seed(RANDOM_SEED)
@@ -355,6 +359,53 @@ def get_metaworld_env(task_name, seed=42):
     # If we can't find any matching environment
     raise ValueError(f"Could not create environment for task: {original_task_name}")
 
+def get_robomimic_env(
+    data_path,
+    render=True,
+    render_offscreen=True,
+    use_image_obs=True,
+    base_path="/scr/matthewh6/robomimic/robomimic/datasets",
+    seed=42,
+):
+    dataset_name = Path(data_path).stem
+    type, hdf5_type = dataset_name.split("_", 1)
+    task = Path(data_path).parent.stem
+
+    dataset_path = f"{base_path}/{task}/{type}/{hdf5_type}_v15.hdf5"
+    env_meta = FileUtils.get_env_metadata_from_dataset(dataset_path)
+
+    obs_modality_dict = {
+        "low_dim": [
+            "robot0_eef_pos",
+            "robot0_eef_quat",
+            "robot0_gripper_qpos",
+            "robot0_joint_pos",
+            "robot0_joint_vel",
+            "object",
+        ],
+        "rgb": ["agentview_image"],
+    }
+
+    if render_offscreen or use_image_obs:
+        os.environ["MUJOCO_GL"] = "egl"
+
+    ObsUtils.initialize_obs_modality_mapping_from_dict(obs_modality_dict)
+    env = EnvUtils.create_env_from_metadata(
+        env_meta=env_meta,
+        render=render,
+        # only way to not show collision geometry is to enable render_offscreen, which uses a lot of RAM.
+        render_offscreen=render_offscreen,
+        use_image_obs=use_image_obs,
+    )
+
+    env.env.hard_reset = False
+
+    env = RobomimicLowdimWrapper(env)
+    env.seed(seed)
+
+    return env
+
+
 def get_d3rlpy_experiment_path(base_logdir, experiment_name, with_timestamp=True):
     """Get the path to the d3rlpy experiment directory.
     
@@ -475,6 +526,20 @@ class MetaWorldEnvCreator:
         # Generate a unique seed each time this function is called
         unique_seed = int(time.time() * 1000) % 100000 + random.randint(0, 10000)
         return get_metaworld_env(self.dataset_name, seed=unique_seed)
+    
+class RobomimicEnvCreator:
+    """A picklable environment creator for Robomimic environments."""
+    
+    def __init__(self, data_path):
+        """Initialize the creator with the dataset name."""
+        self.data_path = data_path
+
+    def __call__(self):
+        """Create a new environment with a random seed."""
+        # Generate a unique seed each time this function is called
+        unique_seed = int(time.time() * 1000) % 100000 + random.randint(0, 10000)
+        return get_robomimic_env(self.data_path, seed=unique_seed)
+
 
 class WandbCallback:
     """Callback for d3rlpy to log metrics to wandb.
@@ -504,7 +569,12 @@ class WandbCallback:
             "total_step": total_step
         }
 
-        logger = algo._active_logger
+        # Handle both old and new d3rlpy versions
+        logger = getattr(algo, '_active_logger', None)
+        if logger is None and hasattr(algo, '_impl'):
+            logger = getattr(algo._impl, '_active_logger', None)
+        if logger is None:
+            return metrics  # Return early if no logger found
         
         # Get metrics from the metrics_buffer
         if hasattr(logger, '_metrics_buffer'):
@@ -602,6 +672,10 @@ def main(cfg: DictConfig):
     # Convert OmegaConf config to AttrDict for easier access and serialization
     cfg_dict = OmegaConf.to_container(cfg, resolve=True)
     cfg = AttrDict.from_nested_dict(cfg_dict)
+
+    if cfg.debug:
+        cfg.training.n_epochs = 10
+        cfg.training.n_steps_per_epoch = 100
     
     # Get algorithm name
     algorithm_name = cfg.algorithm
@@ -726,8 +800,14 @@ def main(cfg: DictConfig):
         dataset_name = Path(cfg.data.data_path).stem
         print(f"Creating environment for evaluation using dataset: {dataset_name}")
         
-        # Create an environment creator that will generate different seeds for each call
-        env_creator = MetaWorldEnvCreator(dataset_name)
+        if "metaworld" in cfg.data.data_path:
+            # Create an environment creator that will generate different seeds for each call
+            env_creator = MetaWorldEnvCreator(dataset_name)
+        elif "robomimic" in cfg.data.data_path:
+            # Create an environment creator that will generate different seeds for each call
+            env_creator = RobomimicEnvCreator(cfg.data.data_path)
+        else:
+            raise ValueError(f"No environment creator found for dataset: {cfg.data.data_path}")
         
         # Create one environment to verify it works
         test_env = env_creator()
@@ -741,30 +821,36 @@ def main(cfg: DictConfig):
 
     # Initialize algorithm based on the algorithm_name
     print(f"Initializing {algorithm_name.upper()} algorithm...")
-    
+    algo = None
     if algorithm_name.lower() == "iql":
         # Initialize IQL algorithm
-        algo = IQL(
-            actor_learning_rate=cfg.model.actor_learning_rate,
-            critic_learning_rate=cfg.model.critic_learning_rate,
-            batch_size=cfg.model.batch_size,
-            gamma=cfg.model.gamma,
-            tau=cfg.model.tau,
-            n_critics=cfg.model.n_critics,
-            expectile=cfg.model.expectile,
-            weight_temp=cfg.model.weight_temp,
-            encoder_factory=VectorEncoderFactory(cfg.model.encoder_dims),
-            use_gpu=torch.cuda.is_available()
-        )
+        # TODO: This doesn't work because of version mismatch I think (using d3rlpy 2.8.1)
+        # algo = IQL(
+        #     actor_learning_rate=cfg.model.actor_learning_rate,
+        #     critic_learning_rate=cfg.model.critic_learning_rate,
+        #     batch_size=cfg.model.batch_size,
+        #     gamma=cfg.model.gamma,
+        #     tau=cfg.model.tau,
+        #     n_critics=cfg.model.n_critics,
+        #     expectile=cfg.model.expectile,
+        #     weight_temp=cfg.model.weight_temp,
+        #     encoder_factory=VectorEncoderFactory(cfg.model.encoder_dims),
+        #     use_gpu=torch.cuda.is_available()
+        # )
+        iql_config = IQLConfig(**cfg.iql)
+        algo = iql_config.create()
         
     elif algorithm_name.lower() == "bc":
         # Initialize BC algorithm
-        algo = BC(
-            learning_rate=cfg.model.learning_rate,
-            batch_size=cfg.model.batch_size,
-            encoder_factory=VectorEncoderFactory(cfg.model.encoder_dims),
-            use_gpu=torch.cuda.is_available()
-        )
+        # TODO: This doesn't work because of version mismatch I think (using d3rlpy 2.8.1)
+        # algo = BC(
+        #     learning_rate=cfg.model.learning_rate,
+        #     batch_size=cfg.model.batch_size,
+        #     encoder_factory=VectorEncoderFactory(cfg.model.encoder_dims),
+        #     use_gpu=torch.cuda.is_available()
+        # )
+        bc_config = BCConfig(**cfg.bc)
+        algo = bc_config.create()
         
         # For BC with weight decay
         if hasattr(cfg.model, 'use_weight_decay') and cfg.model.use_weight_decay:
@@ -896,16 +982,26 @@ def main(cfg: DictConfig):
         scorers = {}
 
     # Train the model
+    # TODO: This doesn't work because of version mismatch I think (using d3rlpy 2.8.1)
+    # training_metrics = algo.fit(
+    #     dataset,
+    #     n_epochs=n_epochs,
+    #     eval_episodes=None,  # Don't use the built-in eval which expects episodes format
+    #     save_interval=10,
+    #     scorers=scorers,
+    #     experiment_name=experiment_name,
+    #     with_timestamp=True,
+    #     logdir=d3rlpy_logdir,
+    #     verbose=True,
+    #     callback=composite_callback  # Use the composite callback instead of a list
+    # )
     training_metrics = algo.fit(
         dataset,
-        n_epochs=n_epochs,
-        eval_episodes=None,  # Don't use the built-in eval which expects episodes format
+        n_steps=n_epochs * cfg.training.n_steps_per_epoch,
         save_interval=10,
-        scorers=scorers,
+        evaluators=scorers,
         experiment_name=experiment_name,
         with_timestamp=True,
-        logdir=d3rlpy_logdir,
-        verbose=True,
         callback=composite_callback  # Use the composite callback instead of a list
     )
     
@@ -942,7 +1038,6 @@ def main(cfg: DictConfig):
         
         # Create a complete summary with training and evaluation metrics
         summary_metrics = {
-            "completed": True, 
             "total_epochs": n_epochs,
             "best_eval_epoch": wandb_callback.best_eval_epoch
         }
@@ -960,7 +1055,6 @@ def main(cfg: DictConfig):
                     
         # Log the combined summary
         log_to_wandb(summary_metrics, prefix="summary")
-        
         # Also log a final plot of training losses if available
         if wandb.run and wandb_callback.training_losses:
             try:

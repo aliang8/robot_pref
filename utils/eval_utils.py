@@ -330,13 +330,15 @@ def evaluate_episode_worker(worker_args):
         # Extract observation if it's a tuple
         if isinstance(observation, tuple):
             obs_array = observation[0]  # Use only the observation part
+        elif isinstance(observation, dict):
+            obs_array = observation["state"]
         else:
             obs_array = observation
 
         # Ensure observation is a numpy array with batch dimension
         if not isinstance(obs_array, np.ndarray):
             obs_array = np.array(obs_array, dtype=np.float32)
-
+        
         if len(obs_array.shape) == 1:
             obs_array = np.expand_dims(obs_array, axis=0)
 
@@ -765,7 +767,11 @@ def custom_evaluate_on_environment(env):
             eval_env.seed(unique_seed)
         
         # Check environment compatibility with the model
-        env_obs_dim = eval_env.observation_space.shape[0]
+        # Handle both dict and regular observation spaces
+        if isinstance(eval_env.observation_space, gym.spaces.Dict):
+            env_obs_dim = eval_env.observation_space["state"].shape[0]
+        else:
+            env_obs_dim = eval_env.observation_space.shape[0]
         
         # Get model's expected observation dimension through various ways
         model_obs_dim = None
@@ -791,11 +797,14 @@ def custom_evaluate_on_environment(env):
             observation = eval_env.reset()
             episode_reward = 0.0
             done = False
-            
-            while not done:
+            steps = 0
+
+            while not done and steps < 1000:
                 # Extract observation if it's a tuple
                 if isinstance(observation, tuple):
                     obs_array = observation[0]
+                elif isinstance(observation, dict):
+                    obs_array = observation["state"]
                 else:
                     obs_array = observation
                     
@@ -823,7 +832,7 @@ def custom_evaluate_on_environment(env):
                     break
                     
                 episode_reward += reward
-            
+                steps += 1
             total_reward += episode_reward
             
         # Return average reward across episodes

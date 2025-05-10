@@ -509,7 +509,7 @@ def load_preprocessed_segments(file_path):
         Dictionary containing the preprocessed data
     """
     print(f"Loading preprocessed data from {file_path}")
-    data = torch.load(file_path)
+    data = torch.load(file_path, weights_only=False)
 
     # Print some statistics about the loaded data
     print(f"Loaded data with keys: {list(data.keys())}")
