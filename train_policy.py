@@ -16,6 +16,10 @@ import hydra
 from omegaconf import DictConfig, OmegaConf
 import wandb
 import matplotlib.pyplot as plt
+import matplotlib.animation as animation
+from matplotlib import gridspec
+import cv2
+import glob
 
 # Import utility functions
 from trajectory_utils import (
@@ -596,6 +600,121 @@ class CompositeCallback:
                 print(f"Error in callback {callback}: {e}")
         return results
 
+def create_video_grid(video_files, output_path, max_videos=6, fps=30, title=None):
+    """Create a grid of videos from individual mp4 files.
+    
+    Args:
+        video_files: List of paths to mp4 video files
+        output_path: Path to save the output video
+        max_videos: Maximum number of videos to include in the grid
+        fps: Frames per second of the output video
+        title: Optional title to display above the grid
+        
+    Returns:
+        Path to the saved grid video
+    """
+    if not video_files:
+        return None
+    
+    # Limit the number of videos
+    video_files = video_files[:max_videos]
+    n_videos = len(video_files)
+    
+    # Determine grid dimensions
+    if n_videos <= 2:
+        grid_dims = (1, n_videos)
+    elif n_videos <= 4:
+        grid_dims = (2, 2)
+    elif n_videos <= 6:
+        grid_dims = (2, 3)
+    else:
+        grid_dims = (3, 3)
+    
+    # Open all video captures
+    video_captures = [cv2.VideoCapture(vf) for vf in video_files]
+    
+    # Check if videos were opened successfully
+    if not all(vc.isOpened() for vc in video_captures):
+        print("Warning: Could not open one or more video files")
+        return None
+    
+    # Get video properties
+    widths = []
+    heights = []
+    frame_counts = []
+    
+    for vc in video_captures:
+        widths.append(int(vc.get(cv2.CAP_PROP_FRAME_WIDTH)))
+        heights.append(int(vc.get(cv2.CAP_PROP_FRAME_HEIGHT)))
+        frame_counts.append(int(vc.get(cv2.CAP_PROP_FRAME_COUNT)))
+    
+    # Find the size of each cell in the grid
+    cell_width = max(widths)
+    cell_height = max(heights)
+    
+    # Find the minimum frame count (all videos must have the same number of frames)
+    min_frames = min(frame_counts)
+    
+    # Set up the matplotlib figure and grid
+    fig = plt.figure(figsize=(grid_dims[1] * 4, grid_dims[0] * 3 + (0.5 if title else 0)))
+    
+    if title:
+        fig.suptitle(title, fontsize=16)
+    
+    grid = gridspec.GridSpec(grid_dims[0], grid_dims[1], figure=fig)
+    
+    # Create axes for each video
+    axes = []
+    for i in range(n_videos):
+        row = i // grid_dims[1]
+        col = i % grid_dims[1]
+        ax = fig.add_subplot(grid[row, col])
+        ax.set_title(f"Episode {i+1}")
+        ax.set_xticks([])
+        ax.set_yticks([])
+        ax.set_frame_on(True)
+        axes.append(ax)
+    
+    # Create image objects for each video
+    images = []
+    for i, vc in enumerate(video_captures):
+        ret, frame = vc.read()
+        if ret:
+            # Convert BGR to RGB (cv2 uses BGR, matplotlib uses RGB)
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            img = axes[i].imshow(frame_rgb)
+            images.append(img)
+    
+    # Set up animation update function
+    def update(frame_idx):
+        for i, vc in enumerate(video_captures):
+            # Set the position to the current frame
+            vc.set(cv2.CAP_PROP_POS_FRAMES, frame_idx % frame_counts[i])
+            ret, frame = vc.read()
+            if ret:
+                # Convert BGR to RGB
+                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                images[i].set_array(frame_rgb)
+        
+        return images
+    
+    # Create the animation
+    anim = animation.FuncAnimation(
+        fig, update, frames=min_frames, blit=True, interval=1000/fps
+    )
+    
+    # Save the animation
+    writer = animation.FFMpegWriter(fps=fps, metadata=dict(artist='d3rlpy'))
+    anim.save(output_path, writer=writer)
+    
+    # Close figure and video captures
+    plt.close(fig)
+    for vc in video_captures:
+        vc.release()
+    
+    print(f"Created video grid with {n_videos} videos at {output_path}")
+    return output_path
+
 @hydra.main(config_path="config", config_name="iql")
 def main(cfg: DictConfig):
     """Train a policy using specified algorithm with Hydra config."""
@@ -869,10 +988,31 @@ def main(cfg: DictConfig):
                     import glob
                     video_files = glob.glob(f"{video_path}_episode_*.mp4")
                     if video_files:
+                        # Upload individual videos (limited to 3)
                         video_artifacts = [wandb.Video(video_file, fps=cfg.evaluation.video_fps, format="mp4") 
                                            for video_file in video_files[:3]]  # Upload up to 3 videos
                         
                         wandb.log({f"media/videos/eval_epoch_{epoch}": video_artifacts}, step=epoch)
+                        
+                        # Create and upload grid video of all evaluation episodes
+                        grid_video_path = f"{video_path}_grid.mp4"
+                        grid_video = create_video_grid(
+                            video_files, 
+                            grid_video_path, 
+                            max_videos=6,
+                            fps=cfg.evaluation.video_fps,
+                            title=f"Evaluation Episodes (Epoch {epoch})"
+                        )
+                        
+                        if grid_video:
+                            # Upload the grid video to wandb
+                            wandb.log({
+                                f"media/videos/eval_rollouts/epoch_{epoch}": wandb.Video(
+                                    grid_video, 
+                                    fps=cfg.evaluation.video_fps, 
+                                    format="mp4"
+                                )
+                            }, step=epoch)
                 except Exception as e:
                     print(f"Warning: Could not upload videos to wandb: {e}")
 
@@ -1032,6 +1172,26 @@ def main(cfg: DictConfig):
                                            for video_file in video_files[:3]]  # Upload up to 3 videos
                         
                         wandb.log({f"media/videos/final_eval": video_artifacts})
+                        
+                        # Create and upload grid video of final evaluation episodes
+                        grid_video_path = f"{video_path}_grid.mp4"
+                        grid_video = create_video_grid(
+                            video_files, 
+                            grid_video_path, 
+                            max_videos=6,
+                            fps=cfg.evaluation.video_fps,
+                            title="Final Evaluation Episodes"
+                        )
+                        
+                        if grid_video:
+                            # Upload the grid video to wandb
+                            wandb.log({
+                                "media/videos/eval_rollouts/final": wandb.Video(
+                                    grid_video, 
+                                    fps=cfg.evaluation.video_fps,
+                                    format="mp4"
+                                )
+                            })
                 except Exception as e:
                     print(f"Warning: Could not upload final videos to wandb: {e}")
     else:

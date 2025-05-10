@@ -28,7 +28,7 @@ training:
 
 # Output parameters
 output:
-  output_dir: "bc_model"
+  output_dir: /scr/aliang80/bc_model
 
 # Wandb configuration specific to BC
 wandb:
