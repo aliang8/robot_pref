@@ -31,8 +31,8 @@ output:
 # Wandb configuration
 wandb:
   use_wandb: true
-  project: "robot_preference_learning"
-  entity: null  # Set to your wandb entity or leave as null
+  project: "robot_pref"
+  entity: clvr  # Set to your wandb entity or leave as null
   name: null  # Will be auto-generated if null
-  tags: ["reward_model", "preference_learning"]
+  tags: ["reward_model"]
   notes: "Training reward model with Bradley-Terry preference learning" 

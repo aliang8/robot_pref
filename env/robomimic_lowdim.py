@@ -104,6 +104,12 @@ class RobomimicLowdimWrapper(gym.Env):
         # Start video if specified
         if "video_path" in options:
             self.video_writer = imageio.get_writer(options["video_path"], fps=30)
+            # Initialize rendering context if video recording is enabled
+            self.env.env.render(
+                height=self.render_hw[0],
+                width=self.render_hw[1],
+                camera_name=self.render_camera_name,
+            )
 
         # Call reset
         new_seed = options.get(
@@ -135,6 +141,7 @@ class RobomimicLowdimWrapper(gym.Env):
 
     def render(self, mode="rgb_array"):
         h, w = self.render_hw
+
         return self.env.render(
             mode=mode,
             height=h,

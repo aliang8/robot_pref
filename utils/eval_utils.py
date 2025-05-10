@@ -39,6 +39,7 @@ class SimpleVideoRecorder:
         if self._closed:
             return
 
+
         try:
             # Try different render modes
             try:
@@ -699,7 +700,7 @@ def custom_evaluate_on_environment(env):
         # Create a fresh environment for evaluation if env is a creator function
         try:
             eval_env = env() if callable(env) else env
-            
+
             # Check if environment creation failed
             if eval_env is None:
                 print("Environment creation failed, skipping evaluation")
@@ -707,11 +708,16 @@ def custom_evaluate_on_environment(env):
 
             # Set a unique seed to ensure diverse initial states
             if hasattr(eval_env, "seed"):
-                unique_seed = int(time.time() * 1000) % 100000 + random.randint(0, 10000)
+                unique_seed = int(time.time() * 1000) % 100000 + random.randint(
+                    0, 10000
+                )
                 eval_env.seed(unique_seed)
 
             # Check environment compatibility with the model
-            if not hasattr(eval_env, "observation_space") or eval_env.observation_space is None:
+            if (
+                not hasattr(eval_env, "observation_space")
+                or eval_env.observation_space is None
+            ):
                 print("Environment has no observation space, skipping evaluation")
                 return 0.0
 
@@ -784,7 +790,7 @@ def custom_evaluate_on_environment(env):
                 f"Evaluation during training: {avg_reward:.2f} average reward over {n_episodes} episodes"
             )
             return avg_reward
-            
+
         except Exception as e:
             print(f"Error during environment evaluation: {str(e)}")
             return 0.0

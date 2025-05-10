@@ -1,4 +1,3 @@
-
 import torch
 import numpy as np
 import random
@@ -8,6 +7,7 @@ import pickle
 import argparse
 import gym
 import metaworld
+from env.robomimic_lowdim import RobomimicLowdimWrapper
 import d3rlpy
 from d3rlpy.algos import IQL, IQLConfig
 from d3rlpy.datasets import MDPDataset
@@ -25,6 +25,7 @@ import robomimic.utils.obs_utils as ObsUtils
 import robomimic.utils.env_utils as EnvUtils
 
 import os
+
 # Import utility functions
 from trajectory_utils import DEFAULT_DATA_PATHS, RANDOM_SEED, load_tensordict
 
@@ -448,37 +449,49 @@ def get_metaworld_env(task_name, seed=42):
 
         raise ValueError(f"Could not create environment for task: {original_task_name}")
 
+
 def get_robomimic_env(
     data_path,
-    render=False,
-    render_offscreen=False,
-    use_image_obs=False,
-    base_path="/scr/matthewh6/robomimic/robomimic/datasets"
+    render=True,
+    render_offscreen=True,
+    use_image_obs=True,
+    base_path="/scr/matthewh6/robomimic/robomimic/datasets",
 ):
     dataset_name = Path(data_path).stem
-    type, hdf5_type = dataset_name.split('_', 1)
+    type, hdf5_type = dataset_name.split("_", 1)
     task = Path(data_path).parent.stem
 
     dataset_path = f"{base_path}/{task}/{type}/{hdf5_type}_v15.hdf5"
     env_meta = FileUtils.get_env_metadata_from_dataset(dataset_path)
 
     obs_modality_dict = {
-        "low_dim": ["robot0_eef_pos", "robot0_eef_quat", "robot0_gripper_qpos", "robot0_joint_pos", "robot0_joint_vel", "object"],
+        "low_dim": [
+            "robot0_eef_pos",
+            "robot0_eef_quat",
+            "robot0_gripper_qpos",
+            "robot0_joint_pos",
+            "robot0_joint_vel",
+            "object",
+        ],
         "rgb": ["agentview_image"],
     }
+
+    if render_offscreen or use_image_obs:
+        os.environ["MUJOCO_GL"] = "egl"
+
     ObsUtils.initialize_obs_modality_mapping_from_dict(obs_modality_dict)
     env = EnvUtils.create_env_from_metadata(
-            env_meta=env_meta,
-            render=render,
-            # only way to not show collision geometry is to enable render_offscreen, which uses a lot of RAM.
-            render_offscreen=render_offscreen,
-            use_image_obs=use_image_obs,
-        )
+        env_meta=env_meta,
+        render=render,
+        # only way to not show collision geometry is to enable render_offscreen, which uses a lot of RAM.
+        render_offscreen=render_offscreen,
+        use_image_obs=use_image_obs,
+    )
 
     env.env.hard_reset = False
 
-    from env.robomimic_lowdim import RobomimicLowdimWrapper
     env = RobomimicLowdimWrapper(env)
+    env = RenderWrapper(env)
 
     return env
 
@@ -588,7 +601,6 @@ def main(cfg: DictConfig):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
-
     # Get experiment name based on data path
     dataset_name = Path(cfg.data.data_path).stem
     experiment_name = f"IQL_{dataset_name}_SA"
@@ -663,7 +675,6 @@ def main(cfg: DictConfig):
     print("Initializing IQL algorithm...")
     iql_config = IQLConfig(**cfg.iql)
     iql = iql_config.create()
-
 
     # For tracking evaluation metrics
     evaluation_results = []

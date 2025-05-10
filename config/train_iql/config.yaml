@@ -4,7 +4,7 @@
 data:
   data_path: "/scr/shared/clam/datasets/metaworld/assembly-v2/buffer_assembly-v2.pt"
   reward_model_path: "reward_model/state_action_reward_model.pt"
-  max_segments: 1000
+  max_segments: 0
   reward_batch_size: 32
 
 # Model architecture
@@ -14,8 +14,8 @@ model:
 
 # IQL configuration
 iql:
-  actor_learning_rate: 3e-4
-  critic_learning_rate: 3e-4
+  actor_learning_rate: 1e-4
+  critic_learning_rate: 1e-4
   batch_size: 256
   gamma: 0.99
   tau: 0.005
@@ -26,7 +26,7 @@ iql:
 # Training parameters
 training:
   iql_epochs: 100
-  n_steps_per_epoch: 1000
+  n_steps_per_epoch: 10
   eval_interval: 10
   eval_episodes: 10
   save_interval: 10
@@ -36,7 +36,7 @@ training:
 evaluation:
   skip_env_creation: false
   record_video: true
-  parallel_eval: true
+  parallel_eval: false
   eval_workers: null  # null will use min(n_episodes, cpu_count)
 
 # Output parameters
@@ -50,5 +50,5 @@ wandb:
   project: robot_pref
   entity: clvr
   name: null  # Will be auto-generated if null
-  tags: ["iql", "preference_learning"]
+  tags: ["iql"]
   notes: "IQL policy training with learned reward function" 
