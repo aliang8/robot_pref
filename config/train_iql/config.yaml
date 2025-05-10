@@ -10,6 +10,10 @@ data:
 # Model architecture
 model:
   hidden_dims: [256, 256]
+  encoder_dims: [256, 256, 256]
+
+# IQL configuration
+iql:
   actor_learning_rate: 3e-4
   critic_learning_rate: 3e-4
   batch_size: 256
@@ -18,13 +22,15 @@ model:
   n_critics: 2
   expectile: 0.7
   weight_temp: 3.0
-  encoder_dims: [256, 256, 256]
 
 # Training parameters
 training:
   iql_epochs: 100
+  n_steps_per_epoch: 1000
   eval_interval: 10
   eval_episodes: 10
+  save_interval: 10
+  logging_steps: 100
 
 # Evaluation settings
 evaluation:
