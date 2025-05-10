@@ -9,17 +9,13 @@ defaults:
 # Data parameters
 data:
   data_path: "/scr/shared/clam/datasets/metaworld/assembly-v2/buffer_assembly-v2.pt"
-  reward_model_path: null  # Not needed for BC since we learn directly from demonstrations
-  max_segments: 1000
-  reward_batch_size: 32
+  env_name: "assembly-v2-goal-observable"  # Exact name of the MetaWorld environment
 
 # Model architecture
 model:
   hidden_dims: [256, 256]
-  learning_rate: 3e-4
+  learning_rate: 1e-4
   batch_size: 256
-  use_weight_decay: false
-  weight_decay: 0.0
   encoder_dims: [256, 256, 256]
 
 # Training parameters specific to BC
@@ -28,9 +24,9 @@ training:
 
 # Output parameters
 output:
-  output_dir: /scr/aliang80/robot_pref/bc_model
+  output_dir: "bc_model"
 
 # Wandb configuration specific to BC
 wandb:
-  tags: ["bc", "behavioral_cloning"]
-  notes: "BC policy training directly from demonstrations" 
+  tags: ["bc", "imitation_learning"]
+  notes: "BC policy training with behavioral cloning" 

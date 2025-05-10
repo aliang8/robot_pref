@@ -1,5 +1,9 @@
 # Common settings shared across different algorithms
 
+# Data parameters
+data:
+  env_name: "assembly-v2-goal-observable"  # The exact MetaWorld environment name to use
+
 # Training parameters
 training:
   eval_interval: 10
