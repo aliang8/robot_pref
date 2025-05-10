@@ -998,6 +998,7 @@ def main(cfg: DictConfig):
     training_metrics = algo.fit(
         dataset,
         n_steps=n_epochs * cfg.training.n_steps_per_epoch,
+        n_steps_per_epoch=cfg.training.n_steps_per_epoch,
         save_interval=10,
         evaluators=scorers,
         experiment_name=experiment_name,
