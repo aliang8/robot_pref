@@ -688,6 +688,8 @@ def main(cfg: DictConfig):
                 data_cpu["reward"], 
                 n_pairs=cfg.data.num_pairs
             )
+    else:
+        print(f"Using {len(segment_pairs)} preference pairs loaded from preference data file")
     
     print(f"Final data stats - Observation dimension: {state_dim}, Action dimension: {action_dim}")
     print(f"Working with {len(segment_pairs) if segment_pairs is not None else 0} preference pairs across {len(segment_indices) if segment_indices is not None else 0} segments")

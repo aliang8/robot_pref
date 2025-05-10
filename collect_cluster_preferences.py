@@ -377,6 +377,15 @@ def create_preference_dataset(data, segment_indices, augmented_preferences, outp
         segment_pairs.append((i, j))
         preference_labels.append(pref)
     
+    # Convert lists to tensors for better compatibility
+    segment_indices_tensor = torch.tensor(segment_indices) if not isinstance(segment_indices, torch.Tensor) else segment_indices
+    
+    # For segment pairs, we need a special approach since it's a list of tuples
+    segment_pairs_tensor = torch.tensor(segment_pairs) if not isinstance(segment_pairs, torch.Tensor) else segment_pairs
+    
+    # Convert preference labels to tensor
+    preference_labels_tensor = torch.tensor(preference_labels) if not isinstance(preference_labels, torch.Tensor) else preference_labels
+    
     # Create compact data representation with only necessary fields
     compact_data = {}
     essential_fields = ['obs', 'action', 'episode', 'reward']
@@ -391,9 +400,9 @@ def create_preference_dataset(data, segment_indices, augmented_preferences, outp
     # Create standardized dataset structure
     preference_dataset = {
         'data': compact_data,                # Essential tensor data
-        'segment_indices': segment_indices,  # Indices for segments
-        'segment_pairs': segment_pairs,      # Pairs for preference learning 
-        'preference_labels': preference_labels,  # Preference labels (1=first preferred, 2=second)
+        'segment_indices': segment_indices_tensor,  # Indices for segments
+        'segment_pairs': segment_pairs_tensor,      # Pairs for preference learning 
+        'preference_labels': preference_labels_tensor,  # Preference labels (1=first preferred, 2=second)
         'metadata': {
             'source_file': data.get('_source_path', 'unknown'),
             'n_segments': len(segment_indices),
@@ -730,12 +739,13 @@ def main():
     
     # Save raw preferences
     preferences_file = os.path.join(args.output_dir, "raw_preferences.pkl")
-    with open(preferences_file, 'wb') as f:
-        pickle.dump({
-            'user_preferences': user_preferences,
-            'cluster_representatives': cluster_representatives
-        }, f)
     
+    raw_data = {
+        'user_preferences': user_preferences,
+        'cluster_representatives': cluster_representatives
+    }
+    
+    torch.save(raw_data, preferences_file)
     print(f"Saved raw preferences to {preferences_file}")
     
     # Derive cluster ranking
