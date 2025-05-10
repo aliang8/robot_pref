@@ -462,32 +462,17 @@ def get_robomimic_env(
     dataset_path = f"{base_path}/{task}/{type}/{hdf5_type}_v15.hdf5"
     env_meta = FileUtils.get_env_metadata_from_dataset(dataset_path)
 
-    # obs_modality_dict = 
-    # ObsUtils.initialize_obs_modality_mapping_from_dict(obs_modality_dict)
-        
-    # env_name = env_meta["env_name"]
-    # env_type = get_env_type(env_meta=env_meta)
-    # env_kwargs = env_meta["env_kwargs"]
-
-    # import robomimic.utils.env_utils as EnvUtils
-    # env = EnvUtils.create_env_from_metadata(env_meta=env_meta, render=False, render_offscreen=True)
-    
-    # env = create_env(
-    #     env_type=env_type,
-    #     env_name=env_name,  
-    #     render=render, 
-    #     render_offscreen=render_offscreen, 
-    #     use_image_obs=use_image_obs, 
-    #     **env_kwargs,
-    # )
-
+    obs_modality_dict = {
+        "low_dim": ["robot0_eef_pos", "robot0_eef_quat", "robot0_gripper_qpos", "robot0_joint_pos", "robot0_joint_vel", "object"],
+        "rgb": ["agentview_image"],
+    }
+    ObsUtils.initialize_obs_modality_mapping_from_dict(obs_modality_dict)
     env = EnvUtils.create_env_from_metadata(
             env_meta=env_meta,
             render=render,
             # only way to not show collision geometry is to enable render_offscreen, which uses a lot of RAM.
             render_offscreen=render_offscreen,
             use_image_obs=use_image_obs,
-            # render_gpu_device_id=0,
         )
 
     env.env.hard_reset = False
@@ -497,32 +482,6 @@ def get_robomimic_env(
 
     return env
 
-class RobomimicEnvWrapper(gym.Wrapper):
-    def __init__(self, env):
-        super().__init__(env)
-        self.observation_space = self._get_obs_space()
-        self.action_space = self._get_action_space()
-
-    def _get_obs_space(self):
-        # Get the first observation to determine the space
-        obs = self.env.reset()
-        flattened_obs = self._flatten_obs(obs)
-        return gym.spaces.Box(low=-np.inf, high=np.inf, shape=flattened_obs.shape)
-
-    def _get_action_space(self):
-        return self.env.action_space
-
-    def _flatten_obs(self, obs):
-        # Flatten the observation dictionary into a single array
-        return np.concatenate([v.flatten() for v in obs.values()])
-
-    def reset(self):
-        obs = self.env.reset()
-        return self._flatten_obs(obs)
-
-    def step(self, action):
-        obs, reward, done, info = self.env.step(action)
-        return self._flatten_obs(obs), reward, done, info
 
 def get_d3rlpy_experiment_path(base_logdir, experiment_name, with_timestamp=True):
     """Get the path to the d3rlpy experiment directory.

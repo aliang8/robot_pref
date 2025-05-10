@@ -35,7 +35,7 @@ training:
 # Evaluation settings
 evaluation:
   skip_env_creation: false
-  record_video: false
+  record_video: true
   parallel_eval: true
   eval_workers: null  # null will use min(n_episodes, cpu_count)
 

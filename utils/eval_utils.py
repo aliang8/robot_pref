@@ -591,8 +591,10 @@ def evaluate_policy_manual(
                 else:
                     obs_array = observation
 
+                if isinstance(obs_array, dict):
+                    obs_array = np.array(obs_array["state"], dtype=np.float32)
                 # Ensure observation is a numpy array with batch dimension
-                if not isinstance(obs_array, np.ndarray):
+                elif not isinstance(obs_array, np.ndarray):
                     obs_array = np.array(obs_array, dtype=np.float32)
 
                 if len(obs_array.shape) == 1:
@@ -695,82 +697,96 @@ def custom_evaluate_on_environment(env):
 
     def scorer(algo, *args, **kwargs):
         # Create a fresh environment for evaluation if env is a creator function
-        eval_env = env() if callable(env) else env
+        try:
+            eval_env = env() if callable(env) else env
+            
+            # Check if environment creation failed
+            if eval_env is None:
+                print("Environment creation failed, skipping evaluation")
+                return 0.0
 
-        # Set a unique seed to ensure diverse initial states
-        if hasattr(eval_env, "seed"):
-            unique_seed = int(time.time() * 1000) % 100000 + random.randint(0, 10000)
-            eval_env.seed(unique_seed)
-
-        # Check environment compatibility with the model
-        env_obs_dim = eval_env.observation_space.shape[0]
-
-        # Get model's expected observation dimension through various ways
-        model_obs_dim = None
-        if hasattr(algo, "observation_shape"):
-            model_obs_dim = algo.observation_shape[0]
-        elif hasattr(algo, "_impl") and hasattr(algo._impl, "observation_shape"):
-            model_obs_dim = algo._impl.observation_shape[0]
-
-        if model_obs_dim is not None and env_obs_dim != model_obs_dim:
-            print(
-                f"Warning: Environment observation dimension ({env_obs_dim}) doesn't match model's expected dimension ({model_obs_dim})"
-            )
-            print("Skipping evaluation with incompatible environment")
-            return 0.0
-
-        total_reward = 0.0
-        n_episodes = 5  # Number of episodes to evaluate on for each call
-
-        for episode in range(n_episodes):
-            # Set a different seed for each episode to ensure diversity
+            # Set a unique seed to ensure diverse initial states
             if hasattr(eval_env, "seed"):
-                episode_seed = unique_seed + episode * 100
-                eval_env.seed(episode_seed)
+                unique_seed = int(time.time() * 1000) % 100000 + random.randint(0, 10000)
+                eval_env.seed(unique_seed)
 
-            observation = eval_env.reset()
-            episode_reward = 0.0
-            done = False
+            # Check environment compatibility with the model
+            if not hasattr(eval_env, "observation_space") or eval_env.observation_space is None:
+                print("Environment has no observation space, skipping evaluation")
+                return 0.0
 
-            while not done:
-                # Extract observation if it's a tuple
-                if isinstance(observation, tuple):
-                    obs_array = observation[0]
-                else:
-                    obs_array = observation
+            env_obs_dim = eval_env.observation_space.shape[0]
 
-                # Ensure observation is a numpy array with batch dimension
-                if not isinstance(obs_array, np.ndarray):
-                    obs_array = np.array(obs_array, dtype=np.float32)
+            # Get model's expected observation dimension through various ways
+            model_obs_dim = None
+            if hasattr(algo, "observation_shape"):
+                model_obs_dim = algo.observation_shape[0]
+            elif hasattr(algo, "_impl") and hasattr(algo._impl, "observation_shape"):
+                model_obs_dim = algo._impl.observation_shape[0]
 
-                if len(obs_array.shape) == 1:
-                    obs_array = np.expand_dims(obs_array, axis=0)
+            if model_obs_dim is not None and env_obs_dim != model_obs_dim:
+                print(
+                    f"Warning: Environment observation dimension ({env_obs_dim}) doesn't match model's expected dimension ({model_obs_dim})"
+                )
+                print("Skipping evaluation with incompatible environment")
+                return 0.0
 
-                action = algo.predict(obs_array)[0]
+            total_reward = 0.0
+            n_episodes = 5
 
-                # Handle different step return formats
-                step_result = eval_env.step(action)
+            for episode in range(n_episodes):
+                # Set a different seed for each episode to ensure diversity
+                if hasattr(eval_env, "seed"):
+                    episode_seed = unique_seed + episode * 100
+                    eval_env.seed(episode_seed)
 
-                # MetaWorld environments return 4 values: obs, reward, done, info
-                if len(step_result) == 4:
-                    observation, reward, done, _ = step_result
-                # Some environments might return 5 values including truncated flag (gym>=0.26)
-                elif len(step_result) == 5:
-                    observation, reward, terminated, truncated, _ = step_result
-                    done = terminated or truncated
-                else:
-                    print(f"Warning: Unexpected step result format: {step_result}")
-                    break
+                observation = eval_env.reset()
+                episode_reward = 0.0
+                done = False
 
-                episode_reward += reward
+                while not done:
+                    # Extract observation if it's a tuple
+                    if isinstance(observation, tuple):
+                        obs_array = observation[0]
+                    else:
+                        obs_array = observation
 
-            total_reward += episode_reward
+                    # Ensure observation is a numpy array with batch dimension
+                    if not isinstance(obs_array, np.ndarray):
+                        obs_array = np.array(obs_array, dtype=np.float32)
 
-        # Return average reward across episodes
-        avg_reward = total_reward / n_episodes
-        print(
-            f"Evaluation during training: {avg_reward:.2f} average reward over {n_episodes} episodes"
-        )
-        return avg_reward
+                    if len(obs_array.shape) == 1:
+                        obs_array = np.expand_dims(obs_array, axis=0)
+
+                    action = algo.predict(obs_array)[0]
+
+                    # Handle different step return formats
+                    step_result = eval_env.step(action)
+
+                    # MetaWorld environments return 4 values: obs, reward, done, info
+                    if len(step_result) == 4:
+                        observation, reward, done, _ = step_result
+                    # Some environments might return 5 values including truncated flag (gym>=0.26)
+                    elif len(step_result) == 5:
+                        observation, reward, terminated, truncated, _ = step_result
+                        done = terminated or truncated
+                    else:
+                        print(f"Warning: Unexpected step result format: {step_result}")
+                        break
+
+                    episode_reward += reward
+
+                total_reward += episode_reward
+
+            # Return average reward across episodes
+            avg_reward = total_reward / n_episodes
+            print(
+                f"Evaluation during training: {avg_reward:.2f} average reward over {n_episodes} episodes"
+            )
+            return avg_reward
+            
+        except Exception as e:
+            print(f"Error during environment evaluation: {str(e)}")
+            return 0.0
 
     return scorer
