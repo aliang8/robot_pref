@@ -6,7 +6,7 @@ from tqdm import tqdm
 import pickle
 import metaworld
 import d3rlpy
-from d3rlpy.algos import IQL
+from d3rlpy.algos import IQL, BC
 from d3rlpy.datasets import MDPDataset
 from d3rlpy.metrics.scorer import evaluate_on_environment
 from d3rlpy.models.encoders import VectorEncoderFactory
@@ -414,12 +414,19 @@ class MetaWorldEnvCreator:
         unique_seed = int(time.time() * 1000) % 100000 + random.randint(0, 10000)
         return get_metaworld_env(self.dataset_name, seed=unique_seed)
 
-@hydra.main(config_path="config/train_iql", config_name="config", version_base=None)
+@hydra.main(config_path="config", config_name="iql")
 def main(cfg: DictConfig):
-    """Train an IQL policy using learned reward model with Hydra config."""
+    """Train a policy using specified algorithm with Hydra config."""
+    # Get algorithm name from config
+    algorithm_name = cfg.algorithm
+    
     print("\n" + "=" * 50)
-    print("Training IQL policy with learned rewards")
+    print(f"Training {algorithm_name.upper()} policy")
     print("=" * 50)
+    
+    # Convert OmegaConf config to standard Python dictionary to avoid serialization issues
+    # This is needed because d3rlpy's logger can't handle OmegaConf objects
+    cfg_dict = OmegaConf.to_container(cfg, resolve=True)
     
     # Print config for visibility
     print("\nConfiguration:")
@@ -433,15 +440,15 @@ def main(cfg: DictConfig):
         # Set up a run name if not specified
         run_name = cfg.wandb.name
         if run_name is None:
-            run_name = f"IQL_{dataset_name}_{time.strftime('%Y%m%d_%H%M%S')}"
+            run_name = f"{algorithm_name.upper()}_{dataset_name}_{time.strftime('%Y%m%d_%H%M%S')}"
         
-        # Initialize wandb
+        # Initialize wandb with dictionary config
         wandb.init(
             project=cfg.wandb.project,
             entity=cfg.wandb.entity,
             name=run_name,
-            config=OmegaConf.to_container(cfg, resolve=True),
-            tags=cfg.wandb.tags,
+            config=cfg_dict,  # Use dictionary instead of OmegaConf
+            tags=cfg.wandb.tags if hasattr(cfg.wandb, 'tags') else [algorithm_name],
             notes=cfg.wandb.notes
         )
         print(f"Wandb initialized: {wandb.run.name}")
@@ -455,7 +462,7 @@ def main(cfg: DictConfig):
     
     # Get experiment name based on data path
     dataset_name = Path(cfg.data.data_path).stem
-    experiment_name = f"IQL_{dataset_name}_SA"
+    experiment_name = f"{algorithm_name.upper()}_{dataset_name}"
     
     # Set up d3rlpy log directory
     d3rlpy_logdir = f"{cfg.output.output_dir}/logs"
@@ -470,22 +477,65 @@ def main(cfg: DictConfig):
     action_dim = data["action"].shape[1]
     print(f"Observation dimension: {state_dim}, Action dimension: {action_dim}")
     
-    # Load reward model
-    reward_model = SegmentRewardModel(state_dim, action_dim, hidden_dims=cfg.model.hidden_dims)
-    reward_model.load_state_dict(torch.load(cfg.data.reward_model_path))
-    reward_model = reward_model.to(device)
-    reward_model.eval()
-    print(f"Loaded reward model from {cfg.data.reward_model_path}")
+    # Create MDP dataset based on the algorithm
+    if algorithm_name.lower() == "iql":
+        # For IQL, we need a reward model
+        # Load reward model
+        reward_model = SegmentRewardModel(state_dim, action_dim, hidden_dims=cfg.model.hidden_dims)
+        reward_model.load_state_dict(torch.load(cfg.data.reward_model_path))
+        reward_model = reward_model.to(device)
+        reward_model.eval()
+        print(f"Loaded reward model from {cfg.data.reward_model_path}")
+        
+        # Create MDP dataset with learned rewards
+        print("Creating MDP dataset with learned rewards...")
+        dataset = create_mdp_dataset_with_sa_reward(
+            data, 
+            reward_model, 
+            device, 
+            max_segments=cfg.data.max_segments,
+            batch_size=cfg.data.reward_batch_size
+        )
+    else:  # BC or other algorithms that don't need a reward model
+        # For BC, we can directly use the demonstrations without modifying rewards
+        print("Creating MDP dataset from demonstrations...")
+        # Extract data ensuring no NaN values
+        observations = data["obs"] if "obs" in data else data["state"]
+        actions = data["action"]
+        rewards = data["reward"] if "reward" in data else torch.zeros_like(actions[:, 0])
+        episode_ids = data["episode"] if "episode" in data else torch.zeros_like(rewards, dtype=torch.long)
+        
+        # Convert to numpy and handle NaN values
+        observations = observations.cpu().numpy()
+        actions = actions.cpu().numpy()
+        rewards = rewards.cpu().numpy()
+        
+        # Use episode_ids to create terminals
+        episode_ids = episode_ids.cpu().numpy()
+        
+        # Create terminals array (1 at the end of each episode)
+        terminals = np.zeros_like(rewards)
+        episode_ends = np.where(np.diff(episode_ids, prepend=-1) != 0)[0]
+        if len(episode_ends) > 0:
+            terminals[episode_ends - 1] = 1
+        
+        # Filter out NaN values
+        valid_mask = (~np.isnan(observations).any(axis=1)) & (~np.isnan(actions).any(axis=1)) & (~np.isnan(rewards))
+        if not np.all(valid_mask):
+            print(f"Filtering out {np.sum(~valid_mask)} transitions with NaN values")
+            observations = observations[valid_mask]
+            actions = actions[valid_mask]
+            rewards = rewards[valid_mask]
+            terminals = terminals[valid_mask]
+        
+        # Create the dataset
+        dataset = MDPDataset(
+            observations=observations,
+            actions=actions,
+            rewards=rewards,
+            terminals=terminals
+        )
     
-    # Create MDP dataset with learned rewards
-    print("Creating MDP dataset with learned rewards...")
-    dataset = create_mdp_dataset_with_sa_reward(
-        data, 
-        reward_model, 
-        device, 
-        max_segments=cfg.data.max_segments,
-        batch_size=cfg.data.reward_batch_size
-    )
     print(f"Created dataset with {dataset.size()} transitions")
     
     # Create environment for evaluation
@@ -507,20 +557,76 @@ def main(cfg: DictConfig):
         # Use the environment creator for evaluation
         env = env_creator
 
-    # Initialize IQL algorithm
-    print("Initializing IQL algorithm...")
-    iql = IQL(
-        actor_learning_rate=cfg.model.actor_learning_rate,
-        critic_learning_rate=cfg.model.critic_learning_rate,
-        batch_size=cfg.model.batch_size,
-        gamma=cfg.model.gamma,
-        tau=cfg.model.tau,
-        n_critics=cfg.model.n_critics,
-        expectile=cfg.model.expectile,
-        weight_temp=cfg.model.weight_temp,
-        encoder_factory=VectorEncoderFactory(cfg.model.encoder_dims),
-        use_gpu=torch.cuda.is_available()
-    )
+    # Initialize algorithm based on the algorithm_name
+    print(f"Initializing {algorithm_name.upper()} algorithm...")
+    
+    if algorithm_name.lower() == "iql":
+        # Initialize IQL algorithm
+        algo = IQL(
+            actor_learning_rate=cfg.model.actor_learning_rate,
+            critic_learning_rate=cfg.model.critic_learning_rate,
+            batch_size=cfg.model.batch_size,
+            gamma=cfg.model.gamma,
+            tau=cfg.model.tau,
+            n_critics=cfg.model.n_critics,
+            expectile=cfg.model.expectile,
+            weight_temp=cfg.model.weight_temp,
+            encoder_factory=VectorEncoderFactory(cfg.model.encoder_dims),
+            use_gpu=torch.cuda.is_available()
+        )
+        
+    elif algorithm_name.lower() == "bc":
+        # Initialize BC algorithm with a more robust approach to learning rate
+        # Get learning rate parameter, providing a default if not found
+        bc_learning_rate = 3e-4  # Default value
+        if hasattr(cfg.model, 'learning_rate'):
+            bc_learning_rate = cfg.model.learning_rate
+        print(f"Using learning rate: {bc_learning_rate}")
+        
+        algo = BC(
+            learning_rate=bc_learning_rate,
+            batch_size=cfg.model.batch_size,
+            encoder_factory=VectorEncoderFactory(cfg.model.encoder_dims),
+            use_gpu=torch.cuda.is_available()
+        )
+        
+        # For BC with weight decay
+        if hasattr(cfg.model, 'use_weight_decay') and cfg.model.use_weight_decay:
+            if hasattr(algo, 'create_impl'):
+                impl = algo.create_impl(
+                    state_dim, 
+                    action_dim, 
+                    algo._encoder_factory, 
+                    algo._optim_factory
+                )
+                # Set weight decay if it's used
+                if hasattr(impl.optim, 'param_groups'):
+                    for param_group in impl.optim.param_groups:
+                        param_group['weight_decay'] = cfg.model.weight_decay
+                        
+            # Fallback for older d3rlpy versions
+            if hasattr(algo, '_impl') and hasattr(algo._impl, 'optim'):
+                for param_group in algo._impl.optim.param_groups:
+                    param_group['weight_decay'] = cfg.model.weight_decay
+        
+    else:
+        raise ValueError(f"Unsupported algorithm: {algorithm_name}")
+    
+    # Get number of training epochs (with fallback defaults)
+    if hasattr(cfg.training, 'n_epochs'):
+        n_epochs = cfg.training.n_epochs
+    else:
+        # Backwards compatibility with older config files
+        if algorithm_name.lower() == "iql" and hasattr(cfg.training, 'iql_epochs'):
+            n_epochs = cfg.training.iql_epochs
+        elif algorithm_name.lower() == "bc" and hasattr(cfg.training, 'bc_epochs'):
+            n_epochs = cfg.training.bc_epochs
+        else:
+            # Default value if no epochs specified
+            n_epochs = 100
+            print(f"Warning: No n_epochs found in config. Using default value: {n_epochs}")
+    
+    print(f"Training for {n_epochs} epochs")
     
     # For tracking evaluation metrics
     evaluation_results = []
@@ -531,7 +637,7 @@ def main(cfg: DictConfig):
         nonlocal last_eval_epoch
             
         # Only evaluate at specified intervals
-        if epoch <= last_eval_epoch or (epoch % cfg.training.eval_interval != 0 and epoch != cfg.training.iql_epochs - 1):
+        if epoch <= last_eval_epoch or (epoch % cfg.training.eval_interval != 0 and epoch != n_epochs - 1):
             return
             
         # Update last evaluated epoch
@@ -599,8 +705,8 @@ def main(cfg: DictConfig):
                 except Exception as e:
                     print(f"Warning: Could not upload videos to wandb: {e}")
     
-    # Train IQL
-    print(f"Training IQL for {cfg.training.iql_epochs} epochs...")
+    # Train the algorithm
+    print(f"Training {algorithm_name.upper()} for {n_epochs} epochs...")
     
     # Define scorers based on environment availability
     if env is not None:
@@ -613,9 +719,9 @@ def main(cfg: DictConfig):
         scorers = {}
         
     # Train the model
-    training_metrics = iql.fit(
+    training_metrics = algo.fit(
         dataset,
-        n_epochs=cfg.training.iql_epochs,
+        n_epochs=n_epochs,
         eval_episodes=None,  # Don't use the built-in eval which expects episodes format
         save_interval=10,
         scorers=scorers,
@@ -633,8 +739,8 @@ def main(cfg: DictConfig):
         print(f"Epoch {epoch}: {metrics_str}")
     
     # Save the model
-    model_path = f"{cfg.output.output_dir}/iql_{Path(cfg.data.data_path).stem}_sa.pt"
-    iql.save_model(model_path)
+    model_path = f"{cfg.output.output_dir}/{algorithm_name.lower()}_{Path(cfg.data.data_path).stem}.pt"
+    algo.save_model(model_path)
     print(f"Model saved to {model_path}")
     
     # Run final comprehensive evaluation
@@ -653,7 +759,7 @@ def main(cfg: DictConfig):
             
         evaluation_metrics = evaluate_policy_manual(
             env, 
-            iql, 
+            algo, 
             n_episodes=cfg.training.eval_episodes, 
             verbose=True,
             parallel=cfg.evaluation.parallel_eval,
@@ -694,14 +800,14 @@ def main(cfg: DictConfig):
     
     # Save results
     results = {
-        'config': OmegaConf.to_container(cfg, resolve=True),
+        'config': cfg_dict,  # Use the dictionary version of the config
         'final_evaluation': evaluation_metrics,
         'training_metrics': training_metrics,
         'evaluation_during_training': evaluation_results,
         'dataset_size': dataset.size()
     }
     
-    results_path = f"{cfg.output.output_dir}/sa_results.pkl"
+    results_path = f"{cfg.output.output_dir}/{algorithm_name.lower()}_results.pkl"
     with open(results_path, 'wb') as f:
         pickle.dump(results, f)
     
@@ -712,7 +818,7 @@ def main(cfg: DictConfig):
     if cfg.wandb.use_wandb and wandb.run:
         # Upload the model file if it exists
         if os.path.exists(model_path):
-            artifact = wandb.Artifact(f"iql_model_{wandb.run.id}", type="model")
+            artifact = wandb.Artifact(f"{algorithm_name.lower()}_model_{wandb.run.id}", type="model")
             artifact.add_file(model_path)
             wandb.log_artifact(artifact)
             
