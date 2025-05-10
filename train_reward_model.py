@@ -88,10 +88,23 @@ class StateActionRewardModel(nn.Module):
         return result
     
     def logpdf(self, obs, action, reward):
-        """Compute log probability of reward given observation and action."""
-        # Assuming Gaussian distribution with unit variance
+        """Compute log probability of reward given observation and action.
+        
+        Args:
+            obs: Observation tensor
+            action: Action tensor
+            reward: Reward tensor
+            
+        Returns:
+            Log probability of the reward under the model
+        """
+        # Get predicted reward from the model
         pred_reward = self(obs, action)
+        
+        # Compute log probability using Gaussian distribution with unit variance
+        # Using more stable implementation to avoid numerical issues
         log_prob = -0.5 * ((pred_reward - reward) ** 2) - 0.5 * np.log(2 * np.pi)
+        
         return log_prob
 
 class SegmentRewardModel(nn.Module):
@@ -152,20 +165,37 @@ class SegmentRewardModel(nn.Module):
             raise ValueError(f"Unexpected input shape: observations {observations.shape}, actions {actions.shape}")
     
     def logpdf(self, observations, actions, rewards):
-        """Compute log probability of rewards given observations and actions."""
+        """Compute log probability of rewards given observations and actions.
+        
+        Args:
+            observations: Batch of observation sequences or single observation sequence
+            actions: Batch of action sequences or single action sequence
+            rewards: Target reward values
+            
+        Returns:
+            Log probability of rewards under the model
+        """
         # Vectorized implementation
         if observations.dim() == 2:  # Single segment
+            # Compute segment reward
             segment_reward = self(observations, actions)
-            return self.reward_model.logpdf(observations.mean(0, keepdim=True), 
-                                          actions.mean(0, keepdim=True) if len(actions) > 0 else actions[0:1], 
-                                          rewards)
+            
+            # Use mean observation and action for the whole segment to compute log probability
+            mean_obs = observations.mean(0, keepdim=True)
+            mean_action = actions.mean(0, keepdim=True) if len(actions) > 0 else actions[0:1]
+            
+            # Get log probability from base reward model
+            return self.reward_model.logpdf(mean_obs, mean_action, rewards)
+            
         elif observations.dim() == 3:  # Batch of segments
             # Compute mean observation and action for each segment
             mean_obs = observations.mean(1)  # Average over sequence length
             mean_actions = actions.mean(1) if actions.size(1) > 0 else actions[:, 0]
+            
+            # Get log probability from base reward model
             return self.reward_model.logpdf(mean_obs, mean_actions, rewards)
         else:
-            raise ValueError(f"Unexpected input shape for logpdf")
+            raise ValueError(f"Unexpected input shape for logpdf: {observations.shape}")
 
 class PreferenceDataset(Dataset):
     """Dataset for segment preference pairs."""
@@ -288,6 +318,82 @@ def bradley_terry_loss(rewards1, rewards2, preferences):
     
     return loss
 
+def create_data_loaders(preference_dataset, train_ratio=0.8, val_ratio=0.1, batch_size=32, num_workers=4, pin_memory=True, seed=RANDOM_SEED):
+    """Create data loaders for training, validation, and testing.
+    
+    Args:
+        preference_dataset: Dataset containing segment preference pairs
+        train_ratio: Proportion of data to use for training
+        val_ratio: Proportion of data to use for validation
+        batch_size: Batch size for data loaders
+        num_workers: Number of workers for data loading
+        pin_memory: Whether to pin memory for faster GPU transfer
+        seed: Random seed for reproducibility
+        
+    Returns:
+        Dictionary containing 'train', 'val', and 'test' data loaders, plus dataset sizes
+    """
+    # Calculate split sizes
+    total_size = len(preference_dataset)
+    train_size = int(train_ratio * total_size)
+    val_size = int(val_ratio * total_size)
+    test_size = total_size - train_size - val_size
+    
+    # Create random splits
+    train_dataset, val_dataset, test_dataset = random_split(
+        preference_dataset, 
+        [train_size, val_size, test_size],
+        generator=torch.Generator().manual_seed(seed)
+    )
+    
+    print(f"Split data: Train={train_size}, Validation={val_size}, Test={test_size}")
+    
+    # Determine effective settings for CPU vs GPU
+    effective_num_workers = num_workers
+    effective_pin_memory = pin_memory
+    
+    # Adjust for CPU-only mode
+    if not torch.cuda.is_available():
+        effective_pin_memory = False
+    
+    # Create data loaders
+    train_loader = DataLoader(
+        train_dataset, 
+        batch_size=batch_size, 
+        shuffle=True,
+        num_workers=effective_num_workers,
+        pin_memory=effective_pin_memory,
+        persistent_workers=effective_num_workers > 0,
+        prefetch_factor=2 if effective_num_workers > 0 else None,
+    )
+    
+    val_loader = DataLoader(
+        val_dataset, 
+        batch_size=batch_size,
+        num_workers=effective_num_workers,
+        pin_memory=effective_pin_memory,
+        persistent_workers=effective_num_workers > 0,
+        prefetch_factor=2 if effective_num_workers > 0 else None,
+    )
+    
+    test_loader = DataLoader(
+        test_dataset, 
+        batch_size=batch_size,
+        num_workers=effective_num_workers,
+        pin_memory=effective_pin_memory,
+        persistent_workers=effective_num_workers > 0,
+        prefetch_factor=2 if effective_num_workers > 0 else None,
+    )
+    
+    return {
+        'train': train_loader,
+        'val': val_loader,
+        'test': test_loader,
+        'train_size': train_size,
+        'val_size': val_size,
+        'test_size': test_size
+    }
+
 def log_wandb_metrics(train_loss, val_loss, epoch, lr=None):
     """Log training metrics to wandb."""
     if not wandb.run:
@@ -307,7 +413,6 @@ def log_wandb_metrics(train_loss, val_loss, epoch, lr=None):
 def train_reward_model(model, train_loader, val_loader, device, num_epochs=50, lr=1e-4):
     """Train the reward model using Bradley-Terry loss with wandb logging."""
     optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=1e-4)  # Add weight decay for regularization
-    scheduler = StepLR(optimizer, step_size=10, gamma=0.5)
     
     train_losses = []
     val_losses = []
@@ -323,6 +428,7 @@ def train_reward_model(model, train_loader, val_loader, device, num_epochs=50, l
                 m.bias.data.zero_()
     
     print(f"Training reward model with gradient clipping at {max_grad_norm}...")
+    print(f"Using constant learning rate: {lr}")
     
     # Clear CUDA cache before training 
     if device.type == 'cuda':
@@ -399,18 +505,15 @@ def train_reward_model(model, train_loader, val_loader, device, num_epochs=50, l
         avg_val_loss = val_loss / len(val_loader)
         val_losses.append(avg_val_loss)
         
-        # Update learning rate
-        scheduler.step()
-        
         # Save best model
         if avg_val_loss < best_val_loss:
             best_val_loss = avg_val_loss
             best_model_state = model.state_dict().copy()
         
         # Log to wandb
-        log_wandb_metrics(avg_train_loss, avg_val_loss, epoch, scheduler.get_last_lr()[0])
+        log_wandb_metrics(avg_train_loss, avg_val_loss, epoch, lr)
         
-        print(f"Epoch {epoch+1}/{num_epochs}: train_loss={avg_train_loss:.4f}, val_loss={avg_val_loss:.4f}, lr={scheduler.get_last_lr()[0]:.6f}")
+        print(f"Epoch {epoch+1}/{num_epochs}: train_loss={avg_train_loss:.4f}, val_loss={avg_val_loss:.4f}, lr={lr:.6f}")
     
     # Load best model if we found one
     if best_model_state is not None:
@@ -475,6 +578,84 @@ def load_preferences_data(file_path):
     
     print(f"Loaded {len(segment_pairs)} preference pairs")
     return segment_pairs, segment_indices, preferences, data
+
+def evaluate_model_on_test_set(model, test_loader, device):
+    """Evaluate model performance on the test set.
+    
+    Args:
+        model: Trained reward model
+        test_loader: DataLoader for test data
+        device: Device to run evaluation on
+        
+    Returns:
+        Dictionary containing evaluation metrics
+    """
+    print("\nEvaluating on test set...")
+    model.eval()
+    test_loss = 0
+    test_acc = 0
+    test_total = 0
+    logpdf_values = []
+    
+    with torch.no_grad():
+        for obs1, actions1, obs2, actions2, pref in tqdm(test_loader, desc="Testing"):
+            # Move to device
+            obs1, actions1 = obs1.to(device), actions1.to(device)
+            obs2, actions2 = obs2.to(device), actions2.to(device)
+            pref = pref.to(device)
+            
+            # Get reward predictions
+            reward1 = model(obs1, actions1)
+            reward2 = model(obs2, actions2)
+                
+            # Compute loss
+            loss = bradley_terry_loss(reward1, reward2, pref)
+            test_loss += loss.item()
+            
+            # Get model predictions
+            # Higher reward should correspond to the preferred segment
+            # pref=1 means segment 1 is preferred, pref=2 means segment 2 is preferred
+            pred_pref = torch.where(reward1 > reward2, 
+                                    torch.ones_like(pref), 
+                                    torch.ones_like(pref) * 2)
+            
+            # Compute accuracy (prediction matches ground truth preference)
+            correct = (pred_pref == pref).sum().item()
+            test_acc += correct
+            test_total += pref.size(0)
+            
+            # Calculate log probability for each batch item
+            batch_size = pref.size(0)
+            for i in range(batch_size):
+                # Select the correctly preferred segments for this batch item
+                if pref[i] == 1:
+                    # First segment is preferred
+                    segment_obs = obs1[i:i+1]  # Keep batch dimension
+                    segment_actions = actions1[i:i+1]
+                    segment_reward = reward1[i:i+1]
+                else:
+                    # Second segment is preferred
+                    segment_obs = obs2[i:i+1]  # Keep batch dimension
+                    segment_actions = actions2[i:i+1]
+                    segment_reward = reward2[i:i+1]
+                
+                # Calculate logpdf
+                logp = model.logpdf(segment_obs, segment_actions, segment_reward)
+                logpdf_values.append(logp.mean().item())
+    
+    avg_test_loss = test_loss / len(test_loader) if len(test_loader) > 0 else float('nan')
+    test_accuracy = test_acc / test_total if test_total > 0 else 0
+    avg_logpdf = np.mean(logpdf_values) if logpdf_values else float('nan')
+    
+    print(f"Test Loss: {avg_test_loss:.4f}, Accuracy: {test_accuracy:.4f}, Avg LogPDF: {avg_logpdf:.4f}")
+    print(f"Correctly predicted {test_acc} out of {test_total} preference pairs ({test_accuracy:.2%})")
+    
+    return {
+        "test_loss": avg_test_loss,
+        "test_accuracy": test_accuracy,
+        "avg_logpdf": avg_logpdf,
+        "num_test_samples": test_total
+    }
 
 @hydra.main(config_path="config/train_reward_model", config_name="config", version_base=None)
 def main(cfg: DictConfig):
@@ -622,66 +803,34 @@ def main(cfg: DictConfig):
         preferences
     )
     
-    # Split into train, validation, and test sets
-    total_size = len(preference_dataset)
-    train_size = int(0.8 * total_size)
-    val_size = int(0.1 * total_size)
-    test_size = total_size - train_size - val_size
-    
-    # Create random splits
-    train_dataset, val_dataset, test_dataset = random_split(
-        preference_dataset, 
-        [train_size, val_size, test_size],
-        generator=torch.Generator().manual_seed(RANDOM_SEED)
+    # Create data loaders
+    dataloaders = create_data_loaders(
+        preference_dataset,
+        train_ratio=0.8,  # 80% for training
+        val_ratio=0.1,    # 10% for validation
+        batch_size=cfg.training.batch_size,
+        num_workers=effective_num_workers,
+        pin_memory=effective_pin_memory,
+        seed=RANDOM_SEED
     )
+    
+    train_loader = dataloaders['train']
+    val_loader = dataloaders['val']
+    test_loader = dataloaders['test']
     
     # Log dataset information to wandb
     if cfg.wandb.use_wandb:
         wandb.config.update({
             "dataset": {
                 "name": Path(cfg.data.data_path).stem,
-                "total_pairs": total_size,
-                "train_size": train_size,
-                "val_size": val_size,
-                "test_size": test_size,
+                "total_pairs": len(preference_dataset),
+                "train_size": dataloaders['train_size'],
+                "val_size": dataloaders['val_size'],
+                "test_size": dataloaders['test_size'],
                 "observation_dim": state_dim,
                 "action_dim": action_dim
             }
         })
-    
-    print(f"Split data: Train={train_size}, Validation={val_size}, Test={test_size}")
-    
-    # Create data loaders
-    train_loader = DataLoader(
-        train_dataset, 
-        batch_size=cfg.training.batch_size, 
-        shuffle=True,
-        num_workers=effective_num_workers,
-        pin_memory=effective_pin_memory,
-        persistent_workers=effective_num_workers > 0,
-        # Add prefetch factor for more efficient loading
-        prefetch_factor=2 if effective_num_workers > 0 else None,
-    )
-    
-    val_loader = DataLoader(
-        val_dataset, 
-        batch_size=cfg.training.batch_size,
-        num_workers=effective_num_workers,
-        pin_memory=effective_pin_memory,
-        persistent_workers=effective_num_workers > 0,
-        prefetch_factor=2 if effective_num_workers > 0 else None,
-    )
-    
-    test_loader = DataLoader(
-        test_dataset, 
-        batch_size=cfg.training.batch_size,
-        num_workers=effective_num_workers,
-        pin_memory=effective_pin_memory,
-        persistent_workers=effective_num_workers > 0,
-        prefetch_factor=2 if effective_num_workers > 0 else None,
-    )
-    
-    print(f"Train pairs: {len(train_dataset)}, Validation pairs: {len(val_dataset)}, Test pairs: {len(test_dataset)}")
     
     # Initialize reward model
     model = SegmentRewardModel(state_dim, action_dim, hidden_dims=cfg.model.hidden_dims)
@@ -721,43 +870,12 @@ def main(cfg: DictConfig):
     print(f"\nTraining completed in {int(hours)}h {int(minutes)}m {int(seconds)}s")
     
     # Evaluate on test set
-    print("\nEvaluating on test set...")
-    model.eval()
-    test_loss = 0
-    test_acc = 0
-    test_total = 0
-    
-    with torch.no_grad():
-        for obs1, actions1, obs2, actions2, pref in tqdm(test_loader, desc="Testing"):
-            # Move to device
-            obs1, actions1 = obs1.to(device), actions1.to(device)
-            obs2, actions2 = obs2.to(device), actions2.to(device)
-            pref = pref.to(device)
-            
-            # Get reward predictions
-            reward1 = model(obs1, actions1)
-            reward2 = model(obs2, actions2)
-            
-            # Compute loss
-            loss = bradley_terry_loss(reward1, reward2, pref)
-            test_loss += loss.item()
-            
-            # Compute accuracy (prediction matches preference)
-            pred_pref = (reward1 > reward2).long() + 1  # 1 if reward1 > reward2, 2 otherwise
-            test_acc += (pred_pref == pref).sum().item()
-            test_total += pref.size(0)
-    
-    avg_test_loss = test_loss / len(test_loader) if len(test_loader) > 0 else float('nan')
-    test_accuracy = test_acc / test_total if test_total > 0 else 0
-    
-    print(f"Test Loss: {avg_test_loss:.4f}, Accuracy: {test_accuracy:.4f}")
+    model = model.to(device)
+    test_metrics = evaluate_model_on_test_set(model, test_loader, device)
     
     # Log final test results to wandb
     if cfg.wandb.use_wandb:
-        wandb.log({
-            "test_loss": avg_test_loss,
-            "test_accuracy": test_accuracy
-        })
+        wandb.log(test_metrics)
     
     # Save model
     model_path = f"{cfg.output.output_dir}/state_action_reward_model.pt"
@@ -779,8 +897,7 @@ def main(cfg: DictConfig):
         "action_dim": action_dim,
         "training_losses": train_losses,
         "validation_losses": val_losses,
-        "test_loss": avg_test_loss,
-        "test_accuracy": test_accuracy,
+        "test_metrics": test_metrics,
         "config": OmegaConf.to_container(cfg, resolve=True)
     }
     

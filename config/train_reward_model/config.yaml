@@ -3,7 +3,7 @@
 # Data parameters
 data:
   data_path: "/scr/shared/clam/datasets/metaworld/assembly-v2/buffer_assembly-v2.pt"
-  segment_length: 20
+  segment_length: 32
   num_segments: 5000
   num_pairs: 5000
   preferences_data_path: null
@@ -27,13 +27,13 @@ hardware:
 
 # Output parameters
 output:
-  output_dir: "reward_model"
+  output_dir: /scr/aliang80/robot_pref/reward_model
   
 # Wandb configuration
 wandb:
   use_wandb: true
   project: "robot_preference_learning"
-  entity: null  # Set to your wandb entity or leave as null
-  name: null  # Will be auto-generated if null
+  entity: "clvr"  # Set to your wandb entity or leave as null
+  name: "reward_model"  # Will be auto-generated if null
   tags: ["reward_model", "preference_learning"]
   notes: "Training reward model with Bradley-Terry preference learning" 
