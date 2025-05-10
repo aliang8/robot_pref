@@ -409,8 +409,9 @@ def generate_augmented_preferences(data, clusters, segment_indices, cluster_rank
         cluster_ranking: Ordered list of cluster IDs from most to least preferred
         
     Returns:
-        list: Augmented preferences [(i, j, pref), ...]
-              where i, j are segment indices and pref is 1 if i preferred, 2 if j preferred
+        tuple: (augmented_preferences, accuracy_stats)
+            augmented_preferences: list of (i, j, pref) preferences
+            accuracy_stats: dict with accuracy statistics vs ground truth
     """
     print("Generating augmented preferences...")
     
@@ -419,6 +420,14 @@ def generate_augmented_preferences(data, clusters, segment_indices, cluster_rank
     
     # Generate augmented preferences
     augmented_preferences = []
+    
+    # Statistics to track accuracy
+    stats = {
+        'total_pairs': 0,
+        'ground_truth_available': 0,
+        'matching_ground_truth': 0,
+        'accuracy': 0.0
+    }
     
     # Iterate through all possible segment pairs
     n_segments = len(segment_indices)
@@ -467,12 +476,44 @@ def generate_augmented_preferences(data, clusters, segment_indices, cluster_rank
                 # Generate preferences
                 for idx1, idx2 in pairs:
                     # Cluster1 has higher rank (lower rank number) than Cluster2
-                    augmented_preferences.append((idx1, idx2, 1))  # Prefer segment from cluster1
+                    augmented_preference = 1  # Prefer segment from cluster1
+                    
+                    # Get ground truth preference based on reward
+                    gt_preference = None
+                    if "reward" in data:
+                        start1, end1 = segment_indices[idx1]
+                        start2, end2 = segment_indices[idx2]
+                        
+                        # Calculate cumulative reward for each segment
+                        reward1 = data["reward"][start1:end1+1].sum().item()
+                        reward2 = data["reward"][start2:end2+1].sum().item()
+                        
+                        if abs(reward1 - reward2) < 1e-6:  # Equal (within epsilon)
+                            gt_preference = 0
+                        elif reward1 > reward2:
+                            gt_preference = 1
+                        else:
+                            gt_preference = 2
+                    
+                    # Update statistics
+                    stats['total_pairs'] += 1
+                    if gt_preference is not None and gt_preference != 0:
+                        stats['ground_truth_available'] += 1
+                        if augmented_preference == gt_preference:
+                            stats['matching_ground_truth'] += 1
+                    
+                    # Add to augmented preferences
+                    augmented_preferences.append((idx1, idx2, augmented_preference))
                     augmented_count += 1
     
-    print(f"Generated {augmented_count} augmented preferences")
+    # Calculate accuracy if possible
+    if stats['ground_truth_available'] > 0:
+        stats['accuracy'] = stats['matching_ground_truth'] / stats['ground_truth_available']
     
-    return augmented_preferences
+    print(f"Generated {augmented_count} augmented preferences")
+    print(f"Augmented preference accuracy vs ground truth: {stats['accuracy']:.2%} ({stats['matching_ground_truth']}/{stats['ground_truth_available']} comparable pairs)")
+    
+    return augmented_preferences, stats
 
 def create_preference_dataset(data, segment_indices, augmented_preferences, output_file, preference_stats=None):
     """Create a dataset for training a reward model from augmented preferences.
@@ -811,6 +852,8 @@ def main():
                         help="Skip generating videos for preference collection to speed things up")
     parser.add_argument("--no_auto_open", action="store_true",
                         help="Don't automatically open visualization videos")
+    parser.add_argument("--use_gt_ranking", action="store_true",
+                        help="Use ground truth ranking for augmented preferences instead of user ranking")
     args = parser.parse_args()
     
     # Create output directory
@@ -917,10 +960,21 @@ def main():
         'ground_truth_ranking': gt_ranking
     }
     
-    # Generate augmented preferences (using user ranking by default)
-    augmented_preferences = generate_augmented_preferences(
-        data, clusters, segment_indices, user_ranking
+    # Choose which ranking to use based on arguments
+    if args.use_gt_ranking and gt_ranking:
+        print("\nUsing ground truth ranking for augmented preferences generation")
+        selected_ranking = gt_ranking
+    else:
+        print("\nUsing user-based ranking for augmented preferences generation")
+        selected_ranking = user_ranking
+    
+    # Generate augmented preferences using the selected ranking
+    augmented_preferences, augmented_stats = generate_augmented_preferences(
+        data, clusters, segment_indices, selected_ranking
     )
+    
+    # Add augmented preference statistics to overall stats
+    preference_stats['augmented_vs_ground_truth'] = augmented_stats
     
     # Create preference dataset
     dataset_file = os.path.join(args.output_dir, "preference_dataset.pkl")
@@ -929,18 +983,37 @@ def main():
         preference_stats=preference_stats  # Include stats in metadata
     )
     
-    print("Process complete!")
+    print("\nProcess complete!")
     print(f"Collected {len(user_preferences)} direct user preferences")
     print(f"Generated {len(augmented_preferences)} augmented preferences")
     
-    # Print preference accuracy summary
+    # Print user preference accuracy summary
     if preference_stats['user_vs_ground_truth']['comparable_pairs'] > 0:
         print("\nUser preference vs. ground truth summary:")
         print(f"  Total comparable preferences: {preference_stats['user_vs_ground_truth']['comparable_pairs']}")
         print(f"  Matching preferences: {preference_stats['user_vs_ground_truth']['matching_preferences']}")
         print(f"  Accuracy: {preference_stats['user_vs_ground_truth']['accuracy']:.2%}")
+
+    # Print augmented preference accuracy summary
+    print("\nAugmented preference vs. ground truth summary:")
+    print(f"  Total comparable preferences: {augmented_stats['ground_truth_available']}")
+    print(f"  Matching preferences: {augmented_stats['matching_ground_truth']}")
+    print(f"  Accuracy: {augmented_stats['accuracy']:.2%}")
     
-    print(f"Results saved to {args.output_dir}")
+    # Print comparison between user and augmented preferences
+    if preference_stats['user_vs_ground_truth']['comparable_pairs'] > 0 and augmented_stats['ground_truth_available'] > 0:
+        user_acc = preference_stats['user_vs_ground_truth']['accuracy']
+        aug_acc = augmented_stats['accuracy']
+        
+        print("\nComparison:")
+        if abs(user_acc - aug_acc) < 0.05:  # Within 5%
+            print(f"  User and augmented preferences have similar accuracy (difference: {abs(user_acc - aug_acc):.2%})")
+        elif user_acc > aug_acc:
+            print(f"  User preferences are more accurate than augmented preferences by {user_acc - aug_acc:.2%}")
+        else:
+            print(f"  Augmented preferences are more accurate than user preferences by {aug_acc - user_acc:.2%}")
+    
+    print(f"\nResults saved to {args.output_dir}")
 
 if __name__ == "__main__":
     main() 
