@@ -57,12 +57,14 @@ python train_reward_model.py data.data_path="/path/to/dataset.pt" model.hidden_d
 
 ## Train Policy
 
-Train a policy using different algorithms by specifying the appropriate config file:
+Train a policy using different algorithms:
 
 ### IQL (Implicit Q-Learning)
 
+IQL is the default algorithm. You can run it directly with:
+
 ```bash
-# Basic IQL policy training (default)
+# Basic IQL policy training
 python train_policy.py data.data_path="/path/to/dataset.pt" data.reward_model_path="reward_model/state_action_reward_model.pt"
 
 # With video recording
@@ -73,6 +75,8 @@ python train_policy.py data.data_path="/path/to/dataset.pt" training.n_epochs=20
 ```
 
 ### BC (Behavior Cloning)
+
+To train with BC instead of IQL:
 
 ```bash
 # Basic BC policy training

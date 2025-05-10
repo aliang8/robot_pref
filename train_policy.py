@@ -15,6 +15,7 @@ import time
 import hydra
 from omegaconf import DictConfig, OmegaConf
 import wandb
+import matplotlib.pyplot as plt
 
 # Import utility functions
 from trajectory_utils import (
@@ -35,6 +36,20 @@ from utils.eval_utils import (
 torch.manual_seed(RANDOM_SEED)
 np.random.seed(RANDOM_SEED)
 random.seed(RANDOM_SEED)
+
+# Define a simple AttrDict class that provides dot access to dictionaries
+class AttrDict(dict):
+    def __init__(self, *args, **kwargs):
+        super(AttrDict, self).__init__(*args, **kwargs)
+        self.__dict__ = self
+
+    @staticmethod
+    def from_nested_dict(data):
+        """Create nested AttrDict from nested dict."""
+        if not isinstance(data, dict):
+            return data
+        else:
+            return AttrDict({key: AttrDict.from_nested_dict(data[key]) for key in data})
 
 def create_mdp_dataset_with_sa_reward(data, reward_model, device, max_segments=1000, batch_size=32):
     """Create MDPDataset from tensordict data using a state-action reward model.
@@ -374,32 +389,78 @@ def get_d3rlpy_experiment_path(base_logdir, experiment_name, with_timestamp=True
         
     return None
 
+def log_to_wandb(metrics, epoch=None, prefix="", step=None):
+    """Log any metrics to wandb with proper prefixing.
+    
+    Args:
+        metrics: Dict of metrics or list of (epoch, metrics_dict) tuples from d3rlpy
+        epoch: Current epoch (optional)
+        prefix: Prefix to add to metric names (e.g., "train", "eval")
+        step: Step to use for wandb logging (defaults to epoch if provided)
+    
+    Returns:
+        bool: True if metrics were logged, False otherwise
+    """
+    if not wandb.run:
+        return False
+    
+    # Use epoch as step if step not specified
+    if step is None and epoch is not None:
+        step = epoch
+    
+    # Handle d3rlpy training_metrics format (list of tuples)
+    if isinstance(metrics, list) and len(metrics) > 0 and isinstance(metrics[0], tuple) and len(metrics[0]) == 2:
+        # Log each epoch's metrics separately
+        for epoch, epoch_metrics in metrics:
+            # Create metrics dict with prefix
+            log_dict = {f"{prefix}_{k}": v for k, v in epoch_metrics.items() 
+                       if isinstance(v, (int, float, np.int64, np.float32, np.float64, np.number))}
+            
+            # Add epoch
+            log_dict["epoch"] = epoch
+            
+            # Log to wandb
+            if log_dict:
+                wandb.log(log_dict, step=epoch)
+        
+        print(f"Logged {len(metrics)} epochs of {prefix} metrics to wandb")
+        return True
+    
+    # Handle single metrics dict
+    elif isinstance(metrics, dict):
+        log_dict = {}
+        
+        # Add prefix to metric names if provided
+        pre = f"{prefix}_" if prefix else ""
+        
+        # Add epoch if provided
+        if epoch is not None:
+            log_dict[f"{pre}epoch"] = epoch
+        
+        # Add all numerical metrics with prefix
+        for key, value in metrics.items():
+            if isinstance(value, (int, float, np.int64, np.float32, np.float64, np.number)):
+                log_dict[f"{pre}{key}"] = value
+        
+        # Log histogram for returns if available
+        if "returns" in metrics and isinstance(metrics["returns"], (list, np.ndarray)):
+            wandb.log({f"{pre}returns_histogram": wandb.Histogram(metrics["returns"])}, step=step)
+        
+        # Log to wandb
+        if log_dict:
+            wandb.log(log_dict, step=step)
+            return True
+    
+    return False
+
+# Keep these functions for backward compatibility but implement them using the unified function
 def log_evaluation_to_wandb(metrics, epoch=None, prefix=""):
     """Log evaluation metrics to wandb."""
-    if not wandb.run:
-        return
-        
-    log_dict = {}
-    
-    # Add prefix to metric names if provided
-    pre = f"{prefix}_" if prefix else ""
-    
-    if epoch is not None:
-        log_dict[f"{pre}epoch"] = epoch
-        
-    # Log numerical metrics
-    for key, value in metrics.items():
-        if isinstance(value, (int, float, np.int64, np.float32, np.float64)):
-            log_dict[f"{pre}{key}"] = value
-            
-    # If returns array is available, log a histogram
-    if "returns" in metrics and isinstance(metrics["returns"], (list, np.ndarray)):
-        if wandb.run:
-            wandb.log({f"{pre}returns_histogram": wandb.Histogram(metrics["returns"])}, step=epoch if epoch is not None else None)
-    
-    # Log to wandb if any metrics to log
-    if log_dict and wandb.run:
-        wandb.log(log_dict, step=epoch if epoch is not None else None)
+    return log_to_wandb(metrics, epoch=epoch, prefix=prefix)
+
+def log_training_metrics_to_wandb(training_metrics, prefix="train"):
+    """Log d3rlpy training metrics to wandb."""
+    return log_to_wandb(training_metrics, prefix=prefix)
 
 class MetaWorldEnvCreator:
     """A picklable environment creator for MetaWorld environments."""
@@ -414,23 +475,143 @@ class MetaWorldEnvCreator:
         unique_seed = int(time.time() * 1000) % 100000 + random.randint(0, 10000)
         return get_metaworld_env(self.dataset_name, seed=unique_seed)
 
+class WandbCallback:
+    """Callback for d3rlpy to log metrics to wandb.
+    
+    This callback is designed to capture training metrics that d3rlpy logs
+    during training, including loss values and evaluation scores.
+    """
+    
+    def __init__(self, use_wandb=True, prefix="train"):
+        self.use_wandb = use_wandb
+        self.prefix = prefix
+        self.epoch = 0
+        self.best_eval_metrics = None
+        self.best_eval_epoch = -1
+        # Track metrics across epochs
+        self.training_losses = {}
+        self.current_epoch_metrics = {}
+        self.evaluation_scores = []
+        
+    def __call__(self, algo, epoch, total_step):
+        """Called by d3rlpy at the end of each epoch or update step."""
+        self.epoch = epoch
+        
+        # Basic metrics to track
+        metrics = {
+            "epoch": epoch,
+            "total_step": total_step
+        }
+
+        logger = algo._active_logger
+        
+        # Get metrics from the metrics_buffer
+        if hasattr(logger, '_metrics_buffer'):
+            for name, buffer in logger._metrics_buffer.items():
+                if buffer:  # Check if there are values
+                    # Calculate the mean of accumulated values
+                    mean_value = np.mean(buffer)
+                    metrics[name] = mean_value
+                    
+                    # Store loss metrics separately for tracking over time
+                    if name.endswith('_loss') or name.startswith('loss'):
+                        self.training_losses[name] = self.training_losses.get(name, []) + [mean_value]
+            
+            # Store evaluation scores if present
+            if 'evaluation' in logger._metrics_buffer and logger._metrics_buffer['evaluation']:
+                eval_score = np.mean(logger._metrics_buffer['evaluation'])
+                self.evaluation_scores.append((epoch, eval_score))
+                metrics['evaluation_score'] = eval_score
+                    
+            # Store metrics for this epoch
+            self.current_epoch_metrics = metrics.copy()
+
+        # Log to wandb if enabled
+        if self.use_wandb and wandb.run:
+            log_to_wandb(metrics, epoch=epoch, prefix=self.prefix)
+        
+        return metrics
+    
+    def update_eval_metrics(self, eval_metrics, epoch):
+        """Track the best evaluation metrics so far."""
+        # Check if these are the best metrics so far
+        is_best = False
+        if self.best_eval_metrics is None:
+            is_best = True
+        elif 'mean_return' in eval_metrics and 'mean_return' in self.best_eval_metrics:
+            if eval_metrics['mean_return'] > self.best_eval_metrics['mean_return']:
+                is_best = True
+        
+        # Update best metrics if applicable
+        if is_best:
+            self.best_eval_metrics = eval_metrics.copy()
+            self.best_eval_epoch = epoch
+            
+        # Add a flag for best metrics
+        eval_metrics_with_best = eval_metrics.copy()
+        eval_metrics_with_best['is_best'] = is_best
+        
+        return eval_metrics_with_best
+    
+    def get_training_summary(self):
+        """Get a summary of training losses and metrics."""
+        summary = {
+            "epoch": self.epoch,
+            "best_eval_epoch": self.best_eval_epoch,
+        }
+        
+        # Add latest values of each loss
+        for loss_name, values in self.training_losses.items():
+            if values:
+                summary[f"final_{loss_name}"] = values[-1]
+                summary[f"mean_{loss_name}"] = np.mean(values)
+        
+        # Add latest evaluation score if available
+        if self.evaluation_scores:
+            latest_eval = self.evaluation_scores[-1]
+            summary["final_evaluation_score"] = latest_eval[1]
+        
+        return summary
+
+class CompositeCallback:
+    """A callback that combines multiple callbacks into one."""
+    
+    def __init__(self, callbacks):
+        """Initialize with a list of callbacks.
+        
+        Args:
+            callbacks: List of callback functions/objects to call
+        """
+        self.callbacks = callbacks
+    
+    def __call__(self, algo, epoch, total_step):
+        """Call all callbacks in order."""
+        results = []
+        for callback in self.callbacks:
+            try:
+                result = callback(algo, epoch, total_step)
+                results.append(result)
+            except Exception as e:
+                print(f"Error in callback {callback}: {e}")
+        return results
+
 @hydra.main(config_path="config", config_name="iql")
 def main(cfg: DictConfig):
     """Train a policy using specified algorithm with Hydra config."""
-    # Get algorithm name from config
+    # Convert OmegaConf config to AttrDict for easier access and serialization
+    cfg_dict = OmegaConf.to_container(cfg, resolve=True)
+    cfg = AttrDict.from_nested_dict(cfg_dict)
+    
+    # Get algorithm name
     algorithm_name = cfg.algorithm
     
     print("\n" + "=" * 50)
     print(f"Training {algorithm_name.upper()} policy")
     print("=" * 50)
     
-    # Convert OmegaConf config to standard Python dictionary to avoid serialization issues
-    # This is needed because d3rlpy's logger can't handle OmegaConf objects
-    cfg_dict = OmegaConf.to_container(cfg, resolve=True)
-    
-    # Print config for visibility
+    # Print config for visibility (using original OmegaConf for pretty printing)
     print("\nConfiguration:")
-    print(OmegaConf.to_yaml(cfg))
+    print(OmegaConf.to_yaml(OmegaConf.create(cfg_dict)))
     
     # Initialize wandb
     if cfg.wandb.use_wandb:
@@ -442,12 +623,12 @@ def main(cfg: DictConfig):
         if run_name is None:
             run_name = f"{algorithm_name.upper()}_{dataset_name}_{time.strftime('%Y%m%d_%H%M%S')}"
         
-        # Initialize wandb with dictionary config
+        # Initialize wandb
         wandb.init(
             project=cfg.wandb.project,
             entity=cfg.wandb.entity,
             name=run_name,
-            config=cfg_dict,  # Use dictionary instead of OmegaConf
+            config=cfg_dict,  # Use plain dict for wandb config
             tags=cfg.wandb.tags if hasattr(cfg.wandb, 'tags') else [algorithm_name],
             notes=cfg.wandb.notes
         )
@@ -576,15 +757,9 @@ def main(cfg: DictConfig):
         )
         
     elif algorithm_name.lower() == "bc":
-        # Initialize BC algorithm with a more robust approach to learning rate
-        # Get learning rate parameter, providing a default if not found
-        bc_learning_rate = 3e-4  # Default value
-        if hasattr(cfg.model, 'learning_rate'):
-            bc_learning_rate = cfg.model.learning_rate
-        print(f"Using learning rate: {bc_learning_rate}")
-        
+        # Initialize BC algorithm
         algo = BC(
-            learning_rate=bc_learning_rate,
+            learning_rate=cfg.model.learning_rate,
             batch_size=cfg.model.batch_size,
             encoder_factory=VectorEncoderFactory(cfg.model.encoder_dims),
             use_gpu=torch.cuda.is_available()
@@ -612,21 +787,13 @@ def main(cfg: DictConfig):
     else:
         raise ValueError(f"Unsupported algorithm: {algorithm_name}")
     
-    # Get number of training epochs (with fallback defaults)
-    if hasattr(cfg.training, 'n_epochs'):
-        n_epochs = cfg.training.n_epochs
-    else:
-        # Backwards compatibility with older config files
-        if algorithm_name.lower() == "iql" and hasattr(cfg.training, 'iql_epochs'):
-            n_epochs = cfg.training.iql_epochs
-        elif algorithm_name.lower() == "bc" and hasattr(cfg.training, 'bc_epochs'):
-            n_epochs = cfg.training.bc_epochs
-        else:
-            # Default value if no epochs specified
-            n_epochs = 100
-            print(f"Warning: No n_epochs found in config. Using default value: {n_epochs}")
+    # Get number of training epochs
+    n_epochs = cfg.training.n_epochs
     
     print(f"Training for {n_epochs} epochs")
+    
+    # Initialize wandb callback
+    wandb_callback = WandbCallback(use_wandb=cfg.wandb.use_wandb)
     
     # For tracking evaluation metrics
     evaluation_results = []
@@ -682,14 +849,17 @@ def main(cfg: DictConfig):
             num_workers=cfg.evaluation.eval_workers,
             record_video=video_recording,
             video_path=video_path,
-            video_fps=cfg.evaluation.video_fps if hasattr(cfg.evaluation, 'video_fps') else 30
+            video_fps=cfg.evaluation.video_fps
         )
         print(f"Epoch {epoch} evaluation: Return={metrics['mean_return']:.2f}, Success={metrics['success_rate']:.2f}")
-        evaluation_results.append((epoch, metrics))
+        
+        # Track best metrics
+        eval_metrics_with_best = wandb_callback.update_eval_metrics(metrics, epoch)
+        evaluation_results.append((epoch, eval_metrics_with_best))
         
         # Log to wandb if enabled
         if cfg.wandb.use_wandb:
-            log_evaluation_to_wandb(metrics, epoch=epoch, prefix="eval")
+            log_to_wandb(eval_metrics_with_best, epoch=epoch, prefix="eval")
             
             # Log video paths if videos were recorded
             if video_recording and video_path and wandb.run:
@@ -698,14 +868,20 @@ def main(cfg: DictConfig):
                     import glob
                     video_files = glob.glob(f"{video_path}_episode_*.mp4")
                     if video_files:
-                        video_artifacts = [wandb.Video(video_file, fps=cfg.evaluation.video_fps if hasattr(cfg.evaluation, 'video_fps') else 30, format="mp4") 
+                        video_artifacts = [wandb.Video(video_file, fps=cfg.evaluation.video_fps, format="mp4") 
                                            for video_file in video_files[:3]]  # Upload up to 3 videos
                         
                         wandb.log({f"eval_videos_epoch_{epoch}": video_artifacts}, step=epoch)
                 except Exception as e:
                     print(f"Warning: Could not upload videos to wandb: {e}")
+
+    # Create a combined callback that handles both wandb logging and evaluation
+    composite_callback = CompositeCallback([
+        wandb_callback,
+        evaluation_callback
+    ])
     
-    # Train the algorithm
+    # Train the model
     print(f"Training {algorithm_name.upper()} for {n_epochs} epochs...")
     
     # Define scorers based on environment availability
@@ -717,7 +893,7 @@ def main(cfg: DictConfig):
     else:
         print("Training without environment evaluation")
         scorers = {}
-        
+
     # Train the model
     training_metrics = algo.fit(
         dataset,
@@ -729,15 +905,82 @@ def main(cfg: DictConfig):
         with_timestamp=True,
         logdir=d3rlpy_logdir,
         verbose=True,
-        callback=evaluation_callback
+        callback=composite_callback  # Use the composite callback instead of a list
     )
     
     # Print the training metrics summary
     print("\nTraining metrics summary:")
-    for epoch, metrics in training_metrics:
-        metrics_str = ", ".join([f"{k}: {v:.4f}" for k, v in metrics.items()])
-        print(f"Epoch {epoch}: {metrics_str}")
     
+    # Try to use algorithm's training metrics if available
+    try:
+        if training_metrics and isinstance(training_metrics, list) and len(training_metrics) > 0:
+            # Check if metrics are in expected format
+            if isinstance(training_metrics[0], tuple) and len(training_metrics[0]) == 2:
+                for epoch, metrics in training_metrics:
+                    metrics_str = ", ".join([f"{k}: {v:.4f}" for k, v in metrics.items() 
+                                           if isinstance(v, (int, float, np.number))])
+                    print(f"Epoch {epoch}: {metrics_str}")
+            else:
+                print("Training metrics available but in unexpected format")
+        else:
+            print("No training metrics available from algorithm")
+    except Exception as e:
+        print(f"Error printing metrics: {e}")
+    
+    # Log final training metrics to wandb
+    if cfg.wandb.use_wandb:
+        # Log training metrics if available
+        if training_metrics:
+            try:
+                log_to_wandb(training_metrics, prefix="train_final")
+            except:
+                print("Warning: Could not log algorithm's training metrics to wandb")
+        
+        # Get comprehensive training summary from our callback
+        training_summary = wandb_callback.get_training_summary()
+        
+        # Create a complete summary with training and evaluation metrics
+        summary_metrics = {
+            "completed": True, 
+            "total_epochs": n_epochs,
+            "best_eval_epoch": wandb_callback.best_eval_epoch
+        }
+        
+        # Add training loss metrics
+        for key, val in training_summary.items():
+            if isinstance(val, (int, float, np.int64, np.float32, np.float64, np.number)):
+                summary_metrics[key] = val
+        
+        # Add best metrics if available
+        if wandb_callback.best_eval_metrics:
+            for k, v in wandb_callback.best_eval_metrics.items():
+                if isinstance(v, (int, float, np.int64, np.float32, np.float64, np.number)):
+                    summary_metrics[f"best_{k}"] = v
+                    
+        # Log the combined summary
+        log_to_wandb(summary_metrics, prefix="summary")
+        
+        # Also log a final plot of training losses if available
+        if wandb.run and wandb_callback.training_losses:
+            try:
+                # Create plot of training losses
+                plt.figure(figsize=(10, 6))
+                for loss_name, values in wandb_callback.training_losses.items():
+                    if len(values) > 1:  # Only plot if we have multiple values
+                        plt.plot(values, label=loss_name)
+                
+                plt.xlabel('Updates')
+                plt.ylabel('Loss Value')
+                plt.title('Training Losses')
+                plt.legend()
+                plt.tight_layout()
+                
+                # Log to wandb
+                wandb.log({"training_losses": wandb.Image(plt)})
+                plt.close()
+            except Exception as e:
+                print(f"Warning: Could not create training loss plot: {e}")
+
     # Save the model
     model_path = f"{cfg.output.output_dir}/{algorithm_name.lower()}_{Path(cfg.data.data_path).stem}.pt"
     algo.save_model(model_path)
@@ -766,7 +1009,7 @@ def main(cfg: DictConfig):
             num_workers=cfg.evaluation.eval_workers,
             record_video=video_recording,
             video_path=video_path,
-            video_fps=cfg.evaluation.video_fps if hasattr(cfg.evaluation, 'video_fps') else 30
+            video_fps=cfg.evaluation.video_fps
         )
         
         # Print summary
@@ -776,7 +1019,7 @@ def main(cfg: DictConfig):
         
         # Log final evaluation to wandb
         if cfg.wandb.use_wandb:
-            log_evaluation_to_wandb(evaluation_metrics, prefix="final")
+            log_to_wandb(evaluation_metrics, prefix="final")
             
             # Upload final evaluation videos if available
             if video_recording and video_path and wandb.run:
@@ -784,7 +1027,7 @@ def main(cfg: DictConfig):
                     import glob
                     video_files = glob.glob(f"{video_path}_episode_*.mp4")
                     if video_files:
-                        video_artifacts = [wandb.Video(video_file, fps=cfg.evaluation.video_fps if hasattr(cfg.evaluation, 'video_fps') else 30, format="mp4") 
+                        video_artifacts = [wandb.Video(video_file, fps=cfg.evaluation.video_fps, format="mp4") 
                                            for video_file in video_files[:3]]  # Upload up to 3 videos
                         
                         wandb.log({f"final_eval_videos": video_artifacts})
@@ -800,11 +1043,19 @@ def main(cfg: DictConfig):
     
     # Save results
     results = {
-        'config': cfg_dict,  # Use the dictionary version of the config
+        'config': cfg_dict,  # Use plain dict for serialization
         'final_evaluation': evaluation_metrics,
         'training_metrics': training_metrics,
         'evaluation_during_training': evaluation_results,
-        'dataset_size': dataset.size()
+        'dataset_size': dataset.size(),
+        # Add best evaluation metrics
+        'best_eval': {
+            'epoch': wandb_callback.best_eval_epoch,
+            'metrics': wandb_callback.best_eval_metrics
+        },
+        # Add training summary metrics from callback
+        'training_summary': wandb_callback.get_training_summary(),
+        'training_losses': wandb_callback.training_losses
     }
     
     results_path = f"{cfg.output.output_dir}/{algorithm_name.lower()}_results.pkl"
