@@ -624,16 +624,71 @@ def main(cfg: DictConfig):
         effective_pin_memory = False
     
     # Initialize variables
+    data_cpu = None
     segments = None
+    segment_pairs = None
+    segment_indices = None
+    preferences = None
+    state_dim = None
+    action_dim = None
     
-    # Check if we have pre-collected preference data
+    # First, try to load from preference data if specified
     if hasattr(cfg.data, 'preferences_data_path') and cfg.data.preferences_data_path:
-        # Load pre-collected preferences
-        segment_pairs, segment_indices, preferences, loaded_segments = load_preferences_data(cfg.data.preferences_data_path)
-        segments = loaded_segments  # Use loaded segments if available
-    else:
-        # Load data
-        print(f"Loading data from {cfg.data.data_path}")
+        try:
+            print(f"Loading preference data from {cfg.data.preferences_data_path}")
+            
+            # Load the preference data file
+            with open(cfg.data.preferences_data_path, 'rb') as f:
+                pref_data = pickle.load(f)
+            
+            # Check if it contains embedded data
+            if 'data' in pref_data:
+                print("Found embedded data in preference file, using it directly")
+                data_cpu = pref_data['data']
+                
+                # Get observation and action dimensions from embedded data
+                if 'obs' in data_cpu:
+                    observations = data_cpu['obs']
+                    state_dim = observations.shape[1]
+                elif 'state' in data_cpu:
+                    observations = data_cpu['state']
+                    state_dim = observations.shape[1]
+                
+                if 'action' in data_cpu:
+                    actions = data_cpu['action']
+                    action_dim = actions.shape[1]
+                
+                print(f"Using embedded data with fields: {list(data_cpu.keys())}")
+                print(f"Observation shape: {observations.shape}, Action shape: {actions.shape if 'action' in data_cpu else 'N/A'}")
+            
+            # Extract other necessary components
+            if 'segment_pairs' in pref_data:
+                segment_pairs = pref_data['segment_pairs']
+            if 'segment_indices' in pref_data:
+                segment_indices = pref_data['segment_indices']
+            if 'preference_labels' in pref_data:
+                preferences = pref_data['preference_labels']
+            elif 'preferences' in pref_data:
+                preferences = pref_data['preferences']
+            
+            # Extract segments if available
+            if 'segments' in pref_data:
+                segments = pref_data['segments']
+                print(f"Found {len(segments)} extracted segments in preference data")
+            
+            # Print some stats
+            if segment_pairs is not None:
+                print(f"Loaded {len(segment_pairs)} preference pairs")
+            if segment_indices is not None:
+                print(f"Loaded {len(segment_indices)} segment indices")
+            
+        except Exception as e:
+            print(f"Error loading preference data: {e}")
+            print("Will fall back to original data file")
+    
+    # If we don't have data yet, load from the original file
+    if data_cpu is None:
+        print(f"Loading data from original file: {cfg.data.data_path}")
         data = load_tensordict(cfg.data.data_path)
         
         # Get observation and action dimensions
@@ -642,24 +697,39 @@ def main(cfg: DictConfig):
         state_dim = observations.shape[1]
         action_dim = actions.shape[1]
         
-        print(f"Observation dimension: {state_dim}, Action dimension: {action_dim}")
-        
-        # Ensure data is on CPU before creating segments to avoid device mismatch issues
+        # Ensure data is on CPU for processing
         data_cpu = {k: v.cpu() if isinstance(v, torch.Tensor) else v for k, v in data.items()}
+        print(f"Loaded data with {len(observations)} observations")
+    
+    # If we still don't have necessary preference data, generate it
+    if segment_pairs is None or preferences is None:
+        if segment_indices is not None and segments is None:
+            # Extract segments from data using provided indices
+            print("Extracting segments from data using provided segment indices...")
+            segments = []
+            for start_idx, end_idx in tqdm(segment_indices, desc="Extracting segments"):
+                segment_obs = data_cpu["obs"][start_idx:end_idx+1]
+                segments.append(segment_obs)
+            print(f"Extracted {len(segments)} segments")
         
-        # Generate segments and preference pairs from scratch
-        print(f"Creating segments of length {cfg.data.segment_length}...")
-        num_segments = cfg.data.num_segments if cfg.data.num_segments > 0 else None
-        segments, segment_indices = create_segments(data_cpu, segment_length=cfg.data.segment_length, max_segments=num_segments)
+        # If we still don't have segments, generate them
+        if segments is None or segment_indices is None:
+            print(f"Creating segments of length {cfg.data.segment_length}...")
+            num_segments = cfg.data.num_segments if cfg.data.num_segments > 0 else None
+            segments, segment_indices = create_segments(data_cpu, segment_length=cfg.data.segment_length, max_segments=num_segments)
         
-        # Generate preference pairs
-        print(f"Generating {cfg.data.num_pairs} preference pairs...")
-        segment_pairs, preferences = sample_segment_pairs(
-            segments, 
-            segment_indices, 
-            data_cpu["reward"], 
-            n_pairs=cfg.data.num_pairs
-        )
+        # If we still don't have pairs or preferences, generate them
+        if segment_pairs is None or preferences is None:
+            print(f"Generating {cfg.data.num_pairs} preference pairs...")
+            segment_pairs, preferences = sample_segment_pairs(
+                segments, 
+                segment_indices, 
+                data_cpu["reward"], 
+                n_pairs=cfg.data.num_pairs
+            )
+    
+    print(f"Final data stats - Observation dimension: {state_dim}, Action dimension: {action_dim}")
+    print(f"Working with {len(segment_pairs)} preference pairs across {len(segment_indices)} segments")
     
     # Create dataset
     preference_dataset = PreferenceDataset(

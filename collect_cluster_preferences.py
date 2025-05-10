@@ -368,13 +368,7 @@ def create_preference_dataset(data, segment_indices, augmented_preferences, outp
     """
     print(f"Creating preference dataset at {output_file}")
     
-    # Extract segments from data
-    all_segments = []
-    for start_idx, end_idx in segment_indices:
-        segment_obs = data["obs"][start_idx:end_idx+1]
-        all_segments.append(segment_obs)
-    
-    # Create preference pairs
+    # Extract segment pairs and preferences
     segment_pairs = []
     preference_labels = []
     
@@ -382,25 +376,55 @@ def create_preference_dataset(data, segment_indices, augmented_preferences, outp
         segment_pairs.append((i, j))
         preference_labels.append(pref)
     
+    # Create compact data representation with only necessary fields
+    # This avoids storing large image data but keeps needed fields like obs and action
+    compact_data = {}
+    essential_fields = ['obs', 'action', 'episode', 'reward']
+    
+    print("Creating compact data copy with only essential fields...")
+    for field in essential_fields:
+        if field in data:
+            print(f"Including field: {field}")
+            # Clone to avoid modifying original data and ensure it's on CPU
+            compact_data[field] = data[field].clone().cpu() if isinstance(data[field], torch.Tensor) else data[field]
+    
     # Create dataset
     preference_dataset = {
-        'segments': all_segments,
+        'data': compact_data,           # Include the compact data directly
         'segment_indices': segment_indices,
         'segment_pairs': segment_pairs,
         'preference_labels': preference_labels,
         'metadata': {
-            'n_segments': len(all_segments),
+            'n_segments': len(segment_indices),
             'n_preferences': len(preference_labels),
-            'data_path': data.get('_source_path', 'unknown')
+            'data_path': data.get('_source_path', 'unknown'),
+            'included_fields': list(compact_data.keys())
         }
     }
     
     # Save dataset
     os.makedirs(os.path.dirname(output_file), exist_ok=True)
-    with open(output_file, 'wb') as f:
-        pickle.dump(preference_dataset, f)
     
-    print(f"Saved preference dataset with {len(preference_labels)} preferences")
+    try:
+        print(f"Saving preference dataset to {output_file}...")
+        with open(output_file, 'wb') as f:
+            pickle.dump(preference_dataset, f)
+        
+        print(f"Successfully saved preference dataset with {len(preference_labels)} preferences")
+        print(f"Included essential data fields: {list(compact_data.keys())}")
+        
+    except Exception as e:
+        print(f"Error saving full dataset: {e}")
+        print("Trying to save without data field...")
+        
+        # Create a lightweight version without the data field
+        light_dataset = preference_dataset.copy()
+        light_dataset.pop('data', None)
+        light_file = os.path.splitext(output_file)[0] + "_light.pkl"
+        
+        with open(light_file, 'wb') as f:
+            pickle.dump(light_dataset, f)
+        print(f"Saved lightweight version to {light_file}")
     
     return preference_dataset
 
