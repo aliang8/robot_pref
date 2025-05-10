@@ -114,7 +114,7 @@ def display_segment(data, start_idx, end_idx, title=None, cluster_id=None):
     
     return anim
 
-def present_preference_query(data, segment1, segment2, query_id=None, skip_videos=False):
+def present_preference_query(data, segment1, segment2, query_id=None, skip_videos=False, no_auto_open=False):
     """Present a preference query to the user.
     
     Args:
@@ -123,6 +123,7 @@ def present_preference_query(data, segment1, segment2, query_id=None, skip_video
         segment2: (idx2, start_idx2, end_idx2) for second segment
         query_id: Optional ID for the query
         skip_videos: If True, skip generating visualizations to save time
+        no_auto_open: If True, don't automatically open videos
         
     Returns:
         int: 1 if segment1 is preferred, 2 if segment2 is preferred, 0 if equal
@@ -159,13 +160,12 @@ def present_preference_query(data, segment1, segment2, query_id=None, skip_video
         if viz_file:
             generated_files.append(viz_file)
         
-        # Offer to open the visualization if not in notebook
-        if not is_notebook:
+        # Automatically open the visualization if not in notebook and auto-open is enabled
+        if not is_notebook and not no_auto_open:
             for file_path in generated_files:
                 if os.path.exists(file_path) and os.path.getsize(file_path) > 0:
-                    open_file = input(f"Open {file_path}? (y/n): ").strip().lower()
-                    if open_file == 'y':
-                        open_video_file(file_path)
+                    print(f"Opening visualization: {file_path}")
+                    open_video_file(file_path)
     else:
         print("\n[Visualizations skipped to save time]")
     
@@ -188,7 +188,7 @@ def present_preference_query(data, segment1, segment2, query_id=None, skip_video
     
     return preference
 
-def collect_cluster_preferences(data, cluster_representatives, num_comparisons=None, skip_videos=False):
+def collect_cluster_preferences(data, cluster_representatives, num_comparisons=None, skip_videos=False, no_auto_open=False):
     """Collect user preferences between cluster representatives.
     
     Args:
@@ -196,6 +196,7 @@ def collect_cluster_preferences(data, cluster_representatives, num_comparisons=N
         cluster_representatives: Dict mapping cluster_id to representative segments
         num_comparisons: Number of comparisons to conduct (default: all pairs)
         skip_videos: Skip generating videos for preference collection
+        no_auto_open: If True, don't automatically open videos
         
     Returns:
         list: User preferences in format [(cluster_id1, cluster_id2, preference), ...]
@@ -227,7 +228,12 @@ def collect_cluster_preferences(data, cluster_representatives, num_comparisons=N
         segment2 = random.choice(cluster_representatives[cluster_id2])
         
         # Present preference query
-        preference = present_preference_query(data, segment1, segment2, query_id=i+1, skip_videos=skip_videos)
+        preference = present_preference_query(
+            data, segment1, segment2, 
+            query_id=i+1, 
+            skip_videos=skip_videos,
+            no_auto_open=no_auto_open
+        )
         
         # Record preference
         preferences.append((cluster_id1, cluster_id2, preference))
@@ -649,6 +655,8 @@ def main():
                         help="Maximum number of pairwise comparisons to perform")
     parser.add_argument("--skip_videos", action="store_true",
                         help="Skip generating videos for preference collection to speed things up")
+    parser.add_argument("--no_auto_open", action="store_true",
+                        help="Don't automatically open visualization videos")
     args = parser.parse_args()
     
     # Create output directory
@@ -707,7 +715,8 @@ def main():
     user_preferences = collect_cluster_preferences(
         data, cluster_representatives, 
         num_comparisons=args.max_comparisons,
-        skip_videos=args.skip_videos
+        skip_videos=args.skip_videos,
+        no_auto_open=args.no_auto_open
     )
     
     # Save raw preferences
