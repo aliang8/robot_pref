@@ -1,4 +1,10 @@
-# Hydra config for IQL policy training
+# Complete IQL configuration file
+algorithm: iql
+
+# Include common settings
+defaults:
+  - common
+  - _self_  # Allow this config to override common settings
 
 # Data parameters
 data:
@@ -10,10 +16,6 @@ data:
 # Model architecture
 model:
   hidden_dims: [256, 256]
-  encoder_dims: [256, 256, 256]
-
-# IQL configuration
-iql:
   actor_learning_rate: 3e-4
   critic_learning_rate: 3e-4
   batch_size: 256
@@ -22,33 +24,17 @@ iql:
   n_critics: 2
   expectile: 0.7
   weight_temp: 3.0
+  encoder_dims: [256, 256, 256]
 
-# Training parameters
+# Training parameters specific to IQL
 training:
-  iql_epochs: 100
-  n_steps_per_epoch: 1000
-  eval_interval: 10
-  eval_episodes: 10
-  save_interval: 10
-  logging_steps: 100
-
-# Evaluation settings
-evaluation:
-  skip_env_creation: false
-  record_video: false
-  parallel_eval: true
-  eval_workers: null  # null will use min(n_episodes, cpu_count)
+  n_epochs: 100
 
 # Output parameters
 output:
   output_dir: "iql_model"
-  video_dir: null
 
-# Wandb configuration
+# Wandb configuration specific to IQL
 wandb:
-  use_wandb: true
-  project: robot_pref
-  entity: clvr
-  name: null  # Will be auto-generated if null
   tags: ["iql", "preference_learning"]
   notes: "IQL policy training with learned reward function" 

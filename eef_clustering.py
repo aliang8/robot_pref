@@ -11,8 +11,6 @@ from scipy.cluster.hierarchy import dendrogram, linkage, fcluster
 import pickle
 import argparse
 import dtw
-from PIL import Image
-from IPython.display import HTML, display
 
 # Import utility functions
 from trajectory_utils import (
@@ -84,16 +82,16 @@ def extract_eef_trajectories(
 
     # Create mask for NaN values in EEF positions
     eef_valid = ~torch.isnan(eef_positions).any(dim=1)
-
+    
+    # Get unique episodes
     unique_episodes = torch.unique(episode_ids_cpu).tolist()
     print(f"Found {len(unique_episodes)} unique episodes")
-
-    # Identify valid segments in each episode
-    valid_segments_per_episode = {}
-
-    with tqdm(
-        total=len(unique_episodes), desc="Finding valid segments per episode"
-    ) as pbar:
+    
+    # Collect all valid episode data for sampling
+    all_valid_blocks = []
+    
+    print("Finding valid blocks in all episodes...")
+    with tqdm(total=len(unique_episodes), desc="Processing episodes") as pbar:
         for episode_id in unique_episodes:
             # Get indices for this episode
             ep_indices = torch.where(episode_ids_cpu == episode_id)[0]
@@ -117,127 +115,73 @@ def extract_eef_trajectories(
             # Find consecutive blocks using diff
             diffs = torch.diff(valid_indices)
             breaks = torch.where(diffs > 1)[0].tolist() + [len(valid_indices) - 1]
-
-            # Track start and end indices of valid blocks
+            
+            # Process each block
             start_idx = 0
-            valid_blocks = []
-
             for b in breaks:
                 # Check if block is long enough
                 if b - start_idx + 1 >= effective_length:
-                    valid_blocks.append((start_idx, b))
+                    # Store this valid block
+                    all_valid_blocks.append({
+                        'episode_id': episode_id,
+                        'start_block': start_idx,
+                        'end_block': b,
+                        'valid_indices': valid_indices,
+                        'length': b - start_idx + 1
+                    })
                 start_idx = b + 1
-
-            # Store valid segments for this episode
-            if valid_blocks:
-                valid_segments_per_episode[episode_id] = []
-
-                for start_block, end_block in valid_blocks:
-                    # Calculate how many valid segments can be created from this block
-                    block_length = end_block - start_block + 1
-                    possible_segments = block_length - effective_length + 1
-
-                    if possible_segments > 0:
-                        # Store block information for later sampling
-                        valid_segments_per_episode[episode_id].append(
-                            {
-                                "start_block": start_block,
-                                "end_block": end_block,
-                                "possible_segments": possible_segments,
-                                "valid_indices": valid_indices,
-                            }
-                        )
-
+            
             pbar.update(1)
-
-    # Sample segments from valid episodes
-    print("Sampling segments from valid episodes")
-    episodes_with_valid_segments = list(valid_segments_per_episode.keys())
-
-    # Keep track of episodes we've sampled one segment from already
-    sampled_one_per_episode = set()
-
-    # Keep looping until we have enough segments or can't find any more
-    loop_count = 0
-    max_loops = 10  # Limit number of loops to avoid infinite loop
-
-    # Continue until we reach max_segments or run out of loops
-    while (
-        max_segments is None or len(segments) < max_segments
-    ) and loop_count < max_loops:
-        loop_count += 1
-        random.shuffle(episodes_with_valid_segments)
-
-        # Prioritize episodes we haven't sampled from yet
-        if loop_count == 1:
-            # First pass: prioritize getting one segment per episode
-            priority_episodes = [
-                ep
-                for ep in episodes_with_valid_segments
-                if ep not in sampled_one_per_episode
-            ]
-            sampling_episodes = priority_episodes + [
-                ep
-                for ep in episodes_with_valid_segments
-                if ep in sampled_one_per_episode
-            ]
-            desc = "Sampling one segment per episode"
-        else:
-            # Later passes: just use all episodes
-            sampling_episodes = episodes_with_valid_segments
-            desc = f"Additional sampling (loop {loop_count})"
-
-        new_segments_in_loop = 0
-        for episode_id in tqdm(sampling_episodes, desc=desc):
-            # Stop if we've reached the max segments
-            if max_segments is not None and len(segments) >= max_segments:
-                break
-
-            blocks = valid_segments_per_episode[episode_id]
-            if not blocks:
-                continue
-
-            # Choose a random block
-            block = random.choice(blocks)
-            valid_indices = block["valid_indices"]
-            start_block = block["start_block"]
-            end_block = block["end_block"]
-            possible_segments = block["possible_segments"]
-
+    
+    print(f"Found {len(all_valid_blocks)} valid blocks across all episodes")
+    
+    # Simple loop: just keep sampling blocks in sequence until we have enough segments
+    total_attempts = 0
+    max_attempts = 10000  # Safety limit
+    
+    # If no max_segments specified, set a reasonable default based on number of blocks
+    if max_segments is None:
+        max_segments = min(5000, len(all_valid_blocks) * 2)
+        print(f"No max_segments specified, setting to {max_segments}")
+    
+    # Shuffle blocks once at the beginning for variety
+    random.shuffle(all_valid_blocks)
+    
+    with tqdm(total=max_segments, desc="Sampling segments") as pbar:
+        block_idx = 0
+        while len(segments) < max_segments and total_attempts < max_attempts:
+            total_attempts += 1
+            
+            # Get current block and move to next (circle back when reaching the end)
+            block = all_valid_blocks[block_idx]
+            block_idx = (block_idx + 1) % len(all_valid_blocks)
+            
+            valid_indices = block['valid_indices']
+            start_block = block['start_block'] 
+            end_block = block['end_block']
+            
+            # Calculate how many possible segments can be created from this block
+            possible_segments = block['length'] - effective_length + 1
             if possible_segments <= 0:
                 continue
-
-            # Choose a random segment within this block
-            segment_offset = random.randrange(possible_segments)
+                
+            # Choose a position within this block (sequentially if multiple samples from same block)
+            # Use the total_attempts to ensure we pick different positions for the same block
+            segment_offset = total_attempts % possible_segments
             start_idx = start_block + segment_offset
             end_idx = start_idx + effective_length - 1
 
             # Get start and end indices in the original data
             start = valid_indices[start_idx].item()
             end = valid_indices[end_idx].item()
-
-            # Check for overlap with previously selected segments (after first loop)
-            if loop_count > 1 or episode_id in sampled_one_per_episode:
-                overlap = False
-                for prev_start, prev_end in segment_indices:
-                    # Check for any overlap
-                    if start <= prev_end and end >= prev_start:
-                        overlap = True
-                        break
-
-                if overlap:
-                    continue
-
-            # Track that we've sampled from this episode
-            sampled_one_per_episode.add(episode_id)
-
+                        
             # Get EEF trajectory for this segment
             segment_eef = eef_positions[start : end + 1]
 
             # Double check for NaN values
             if torch.isnan(segment_eef).any():
                 continue
-
+                
             # For relative differences, compute frame-to-frame differences
             if use_relative_differences:
                 diff_segment = segment_eef[1:] - segment_eef[:-1]
@@ -246,30 +190,16 @@ def extract_eef_trajectories(
             else:
                 segments.append(segment_eef)
                 original_segments.append(segment_eef)
-
+                
             segment_indices.append((start, end))
-            new_segments_in_loop += 1
-
-        print(f"Added {new_segments_in_loop} segments in loop {loop_count}")
-
-        # If first loop, report how many episodes we got one segment from
-        if loop_count == 1:
-            print(
-                f"Sampled one segment from {len(sampled_one_per_episode)} episodes out of {len(episodes_with_valid_segments)} valid episodes"
-            )
-
-        # If we didn't add any new segments in this loop, we're stuck
-        if new_segments_in_loop == 0:
-            print("Could not find any more non-overlapping segments, stopping.")
-            break
-
-        # If we're not using max_segments, only do one pass to get one segment per episode
-        if max_segments is None:
-            break
-
-    print(
-        f"Created {len(segments)} {'difference' if use_relative_differences else 'absolute position'} segments across {len(unique_episodes)} episodes"
-    )
+            pbar.update(1)
+            
+            # Exit early if we're taking too many attempts with little progress
+            if total_attempts >= 10 * max_segments and len(segments) < max_segments / 10:
+                print(f"Warning: Made {total_attempts} attempts but only found {len(segments)} valid segments. Stopping early.")
+                break
+    
+    print(f"Created {len(segments)} {'difference' if use_relative_differences else 'absolute position'} segments with {total_attempts} sampling attempts")
     if segments:
         print(f"Each segment has shape: {segments[0].shape}")
 
@@ -286,24 +216,18 @@ def compute_dtw_distance(query_segment, reference_segment):
     Returns:
         float: DTW distance between segments
     """
-    try:
-        # Convert to numpy for dtw
-        query = query_segment.cpu().numpy()
-        reference = reference_segment.cpu().numpy()
-
-        # Use the custom DTW implementation
-        cost, _, _ = dtw.get_single_match(query, reference)
-
-        # Check if the cost is finite
-        if not np.isfinite(cost):
-            # Fall back to a simpler distance metric
-            cost = np.mean((query.mean(0) - reference.mean(0)) ** 2)
-    except Exception as e:
+    # Convert to numpy for dtw
+    query = query_segment.cpu().numpy()
+    reference = reference_segment.cpu().numpy()
+    
+    # Use the custom DTW implementation
+    cost, _, _ = dtw.get_single_match(query, reference)
+    
+    # Check if the cost is finite
+    if not np.isfinite(cost):
         # Fall back to a simpler distance metric
-        query = query_segment.cpu().numpy()
-        reference = reference_segment.cpu().numpy()
-        cost = np.mean((query.mean(0) - reference.mean(0)) ** 2)
-
+        cost = np.mean((query.mean(0) - reference.mean(0))**2)
+    
     return cost
 
 
@@ -428,232 +352,26 @@ def compute_eef_position_ranges(data_path):
 
     return x_min, x_max, y_min, y_max, z_min, z_max
 
-
-def plot_representative_trajectories(
-    segments, clusters, n_per_cluster=3, output_dir="eef_plots", global_ranges=None
-):
-    """Plot representative trajectories from each cluster for visualization."""
-    os.makedirs(output_dir, exist_ok=True)
-
-    # Find unique clusters
-    unique_clusters = np.unique(clusters)
-
-    # Determine axis limits to use
-    if global_ranges:
-        x_min, x_max, y_min, y_max, z_min, z_max = global_ranges
-    else:
-        # Get global min and max across all segments
-        all_points = np.vstack([seg.cpu().numpy() for seg in segments])
-        x_min, y_min, z_min = np.min(all_points, axis=0)
-        x_max, y_max, z_max = np.max(all_points, axis=0)
-
-        # Add padding
-        padding = 0.1
-        x_range = max(x_max - x_min, 0.01)
-        y_range = max(y_max - y_min, 0.01)
-        z_range = max(z_max - z_min, 0.01)
-
-        x_min -= padding * x_range
-        y_min -= padding * y_range
-        z_min -= padding * z_range
-        x_max += padding * x_range
-        y_max += padding * y_range
-        z_max += padding * z_range
-
-    # Plot 3D trajectories for each cluster
-    for cluster_id in unique_clusters:
-        # Get segments in this cluster
-        cluster_segments = [
-            seg for i, seg in enumerate(segments) if clusters[i] == cluster_id
-        ]
-
-        # Sample n_per_cluster segments (or fewer if not enough)
-        n_samples = min(n_per_cluster, len(cluster_segments))
-        if n_samples == 0:
-            continue
-
-        sampled_segments = random.sample(cluster_segments, n_samples)
-
-        # Create a figure for this cluster
-        fig = plt.figure(figsize=(15, 5 * n_samples))
-        plt.suptitle(f"Cluster {cluster_id} - Representative Trajectories", fontsize=16)
-
-        # Plot each sampled segment
-        for i, segment in enumerate(sampled_segments):
-            # Convert to numpy
-            traj = segment.cpu().numpy()
-
-            # Create 3D plot
-            ax = fig.add_subplot(n_samples, 1, i + 1, projection="3d")
-
-            # Plot the trajectory
-            ax.plot(traj[:, 0], traj[:, 1], traj[:, 2], marker="o", markersize=4)
-
-            # Mark start and end points
-            ax.scatter(
-                traj[0, 0], traj[0, 1], traj[0, 2], color="green", s=100, label="Start"
-            )
-            ax.scatter(
-                traj[-1, 0], traj[-1, 1], traj[-1, 2], color="red", s=100, label="End"
-            )
-
-            # Set consistent axis limits
-            ax.set_xlim(x_min, x_max)
-            ax.set_ylim(y_min, y_max)
-            ax.set_zlim(z_min, z_max)
-
-            # Set labels
-            ax.set_xlabel("X")
-            ax.set_ylabel("Y")
-            ax.set_zlabel("Z")
-            ax.set_title(f"Trajectory {i + 1}")
-            ax.legend()
-
-            # Add grid for better visibility
-            ax.grid(True)
-
-        # Save the figure
-        plt.tight_layout(rect=[0, 0.03, 1, 0.97])
-        plt.savefig(
-            f"{output_dir}/cluster_{cluster_id}_trajectories.png",
-            dpi=300,
-            bbox_inches="tight",
-        )
-        plt.close()
-
-    print(f"Saved representative trajectory plots to {output_dir}")
-
-
-def create_cluster_animation(
-    eef_trajectories, clusters, output_file="eef_clusters_3d.mp4", global_ranges=None
-):
-    """Create a 3D animation of clustered trajectories."""
-    # Convert to numpy arrays for plotting
-    np_trajectories = [traj.cpu().numpy() for traj in eef_trajectories]
-
-    # Find unique clusters and assign colors
-    unique_clusters = np.unique(clusters)
-    n_clusters = len(unique_clusters)
-    colors = plt.cm.rainbow(np.linspace(0, 1, n_clusters))
-
-    # Create a mapping from cluster ID to color
-    cluster_colors = {
-        cluster_id: colors[i] for i, cluster_id in enumerate(unique_clusters)
-    }
-
-    # Create figure for animation
-    fig = plt.figure(figsize=(10, 8))
-    ax = fig.add_subplot(111, projection="3d")
-
-    # Determine axis limits to use
-    if global_ranges:
-        x_min, x_max, y_min, y_max, z_min, z_max = global_ranges
-    else:
-        # Find global min and max for consistent scaling
-        all_coords = np.vstack([traj for traj in np_trajectories])
-        x_min, y_min, z_min = np.min(all_coords, axis=0)
-        x_max, y_max, z_max = np.max(all_coords, axis=0)
-
-        # Add some padding
-        padding = 0.1
-        x_range = x_max - x_min
-        y_range = y_max - y_min
-        z_range = z_max - z_min
-
-        x_min -= padding * x_range
-        y_min -= padding * y_range
-        z_min -= padding * z_range
-        x_max += padding * x_range
-        y_max += padding * y_range
-        z_max += padding * z_range
-
-    # Initialize with empty plots
-    plots = []
-    for i, traj in enumerate(np_trajectories):
-        cluster_id = clusters[i]
-        color = cluster_colors[cluster_id]
-        (line,) = ax.plot([], [], [], linewidth=1.5, color=color, alpha=0.7)
-        plots.append(line)
-
-    # Labels and title
-    ax.set_xlabel("X")
-    ax.set_ylabel("Y")
-    ax.set_zlabel("Z")
-    ax.set_title("End-Effector Trajectories by Cluster")
-
-    # Set consistent axes limits
-    ax.set_xlim(x_min, x_max)
-    ax.set_ylim(y_min, y_max)
-    ax.set_zlim(z_min, z_max)
-
-    # Add a legend
-    legend_elements = [
-        plt.Line2D(
-            [0],
-            [0],
-            color=cluster_colors[cluster_id],
-            lw=2,
-            label=f"Cluster {cluster_id}",
-        )
-        for cluster_id in unique_clusters
-    ]
-    ax.legend(handles=legend_elements, loc="upper right")
-
-    # Function to update the animation
-    def update(frame):
-        # Update the view angle for rotation effect
-        ax.view_init(elev=20, azim=frame)
-
-        # Update each trajectory line
-        for i, (line, traj) in enumerate(zip(plots, np_trajectories)):
-            # Set data for each line
-            line.set_data(traj[:, 0], traj[:, 1])
-            line.set_3d_properties(traj[:, 2])
-
-        return plots
-
-    # Create the animation
-    n_frames = 360  # Full rotation
-    anim = animation.FuncAnimation(fig, update, frames=n_frames, interval=50, blit=True)
-
-    # Save as MP4
-    writer = animation.FFMpegWriter(fps=30, metadata=dict(artist="Me"), bitrate=1800)
-    anim.save(output_file, writer=writer)
-    plt.close()
-
-    print(f"Saved 3D animation to {output_file}")
-
-
-def create_cluster_grid_video(
-    eef_positions,
-    segments,
-    segment_indices,
-    clusters,
-    n_per_cluster=5,
-    output_file="cluster_grid_video.mp4",
-    global_ranges=None,
-):
-    """Create a grid video showing representative segments from each cluster.
-
+def plot_representative_trajectories(segments, clusters, n_per_cluster=3, output_dir="eef_plots", global_ranges=None):
+    """Plot representative trajectories for each cluster.
+    
     Args:
-        eef_positions: List of EEF trajectory segments or a single tensor of all EEF positions
         segments: List of EEF trajectory segments
-        segment_indices: List of (start_idx, end_idx) for each segment
         clusters: Cluster assignments for each segment
-        n_per_cluster: Number of segments to show per cluster
-        output_file: Path to save the output video
+        n_per_cluster: Number of segments to plot per cluster
+        output_dir: Directory to save plots
         global_ranges: Optional tuple (x_min, x_max, y_min, y_max, z_min, z_max) for consistent visualization
     """
     # Find unique clusters
     unique_clusters = np.unique(clusters)
     n_clusters = len(unique_clusters)
-
+    
     # Assign colors to clusters
     colors = plt.cm.rainbow(np.linspace(0, 1, n_clusters))
-    cluster_colors = {
-        cluster_id: colors[i] for i, cluster_id in enumerate(unique_clusters)
-    }
-
+    
+    # Create output directory if needed
+    os.makedirs(output_dir, exist_ok=True)
+    
     # Determine axis limits to use
     if global_ranges:
         x_min, x_max, y_min, y_max, z_min, z_max = global_ranges
@@ -662,117 +380,247 @@ def create_cluster_grid_video(
         all_coords = np.vstack([seg.cpu().numpy() for seg in segments])
         x_min, y_min, z_min = np.min(all_coords, axis=0)
         x_max, y_max, z_max = np.max(all_coords, axis=0)
-
+        
         # Add some padding
         padding = 0.1
         x_range = x_max - x_min
         y_range = y_max - y_min
         z_range = z_max - z_min
-
+        
         x_min -= padding * x_range
         y_min -= padding * y_range
         z_min -= padding * z_range
         x_max += padding * x_range
         y_max += padding * y_range
         z_max += padding * z_range
-
-    # Create a figure with a grid layout
-    fig = plt.figure(figsize=(15, 3 * n_clusters))
-    gs = gridspec.GridSpec(n_clusters, n_per_cluster)
-
-    # Prepare a list to hold all plots
-    all_plots = []
-    all_points = []
-    all_trajectories = []
-
-    print(
-        f"Creating grid with {n_clusters} clusters, {n_per_cluster} segments per cluster"
-    )
-
-    # Initialize subplots for each cluster
-    for cluster_idx, cluster_id in enumerate(unique_clusters):
+    
+    # Plot representative trajectories for each cluster
+    for i, cluster_id in enumerate(unique_clusters):
         # Get segments for this cluster
-        cluster_segments = [
-            seg for i, seg in enumerate(segments) if clusters[i] == cluster_id
-        ]
-        cluster_indices = [
-            segment_indices[i]
-            for i, cluster in enumerate(clusters)
-            if cluster == cluster_id
-        ]
-
+        cluster_segments = [segments[j] for j in range(len(segments)) if clusters[j] == cluster_id]
+        
         # Skip if no segments in this cluster
         if not cluster_segments:
-            print(f"Skipping cluster {cluster_id} - no segments found")
+            print(f"No segments found for cluster {cluster_id}")
             continue
-
+            
         # Sample n_per_cluster segments (or fewer if not enough)
         n_samples = min(n_per_cluster, len(cluster_segments))
+        sample_idxs = random.sample(range(len(cluster_segments)), n_samples)
+        
+        # Create figure for this cluster
+        fig = plt.figure(figsize=(6*n_samples, 5))
+        
+        # Create subplots for different views
+        for j in range(n_samples):
+            sample_idx = sample_idxs[j]
+            segment = cluster_segments[sample_idx]
+            traj = segment.cpu().numpy()
+            
+            # 3D plot
+            ax = fig.add_subplot(1, n_samples, j+1, projection='3d')
+            ax.plot(traj[:, 0], traj[:, 1], traj[:, 2], color=colors[i])
+            
+            # Add scatter points for start and end
+            ax.scatter(traj[0, 0], traj[0, 1], traj[0, 2], color='green', s=50, label='Start')
+            ax.scatter(traj[-1, 0], traj[-1, 1], traj[-1, 2], color='red', s=50, label='End')
+            
+            # Set consistent axis limits
+            ax.set_xlim(x_min, x_max)
+            ax.set_ylim(y_min, y_max)
+            ax.set_zlim(z_min, z_max)
+            
+            # Set title and labels
+            ax.set_title(f"Cluster {cluster_id} - Sample {j+1}")
+            ax.set_xlabel('X')
+            ax.set_ylabel('Y')
+            ax.set_zlabel('Z')
+            
+            # Add legend for the first subplot only
+            if j == 0:
+                ax.legend()
+        
+        # Save the figure
+        plt.tight_layout()
+        plt.savefig(f"{output_dir}/cluster_{cluster_id}_representative.png", dpi=300, bbox_inches='tight')
+        plt.close()
+        
+    print(f"Saved representative trajectory plots to {output_dir}")
+
+def create_combined_grid_video(data, segments, original_segments, segment_indices, clusters, n_per_cluster=5, output_file="combined_grid_video.mp4", global_ranges=None):
+    """Create a grid video showing both EEF trajectories and camera observations for each cluster.
+    
+    Args:
+        data: TensorDict with observation data
+        segments: List of EEF trajectory segments 
+        original_segments: List of original EEF position segments (for visualization)
+        segment_indices: List of (start_idx, end_idx) for each segment
+        clusters: Cluster assignments for each segment
+        n_per_cluster: Number of segments to show per cluster
+        output_file: Path to save the output video
+        global_ranges: Optional tuple (x_min, x_max, y_min, y_max, z_min, z_max) for consistent visualization
+    
+    Returns:
+        Path to the saved video file
+    """
+    # Check if we have image data
+    has_image_data = "image" in data
+    if not has_image_data:
+        print("No image data found. Only showing EEF trajectories.")
+    
+    # Prepare images if available
+    if has_image_data:
+        images = data["image"].cpu()
+    
+    # Find unique clusters
+    unique_clusters = np.unique(clusters)
+    n_clusters = len(unique_clusters)
+
+    # Assign colors to clusters
+    colors = plt.cm.rainbow(np.linspace(0, 1, n_clusters))
+    cluster_colors = {cluster_id: colors[i] for i, cluster_id in enumerate(unique_clusters)}
+    
+    # Determine EEF axis limits
+    if global_ranges:
+        x_min, x_max, y_min, y_max, z_min, z_max = global_ranges
+    else:
+        # Find global min and max for consistent scaling
+        all_coords = np.vstack([seg.cpu().numpy() for seg in original_segments])
+        x_min, y_min, z_min = np.min(all_coords, axis=0)
+        x_max, y_max, z_max = np.max(all_coords, axis=0)
+
+        # Add some padding
+        padding = 0.1
+        x_range = max(x_max - x_min, 0.01)
+        y_range = max(y_max - y_min, 0.01)
+        z_range = max(z_max - z_min, 0.01)
+        
+        x_min -= padding * x_range
+        y_min -= padding * y_range
+        z_min -= padding * z_range
+        x_max += padding * x_range
+        y_max += padding * y_range
+        z_max += padding * z_range
+    
+    # Determine grid layout - 2 columns per segment (one for EEF, one for camera view)
+    cols_per_segment = 2 if has_image_data else 1
+    total_cols = n_per_cluster * cols_per_segment
+    
+    # Create figure
+    fig = plt.figure(figsize=(total_cols * 3, n_clusters * 3))
+    gs = gridspec.GridSpec(n_clusters, total_cols)
+    
+    # Prepare lists for animation data
+    all_eef_plots = []  # Will hold (line, point) tuples
+    all_image_plots = []  # Will hold image plots
+    all_trajectories = []  # Will hold EEF trajectory data
+    all_segment_frames = []  # Will hold image sequences
+    
+    print(f"Creating combined grid with {n_clusters} clusters, {n_per_cluster} segments per cluster")
+    
+    # Initialize subplots for each cluster and segment
+    for cluster_idx, cluster_id in enumerate(unique_clusters):
+        # Get segments for this cluster
+        cluster_indices = [i for i, c in enumerate(clusters) if c == cluster_id]
+        
+        # Skip if no segments in this cluster
+        if not cluster_indices:
+            print(f"Skipping cluster {cluster_id} - no segments found")
+            continue
+        
+        # Sample segments (or use all if less than requested)
+        n_samples = min(n_per_cluster, len(cluster_indices))
         if n_samples < n_per_cluster:
             print(
                 f"Warning: Only {n_samples} segments available for cluster {cluster_id}"
             )
 
         # Sample indices
-        sample_idxs = random.sample(range(len(cluster_segments)), n_samples)
-
-        # Create plots for this cluster
-        for j in range(n_samples):
-            # Get the segment
-            sample_idx = sample_idxs[j]
-            segment = cluster_segments[sample_idx]
-            start_idx, end_idx = cluster_indices[sample_idx]
-
-            # Get trajectory data - handle both list and tensor cases
-            if isinstance(eef_positions, list):
-                # eef_positions is a list of segments, use the segment directly
-                segment_tensor = segment
-                traj = segment_tensor.cpu().numpy()
-            else:
-                # eef_positions is a single tensor, extract the segment
-                traj = eef_positions[start_idx : end_idx + 1].cpu().numpy()
-
-            # Create 3D subplot
-            ax = fig.add_subplot(gs[cluster_idx, j], projection="3d")
-
-            # Initialize empty line
-            (line,) = ax.plot([], [], [], linewidth=2, color=cluster_colors[cluster_id])
-            point = ax.scatter([], [], [], color="red", s=50)
-
+        sample_idxs = random.sample(cluster_indices, n_samples)
+        
+        # Create subplots for this cluster
+        for j, sample_idx in enumerate(sample_idxs):
+            # Get segment data
+            segment = original_segments[sample_idx]
+            start_idx, end_idx = segment_indices[sample_idx]
+            
+            # Get EEF trajectory
+            traj = segment.cpu().numpy()
+            
+            # Base column index for this segment
+            base_col = j * cols_per_segment
+            
+            # 1. Create 3D trajectory subplot
+            ax_eef = fig.add_subplot(gs[cluster_idx, base_col], projection='3d')
+            
+            # Initialize empty plots
+            line, = ax_eef.plot([], [], [], linewidth=2, color=cluster_colors[cluster_id])
+            point = ax_eef.scatter([], [], [], color='red', s=50)
+            
             # Set consistent axis limits
-            ax.set_xlim(x_min, x_max)
-            ax.set_ylim(y_min, y_max)
-            ax.set_zlim(z_min, z_max)
-
-            # Set title
-            ax.set_title(f"Cluster {cluster_id} - Segment {j + 1}")
-
-            # Add axis labels for better clarity
-            ax.set_xlabel("X")
-            ax.set_ylabel("Y")
-            ax.set_zlabel("Z")
-
-            # Store the plots and data
-            all_plots.append((line, point))
+            ax_eef.set_xlim(x_min, x_max)
+            ax_eef.set_ylim(y_min, y_max)
+            ax_eef.set_zlim(z_min, z_max)
+            
+            # Set title and labels
+            ax_eef.set_title(f"Cluster {cluster_id}")
+            ax_eef.set_xlabel('X')
+            ax_eef.set_ylabel('Y')
+            ax_eef.set_zlabel('Z')
+            
+            # Add colored border for cluster identification
+            for spine in ax_eef.spines.values():
+                spine.set_edgecolor(cluster_colors[cluster_id])
+                spine.set_linewidth(3)
+            
+            # Store plot and trajectory
+            all_eef_plots.append((line, point))
             all_trajectories.append(traj)
-
+            
+            # 2. Create image subplot if we have image data
+            if has_image_data:
+                ax_img = fig.add_subplot(gs[cluster_idx, base_col + 1])
+                
+                # Get image sequence for this segment
+                segment_images = images[start_idx:end_idx+1]
+                
+                # Initialize with first frame
+                img_plot = ax_img.imshow(segment_images[0])
+                
+                # Add colored border to identify the cluster
+                for spine in ax_img.spines.values():
+                    spine.set_edgecolor(cluster_colors[cluster_id])
+                    spine.set_linewidth(3)
+                
+                # Remove axis ticks for cleaner appearance
+                ax_img.set_xticks([])
+                ax_img.set_yticks([])
+                
+                # Store image plot and sequence
+                all_image_plots.append(img_plot)
+                all_segment_frames.append(segment_images)
+    
     # Add a global title
-    fig.suptitle("Representative Segments by Cluster", fontsize=16)
-    plt.tight_layout(rect=[0, 0, 1, 0.96])  # Make room for the suptitle
-
-    # Function to update the animation
+    fig.suptitle("Trajectory Clusters", fontsize=16)
+    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+    
+    # Add a frame counter
+    frame_text = fig.text(0.5, 0.01, "Frame: 0", ha='center', fontsize=12)
+    
+    # Animation update function
     def update(frame):
-        updated_artists = []
-
-        # Update the view angle for all subplots
-        for i, ((line, point), traj) in enumerate(zip(all_plots, all_trajectories)):
+        updated_artists = [frame_text]
+        frame_text.set_text(f"Frame: {frame}")
+        
+        # 1. Update EEF trajectories
+        for i, ((line, point), traj) in enumerate(zip(all_eef_plots, all_trajectories)):
             # Update trajectory up to current frame
             frame_idx = min(frame, len(traj) - 1)
-
-            # Update line data
-            line.set_data(traj[: frame_idx + 1, 0], traj[: frame_idx + 1, 1])
-            line.set_3d_properties(traj[: frame_idx + 1, 2])
-
+            
+            # Update line data (growing trajectory)
+            line.set_data(traj[:frame_idx+1, 0], traj[:frame_idx+1, 1])
+            line.set_3d_properties(traj[:frame_idx+1, 2])
+            
             # Update current position point
             point._offsets3d = (
                 [traj[frame_idx, 0]],
@@ -785,162 +633,36 @@ def create_cluster_grid_video(
             ax.view_init(elev=30, azim=(frame % 360))
 
             updated_artists.extend([line, point])
-
+        
+        # 2. Update images if we have image data
+        if has_image_data:
+            for i, (img_plot, segment) in enumerate(zip(all_image_plots, all_segment_frames)):
+                # Get the correct frame, loop back to start if we reach the end
+                frame_idx = frame % len(segment)
+                
+                # Update the image
+                img_plot.set_array(segment[frame_idx])
+                updated_artists.append(img_plot)
+        
         return updated_artists
-
-    # Create animation
+    
+    # Find the maximum trajectory length to determine animation frames
     max_length = max(len(traj) for traj in all_trajectories)
-    anim = animation.FuncAnimation(
-        fig, update, frames=max_length, interval=50, blit=True
-    )
-
-    # Save animation
-    writer = animation.FFMpegWriter(fps=15, metadata=dict(artist="Me"), bitrate=1800)
-    anim.save(output_file, writer=writer)
-    plt.close(fig)
-
-    print(f"Saved cluster grid video to {output_file}")
-    return output_file
-
-
-def create_observation_grid_video(
-    data,
-    segment_indices,
-    clusters,
-    n_per_cluster=5,
-    output_file="cluster_observations_video.mp4",
-):
-    """Create a grid video showing observation images for representative segments from each cluster.
-
-    Args:
-        data: TensorDict with observation images
-        segment_indices: List of (start_idx, end_idx) for each segment
-        clusters: Cluster assignments for each segment
-        n_per_cluster: Number of segments to show per cluster
-        output_file: Path to save the output video
-    """
-    # Check if we have image data
-    if "image" not in data:
-        print("No image data found in the dataset. Cannot create observation video.")
-        return None
-
-    # Make sure images are on CPU
-    images = data["image"].cpu()
-
-    # Find unique clusters
-    unique_clusters = np.unique(clusters)
-    n_clusters = len(unique_clusters)
-
-    # Assign colors to clusters (for visual identification)
-    colors = plt.cm.rainbow(np.linspace(0, 1, n_clusters))
-    cluster_colors = {
-        cluster_id: colors[i] for i, cluster_id in enumerate(unique_clusters)
-    }
-
-    # Create a figure with a grid layout - one row per cluster, n_per_cluster columns
-    fig = plt.figure(figsize=(n_per_cluster * 3, n_clusters * 3))
-
-    # Print progress
-    print(
-        f"Creating observation grid video with {n_clusters} clusters, {n_per_cluster} segments per cluster"
-    )
-
-    # Create grid layout
-    gs = gridspec.GridSpec(n_clusters, n_per_cluster)
-
-    # Prepare a list to hold all image plots and their corresponding segment data
-    all_imgs = []
-    all_segment_frames = []
-
-    # Initialize subplots for each cluster
-    for cluster_idx, cluster_id in enumerate(unique_clusters):
-        # Get segments for this cluster
-        cluster_indices = [
-            i for i, cluster in enumerate(clusters) if cluster == cluster_id
-        ]
-
-        # Skip if no segments in this cluster
-        if not cluster_indices:
-            print(f"Skipping cluster {cluster_id} - no segments found")
-            continue
-
-        # Sample n_per_cluster segments (or fewer if not enough)
-        n_samples = min(n_per_cluster, len(cluster_indices))
-        if n_samples < n_per_cluster:
-            print(
-                f"Warning: Only {n_samples} segments available for cluster {cluster_id}"
-            )
-
-        # Sample indices
-        sample_idxs = random.sample(cluster_indices, n_samples)
-
-        # Create image plots for this cluster
-        for j, sample_idx in enumerate(sample_idxs):
-            # Get the segment indices
-            start_idx, end_idx = segment_indices[sample_idx]
-
-            # Get images for this segment
-            segment_images = images[start_idx : end_idx + 1]
-
-            # Create subplot
-            ax = fig.add_subplot(gs[cluster_idx, j])
-
-            # Initialize with the first frame
-            img = ax.imshow(segment_images[0])
-
-            # Add a colored border to identify the cluster
-            color = cluster_colors[cluster_id]
-            for spine in ax.spines.values():
-                spine.set_edgecolor(color)
-                spine.set_linewidth(5)
-
-            # Remove axis ticks for cleaner appearance
-            ax.set_xticks([])
-            ax.set_yticks([])
-
-            # Set title
-            ax.set_title(f"Cluster {cluster_id}")
-
-            # Store the image plot and frames
-            all_imgs.append(img)
-            all_segment_frames.append(segment_images)
-
-    # Add a global title
-    fig.suptitle("Representative Observations by Cluster", fontsize=16)
-    plt.tight_layout(rect=[0, 0.03, 1, 0.95])  # Adjust for suptitle
-
-    # Add a frame counter at the bottom
-    frame_text = fig.text(0.5, 0.01, "Frame: 0", ha="center", fontsize=12)
-
-    # Function to update the animation
-    def update(frame):
-        # Update the frame counter
-        frame_text.set_text(f"Frame: {frame}")
-
-        # Update each image
-        for i, (img, segment) in enumerate(zip(all_imgs, all_segment_frames)):
-            # Get the correct frame, loop back to start if we reach the end
-            frame_idx = frame % len(segment)
-
-            # Update the image
-            img.set_array(segment[frame_idx])
-
-        return [frame_text] + all_imgs
-
-    # Find the maximum segment length to determine animation frames
-    max_length = max(len(frames) for frames in all_segment_frames)
-
+    if has_image_data:
+        # Adjust max length to handle different segment lengths
+        image_max_length = max(len(frames) for frames in all_segment_frames)
+        max_length = max(max_length, image_max_length)
+    
     # Create animation
-    anim = animation.FuncAnimation(
-        fig, update, frames=max_length, interval=200, blit=True
-    )
-
+    print(f"Creating animation with {max_length} frames...")
+    anim = animation.FuncAnimation(fig, update, frames=max_length, interval=100, blit=True)
+    
     # Save animation
-    writer = animation.FFMpegWriter(fps=5, metadata=dict(artist="Me"), bitrate=1800)
+    writer = animation.FFMpegWriter(fps=10, metadata=dict(artist='Me'), bitrate=1800)
     anim.save(output_file, writer=writer)
     plt.close(fig)
-
-    print(f"Saved observation grid video to {output_file}")
+    
+    print(f"Saved combined visualization to {output_file}")
     return output_file
 
 
@@ -1112,14 +834,16 @@ def main():
 
     # Save segment visualization if not skipping videos
     if not args.skip_videos:
-        output_file = os.path.join(
-            args.output_dir, f"eef_{segment_type}_segments_3d.mp4"
-        )
-        create_cluster_animation(
+        output_file = os.path.join(args.output_dir, f"eef_{segment_type}_segments_3d.mp4")
+        create_combined_grid_video(
+            data,
+            segments,
             original_segments,
+            segment_indices,
             np.zeros(len(segments), dtype=int),
+            n_per_cluster=args.segments_per_cluster,
             output_file=output_file,
-            global_ranges=global_ranges,
+            global_ranges=global_ranges
         )
     else:
         print("\nSkipping initial segment visualization (--skip_videos is set)")
@@ -1187,40 +911,19 @@ def main():
             output_dir=args.output_dir,
             global_ranges=global_ranges,
         )
-
-        # Create 3D animation (using original segments for visualization)
-        print("\nCreating 3D animation of clustered trajectories...")
-        create_cluster_animation(
-            original_segments_for_clustering,
-            clusters,
-            output_file=f"{args.output_dir}/eef_clusters_3d.mp4",
-            global_ranges=global_ranges,
-        )
-
-        # Create grid video with multiple segments per cluster (EEF trajectories)
-        print("\nCreating grid video of representative EEF trajectories...")
-        create_cluster_grid_video(
+        
+        # Create combined grid video with EEF trajectories and camera observations
+        print("\nCreating combined grid video...")
+        create_combined_grid_video(
+            data,
             segments_for_clustering,
             original_segments_for_clustering,
             indices_for_clustering,
             clusters,
             n_per_cluster=args.segments_per_cluster,
-            output_file=f"{args.output_dir}/cluster_grid_video.mp4",
-            global_ranges=global_ranges,
+            output_file=f"{args.output_dir}/combined_grid_video.mp4",
+            global_ranges=global_ranges
         )
-
-        # Create grid video with observation images for each cluster if data is available
-        if data is not None and "image" in data:
-            print("\nCreating observation grid video...")
-            create_observation_grid_video(
-                data,
-                indices_for_clustering,
-                clusters,
-                n_per_cluster=args.segments_per_cluster,
-                output_file=f"{args.output_dir}/cluster_observations_video.mp4",
-            )
-        else:
-            print("\nSkipping observation grid video (image data not available)")
     else:
         print("\nSkipping all video generation (--skip_videos is set)")
 

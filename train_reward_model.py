@@ -17,7 +17,6 @@ import wandb
 
 # Import utility functions
 from trajectory_utils import (
-    DEFAULT_DATA_PATHS,
     RANDOM_SEED,
     load_tensordict,
     create_segments,
@@ -29,20 +28,14 @@ torch.manual_seed(RANDOM_SEED)
 np.random.seed(RANDOM_SEED)
 random.seed(RANDOM_SEED)
 
-# Set random seed for reproducibility
-RANDOM_SEED = 42
-random.seed(RANDOM_SEED)
-np.random.seed(RANDOM_SEED)
-torch.manual_seed(RANDOM_SEED)
+# Set up CUDA memory management for better stability
 if torch.cuda.is_available():
     torch.cuda.manual_seed(RANDOM_SEED)
     torch.cuda.manual_seed_all(RANDOM_SEED)  # For multi-GPU
     # Set deterministic behavior
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
-
-# Set up CUDA memory management for better stability
-if torch.cuda.is_available():
+    
     # Reduce memory fragmentation
     torch.cuda.empty_cache()
     # Use more aggressive memory caching if available (PyTorch 1.11+)
@@ -90,22 +83,12 @@ class StateActionRewardModel(nn.Module):
 
     def forward(self, obs, action):
         """Forward pass using observation and action."""
-        # Check for NaN inputs
-        if torch.isnan(obs).any() or torch.isnan(action).any():
-            print("WARNING: NaN detected in model inputs")
-
         # Concatenate observation and action
         x = torch.cat([obs, action], dim=-1)
 
         # Apply model
-        result = self.model(x).squeeze(
-            -1
-        )  # Squeeze to remove last dimension if batch size = 1
-
-        # Check for NaN outputs
-        if torch.isnan(result).any():
-            print("WARNING: NaN detected in model outputs")
-
+        result = self.model(x).squeeze(-1)  # Squeeze to remove last dimension if batch size = 1
+        
         return result
 
     def logpdf(self, obs, action, reward):
@@ -280,8 +263,13 @@ class PreferenceDataset(Dataset):
             actions2 = actions2[:min_len]
 
         # Convert preference to tensor
-        pref = torch.tensor(self.preferences[idx], dtype=torch.long)
-
+        if isinstance(self.preferences[idx], torch.Tensor):
+            # If it's already a tensor, just clone it
+            pref = self.preferences[idx].clone().detach().long()
+        else:
+            # Otherwise create a new tensor
+            pref = torch.tensor(self.preferences[idx], dtype=torch.long)
+        
         # Handle NaN values
         if (
             torch.isnan(obs1).any()
@@ -310,8 +298,12 @@ def bradley_terry_loss(rewards1, rewards2, preferences):
         Loss value
     """
     # Convert preferences to probabilities (1 = first segment preferred, 2 = second segment preferred)
-    prefs = (preferences == 1).float()
-
+    # Use detach and clone for tensor conversion if input is already a tensor
+    if isinstance(preferences, torch.Tensor):
+        prefs = (preferences == 1).float()
+    else:
+        prefs = (torch.tensor(preferences) == 1).float()
+    
     # Compute probability that segment1 is preferred over segment2 using the Bradley-Terry model
     # Add a small epsilon for numerical stability
     eps = 1e-6
@@ -321,18 +313,8 @@ def bradley_terry_loss(rewards1, rewards2, preferences):
     pred_probs = torch.sigmoid(logits)
 
     # Use a more numerically stable binary cross-entropy loss
-    loss = -torch.mean(
-        prefs * torch.log(pred_probs + eps)
-        + (1 - prefs) * torch.log(1 - pred_probs + eps)
-    )
-
-    # Check for NaN loss and return a fallback value if needed
-    if torch.isnan(loss).any():
-        print("WARNING: NaN loss detected. Using fallback MSE loss.")
-        # Use a fallback MSE loss instead
-        mse_loss = torch.mean((rewards1 - rewards2 - (2 * prefs - 1)) ** 2)
-        return mse_loss
-
+    loss = -torch.mean(prefs * torch.log(pred_probs + eps) + (1 - prefs) * torch.log(1 - pred_probs + eps))
+    
     return loss
 
 
@@ -386,8 +368,7 @@ def train_reward_model(model, train_loader, val_loader, device, num_epochs=50, l
         # Training
         model.train()
         train_loss = 0
-        nan_batches = 0
-
+        
         # Use a progress bar with ETA
         progress_bar = tqdm(
             train_loader,
@@ -407,80 +388,34 @@ def train_reward_model(model, train_loader, val_loader, device, num_epochs=50, l
                 actions2.to(device, non_blocking=True),
                 pref.to(device, non_blocking=True),
             )
-
-            # Skip batches with NaN values
-            if (
-                torch.isnan(obs1).any()
-                or torch.isnan(actions1).any()
-                or torch.isnan(obs2).any()
-                or torch.isnan(actions2).any()
-            ):
-                nan_batches += 1
-                continue
-
+            
             optimizer.zero_grad(set_to_none=True)
 
             # Compute rewards
             reward1 = model(obs1, actions1)
             reward2 = model(obs2, actions2)
-
-            # Skip if NaN rewards
-            if torch.isnan(reward1).any() or torch.isnan(reward2).any():
-                nan_batches += 1
-                continue
-
+            
             loss = bradley_terry_loss(reward1, reward2, pref)
-
-            # Skip problematic batches
-            if torch.isnan(loss).any():
-                nan_batches += 1
-                continue
-
             loss.backward()
 
             # Clip gradients
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
-
-            # Check for NaN gradients
-            nan_grad = False
-            for param in model.parameters():
-                if param.grad is not None and torch.isnan(param.grad).any():
-                    nan_grad = True
-                    break
-
-            if nan_grad:
-                nan_batches += 1
-                continue
-
+            
             optimizer.step()
 
             train_loss += loss.item()
             progress_bar.set_postfix({"loss": f"{loss.item():.4f}"})
-
-        if nan_batches > 0:
-            print(
-                f"WARNING: {nan_batches}/{len(train_loader)} training batches skipped due to NaN issues"
-            )
-
-        avg_train_loss = (
-            train_loss / (len(train_loader) - nan_batches)
-            if len(train_loader) > nan_batches
-            else float("nan")
-        )
+            
+        avg_train_loss = train_loss / len(train_loader)
         train_losses.append(avg_train_loss)
 
         # Validation
         model.eval()
         val_loss = 0
-        val_nan_batches = 0
-
-        val_progress = tqdm(
-            val_loader,
-            desc=f"Epoch {epoch + 1}/{num_epochs} (Val)",
-            leave=False,
-            dynamic_ncols=True,
-        )
-
+        
+        val_progress = tqdm(val_loader, desc=f"Epoch {epoch+1}/{num_epochs} (Val)", 
+                           leave=False, dynamic_ncols=True)
+        
         with torch.no_grad():
             for batch_idx, (obs1, actions1, obs2, actions2, pref) in enumerate(
                 val_progress
@@ -493,85 +428,31 @@ def train_reward_model(model, train_loader, val_loader, device, num_epochs=50, l
                     actions2.to(device, non_blocking=True),
                     pref.to(device, non_blocking=True),
                 )
-
-                # Skip batches with NaN values
-                if (
-                    torch.isnan(obs1).any()
-                    or torch.isnan(actions1).any()
-                    or torch.isnan(obs2).any()
-                    or torch.isnan(actions2).any()
-                ):
-                    val_nan_batches += 1
-                    continue
-
+                
                 reward1 = model(obs1, actions1)
                 reward2 = model(obs2, actions2)
-
-                # Skip if NaN rewards
-                if torch.isnan(reward1).any() or torch.isnan(reward2).any():
-                    val_nan_batches += 1
-                    continue
-
+                
                 loss = bradley_terry_loss(reward1, reward2, pref)
-
-                if torch.isnan(loss).any():
-                    val_nan_batches += 1
-                    continue
-
+                
                 val_loss += loss.item()
                 val_progress.set_postfix({"loss": f"{loss.item():.4f}"})
-
-        if val_nan_batches > 0:
-            print(
-                f"WARNING: {val_nan_batches}/{len(val_loader)} validation batches skipped due to NaN issues"
-            )
-
-        avg_val_loss = (
-            val_loss / (len(val_loader) - val_nan_batches)
-            if len(val_loader) > val_nan_batches
-            else float("nan")
-        )
+        
+        avg_val_loss = val_loss / len(val_loader)
         val_losses.append(avg_val_loss)
 
         # Update learning rate
         scheduler.step()
-
-        # Save best model (if not NaN)
-        if not np.isnan(avg_val_loss) and avg_val_loss < best_val_loss:
+        
+        # Save best model
+        if avg_val_loss < best_val_loss:
             best_val_loss = avg_val_loss
             best_model_state = model.state_dict().copy()
 
         # Log to wandb
-        log_wandb_metrics(
-            avg_train_loss, avg_val_loss, epoch, scheduler.get_last_lr()[0]
-        )
-
-        print(
-            f"Epoch {epoch + 1}/{num_epochs}: train_loss={avg_train_loss:.4f}, val_loss={avg_val_loss:.4f}, lr={scheduler.get_last_lr()[0]:.6f}"
-        )
-
-    # If we had NaN issues the whole time, try with a simpler model
-    if all(np.isnan(loss) for loss in val_losses):
-        print(
-            "All validation losses were NaN. Training a simpler model with fewer parameters..."
-        )
-        # Initialize a simpler model with smaller hidden layers and more regularization
-        simpler_model = SegmentRewardModel(
-            model.reward_model.model[0].in_features // 2,
-            model.reward_model.model[0].in_features // 2,
-            hidden_dims=[64, 32],
-        )
-        simpler_model = simpler_model.to(device)
-
-        # Log to wandb
-        if wandb.run:
-            wandb.log({"model_simplified": True})
-
-        # Train the simpler model with more regularization and lower learning rate
-        return train_reward_model(
-            simpler_model, train_loader, val_loader, device, num_epochs, lr=lr / 10
-        )
-
+        log_wandb_metrics(avg_train_loss, avg_val_loss, epoch, scheduler.get_last_lr()[0])
+        
+        print(f"Epoch {epoch+1}/{num_epochs}: train_loss={avg_train_loss:.4f}, val_loss={avg_val_loss:.4f}, lr={scheduler.get_last_lr()[0]:.6f}")
+    
     # Load best model if we found one
     if best_model_state is not None:
         model.load_state_dict(best_model_state)
@@ -603,10 +484,42 @@ def train_reward_model(model, train_loader, val_loader, device, num_epochs=50, l
 
     return model, train_losses, val_losses
 
+def load_preferences_data(file_path):
+    """Load preference data saved from collect_cluster_preferences.py.
+    
+    Args:
+        file_path: Path to saved preference data pickle file
+        
+    Returns:
+        Tuple of (segment_pairs, segment_indices, preferences, segments)
+    """
+    print(f"Loading preference data from {file_path}")
+    
+    # Load data with torch.load instead of pickle
+    pref_data = torch.load(file_path, weights_only=False)
+    
+    # Extract the necessary components
+    segment_pairs = pref_data['segment_pairs']
+    segment_indices = pref_data['segment_indices']
+    
+    # Get preferences
+    if 'preference_labels' in pref_data:
+        print("Using preference_labels from dataset")
+        preferences = pref_data['preference_labels']
+    else:
+        print("Could not find preferences in dataset! Available keys:", list(pref_data.keys()))
+        raise KeyError("No preference data found in file")
+    
+    # Check if data is included in the preference data
+    data = None
+    if 'data' in pref_data:
+        data = pref_data['data']
+        print(f"Found embedded data with fields: {list(data.keys())}")
+    
+    print(f"Loaded {len(segment_pairs)} preference pairs")
+    return segment_pairs, segment_indices, preferences, data
 
-@hydra.main(
-    config_path="config/train_reward_model", config_name="config", version_base=None
-)
+@hydra.main(config_path="config/train_reward_model", config_name="config", version_base=None)
 def main(cfg: DictConfig):
     """Train a state-action reward model using BT loss with Hydra config."""
     print("\n" + "=" * 50)
@@ -658,37 +571,92 @@ def main(cfg: DictConfig):
     if device.type == "cpu":
         print("Running in CPU mode")
         effective_pin_memory = False
-
-    # Load data
-    print(f"Loading data from {cfg.data.data_path}")
-    data = load_tensordict(cfg.data.data_path)
-
-    # Get observation and action dimensions
-    observations = data["obs"] if "obs" in data else data["state"]
-    actions = data["action"]
-    state_dim = observations.shape[1]
-    action_dim = actions.shape[1]
-
-    print(f"Observation dimension: {state_dim}, Action dimension: {action_dim}")
-
-    print(f"Creating segments of length {cfg.data.segment_length}...")
-    num_segments = cfg.data.num_segments if cfg.data.num_segments > 0 else None
-
-    # Ensure data is on CPU before creating segments to avoid device mismatch issues
-    data_cpu = {
-        k: v.cpu() if isinstance(v, torch.Tensor) else v for k, v in data.items()
-    }
-
-    segments, segment_indices = create_segments(
-        data_cpu, segment_length=cfg.data.segment_length, max_segments=num_segments
-    )
-
-    # Generate preference pairs
-    print(f"Generating {cfg.data.num_pairs} preference pairs...")
-    segment_pairs, preferences = sample_segment_pairs(
-        segments, segment_indices, data_cpu["reward"], n_pairs=cfg.data.num_pairs
-    )
-
+    
+    # Initialize variables
+    data_cpu = None
+    segments = None
+    segment_pairs = None
+    segment_indices = None
+    preferences = None
+    state_dim = None
+    action_dim = None
+    
+    # First, try to load from preference data if specified
+    if hasattr(cfg.data, 'preferences_data_path') and cfg.data.preferences_data_path:
+        print(f"Loading preference data from {cfg.data.preferences_data_path}")
+        
+        # Load the preference data
+        segment_pairs, segment_indices, preferences, embedded_data = load_preferences_data(cfg.data.preferences_data_path)
+        
+        # Use embedded data if available
+        if embedded_data is not None:
+            print("Using embedded data from preference file")
+            data_cpu = embedded_data
+            
+            # Get observation and action dimensions from embedded data
+            if 'obs' in data_cpu:
+                observations = data_cpu['obs']
+                state_dim = observations.shape[1]
+            elif 'state' in data_cpu:
+                observations = data_cpu['state']
+                state_dim = observations.shape[1]
+            
+            if 'action' in data_cpu:
+                actions = data_cpu['action']
+                action_dim = actions.shape[1]
+            
+            print(f"Embedded data contains fields: {list(data_cpu.keys())}")
+            print(f"Observation shape: {observations.shape}, Action shape: {actions.shape if 'action' in data_cpu else 'N/A'}")
+        else:
+            print("No embedded data found in preference file. Will load from original data file.")
+    
+    # If we don't have data yet, load from the original file
+    if data_cpu is None:
+        print(f"Loading data from original file: {cfg.data.data_path}")
+        data = load_tensordict(cfg.data.data_path)
+        
+        # Get observation and action dimensions
+        observations = data["obs"] if "obs" in data else data["state"]
+        actions = data["action"]
+        state_dim = observations.shape[1]
+        action_dim = actions.shape[1]
+        
+        # Ensure data is on CPU for processing
+        data_cpu = {k: v.cpu() if isinstance(v, torch.Tensor) else v for k, v in data.items()}
+        print(f"Loaded data with {len(observations)} observations")
+    
+    # If we still don't have necessary preference data, generate it
+    if segment_pairs is None or preferences is None:
+        if segment_indices is not None and segments is None:
+            # Extract segments from data using provided indices
+            print("Extracting segments from data using provided segment indices...")
+            segments = []
+            for start_idx, end_idx in tqdm(segment_indices, desc="Extracting segments"):
+                segment_obs = data_cpu["obs"][start_idx:end_idx+1]
+                segments.append(segment_obs)
+            print(f"Extracted {len(segments)} segments")
+        
+        # If we still don't have segments, generate them
+        if segments is None or segment_indices is None:
+            print(f"Creating segments of length {cfg.data.segment_length}...")
+            num_segments = cfg.data.num_segments if cfg.data.num_segments > 0 else None
+            segments, segment_indices = create_segments(data_cpu, segment_length=cfg.data.segment_length, max_segments=num_segments)
+        
+        # If we still don't have pairs or preferences, generate them
+        if segment_pairs is None or preferences is None:
+            print(f"Generating {cfg.data.num_pairs} preference pairs...")
+            segment_pairs, preferences = sample_segment_pairs(
+                segments, 
+                segment_indices, 
+                data_cpu["reward"], 
+                n_pairs=cfg.data.num_pairs
+            )
+    else:
+        print(f"Using {len(segment_pairs)} preference pairs loaded from preference data file")
+    
+    print(f"Final data stats - Observation dimension: {state_dim}, Action dimension: {action_dim}")
+    print(f"Working with {len(segment_pairs) if segment_pairs is not None else 0} preference pairs across {len(segment_indices) if segment_indices is not None else 0} segments")
+    
     # Create dataset
     preference_dataset = PreferenceDataset(
         data_cpu, segment_pairs, segment_indices, preferences
@@ -811,15 +779,6 @@ def main(cfg: DictConfig):
 
     with torch.no_grad():
         for obs1, actions1, obs2, actions2, pref in tqdm(test_loader, desc="Testing"):
-            # Skip batches with NaN values
-            if (
-                torch.isnan(obs1).any()
-                or torch.isnan(actions1).any()
-                or torch.isnan(obs2).any()
-                or torch.isnan(actions2).any()
-            ):
-                continue
-
             # Move to device
             obs1, actions1 = obs1.to(device), actions1.to(device)
             obs2, actions2 = obs2.to(device), actions2.to(device)
@@ -828,18 +787,9 @@ def main(cfg: DictConfig):
             # Get reward predictions
             reward1 = model(obs1, actions1)
             reward2 = model(obs2, actions2)
-
-            # Skip if NaN rewards
-            if torch.isnan(reward1).any() or torch.isnan(reward2).any():
-                continue
-
+            
             # Compute loss
             loss = bradley_terry_loss(reward1, reward2, pref)
-
-            # Skip if NaN loss
-            if torch.isnan(loss).any():
-                continue
-
             test_loss += loss.item()
 
             # Compute accuracy (prediction matches preference)
@@ -874,8 +824,8 @@ def main(cfg: DictConfig):
     # Save segment info
     segment_info = {
         "segment_length": cfg.data.segment_length,
-        "num_segments": len(segments),
-        "num_pairs": len(segment_pairs),
+        "num_segments": len(segments) if segments is not None else 0,
+        "num_pairs": len(segment_pairs) if segment_pairs is not None else 0,
         "observation_dim": state_dim,
         "action_dim": action_dim,
         "training_losses": train_losses,

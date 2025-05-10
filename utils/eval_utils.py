@@ -11,6 +11,74 @@ from multiprocessing import get_context
 # Default random seed for reproducibility
 RANDOM_SEED = 42
 
+# Define a picklable environment creator class
+class PicklableEnvCreator:
+    """A picklable environment creator that can be passed between processes."""
+    
+    def __init__(self, env_id=None, seed=None, env_type=None):
+        """Initialize with either an environment ID or a reference environment.
+        
+        Args:
+            env_id: The environment ID (string) or a callable that creates an environment
+            seed: Random seed to use
+            env_type: Optional environment type information for reconstruction
+        """
+        self.env_id = env_id
+        self.seed = seed
+        self.env_type = env_type
+        
+        # Store additional information for MetaWorld environments
+        if env_type == "metaworld" and not callable(env_id):
+            try:
+                self.env_name = env_id.__class__.__name__
+            except:
+                self.env_name = str(env_id)
+        
+    def __call__(self):
+        """Create and return a new environment instance."""
+        # If env_id is callable, it's already a creator function
+        if callable(self.env_id):
+            env = self.env_id()
+        # If it's a string, it's a gym environment ID
+        elif isinstance(self.env_id, str):
+            env = gym.make(self.env_id)
+        # Handle MetaWorld environments
+        elif self.env_type == "metaworld":
+            try:
+                # Try to import MetaWorld
+                import metaworld
+                from metaworld.envs import ALL_V2_ENVIRONMENTS_GOAL_OBSERVABLE
+                
+                # Try to find the environment by name
+                for name, constructor in ALL_V2_ENVIRONMENTS_GOAL_OBSERVABLE.items():
+                    if self.env_name in name:
+                        env = constructor(seed=self.seed)
+                        return env
+                        
+                # If not found, try to create it using ML1
+                if hasattr(metaworld, 'ML1'):
+                    try:
+                        ml1 = metaworld.ML1(self.env_name)
+                        env = ml1.train_classes[self.env_name]()
+                        task = ml1.train_tasks[0]
+                        env.set_task(task)
+                        return env
+                    except:
+                        pass
+            except ImportError:
+                # If MetaWorld is not available, we can't create the environment
+                raise ValueError("MetaWorld is not available in this process")
+                
+            # If we couldn't create the environment, raise an error
+            raise ValueError(f"Could not create MetaWorld environment: {self.env_name}")
+        else:
+            raise ValueError(f"Unable to create environment from: {self.env_id}")
+            
+        # Apply seed if provided
+        if self.seed is not None and hasattr(env, 'seed'):
+            env.seed(self.seed)
+            
+        return env
 
 class SimpleVideoRecorder:
     """A simple video recorder using imageio for saving environment frames as videos."""
@@ -191,9 +259,8 @@ def create_video_recorder(env, video_path, episode_idx, fps=30):
 def evaluate_episode_worker(worker_args):
     """Worker function for parallel episode evaluation."""
     env_creator, algo, episode_idx, record_video, video_path, video_fps = worker_args
-
-    # The env_creator function is already configured with the proper seed
-    # as we're using a lambda with default argument in the parent function
+    
+    # Create the environment using the provided creator
     env_instance = env_creator()
 
     # Wrap the environment to ensure proper rendering if video recording is requested
@@ -369,7 +436,17 @@ def evaluate_policy_manual(
         # This ensures diversity across episodes and consistency across runs
         base_seed = RANDOM_SEED + i * 10000 + int(time.time() % 1000)
         base_seeds.append(base_seed)
-
+    
+    # Prepare video path
+    if record_video and video_path:
+        # Ensure video directory exists
+        os.makedirs(os.path.dirname(video_path), exist_ok=True)
+        
+        # Log video recording details
+        max_videos = min(n_episodes, 5)  # Limit to 5 videos to save space
+        if verbose:
+            print(f"Will record up to {max_videos} evaluation episodes to {video_path}_episode_*.mp4")
+    
     # Determine if we should use parallel evaluation
     use_parallel = parallel and n_episodes > 1
 
@@ -377,89 +454,57 @@ def evaluate_policy_manual(
         try:
             import multiprocessing as mp
             from multiprocessing import get_context
-
-            # Create a function that can recreate environments
-            if not callable(env):
-                # Store the environment configuration for recreation
-                env_type = type(env)
-                if hasattr(env, "spec") and hasattr(env.spec, "id"):
-                    env_id = env.spec.id
-                    env_creator = lambda seed=None: gym.make(env_id)
-                else:
-                    # For MetaWorld environments, we need to recreate using fallback methods
-                    print(
-                        "Warning: Using approximate environment recreation for parallel evaluation"
-                    )
-                    original_env = env
-
-                    # Create a generic environment recreation function
-                    # Note: The implementation may need to be adjusted based on your specific environments
-                    def create_similar_env(seed=None):
-                        try:
-                            # Try to use a specific recreation method if available
-                            # You'll need to implement this based on your environment type
-                            from metaworld.envs import (
-                                ALL_V2_ENVIRONMENTS_GOAL_OBSERVABLE,
-                            )
-
-                            # Try to determine the environment type/name from the original
-                            if hasattr(original_env, "__class__") and hasattr(
-                                original_env.__class__, "__name__"
-                            ):
-                                env_name = original_env.__class__.__name__
-                                for (
-                                    name,
-                                    constructor,
-                                ) in ALL_V2_ENVIRONMENTS_GOAL_OBSERVABLE.items():
-                                    if env_name in name:
-                                        return constructor(seed=seed)
-                        except:
-                            pass
-
-                        # If creation with seed fails, return original env
-                        if seed is not None and hasattr(original_env, "seed"):
-                            # If we can't create a new env, at least try to seed the original
-                            original_env.seed(seed)
-                        return original_env
-
-                    env_creator = create_similar_env
-            else:
-                # If environment is already a creator function, wrap it to accept a seed
-                original_creator = env
-
-                def seeded_env_creator(seed=None):
-                    new_env = original_creator()
-                    if seed is not None and hasattr(new_env, "seed"):
-                        new_env.seed(seed)
-                    return new_env
-
-                env_creator = seeded_env_creator
-
+            
             # Determine number of workers
             if num_workers is None:
                 num_workers = min(n_episodes, mp.cpu_count())
 
             if verbose:
-                print(
-                    f"Running parallel evaluation with {num_workers} workers for {n_episodes} episodes"
-                )
-                print(
-                    f"Using different seeds for each environment to ensure diverse initial states"
-                )
-
-            # Prepare arguments for workers
-            worker_args = [
-                (
-                    lambda seed=base_seeds[i]: env_creator(seed),
-                    algo,
+                print(f"Running parallel evaluation ({num_workers} workers, {n_episodes} episodes)")
+            
+            # Prepare arguments for workers using the picklable environment creator
+            worker_args = []
+            for i in range(n_episodes):
+                # Create a distinct environment creator for each episode with appropriate seed
+                seed = base_seeds[i]
+                
+                # For gym environments with environment ID
+                if hasattr(env, 'spec') and hasattr(env.spec, 'id'):
+                    env_id = env.spec.id
+                    env_creator = PicklableEnvCreator(env_id=env_id, seed=seed)
+                # For environment creation functions
+                elif callable(env):
+                    env_creator = PicklableEnvCreator(env_id=env, seed=seed)
+                # For MetaWorld environments
+                else:
+                    # Try to determine if this is a MetaWorld environment
+                    is_metaworld = False
+                    try:
+                        import metaworld
+                        if isinstance(env, metaworld.envs.base.Env) or 'metaworld' in env.__class__.__module__:
+                            is_metaworld = True
+                    except (ImportError, AttributeError):
+                        # If we can't import metaworld or env doesn't have __module__, try other methods
+                        if hasattr(env, 'model') and hasattr(env, 'data'):
+                            # Likely MuJoCo-based environment
+                            is_metaworld = True
+                    
+                    env_type = "metaworld" if is_metaworld else None
+                    env_creator = PicklableEnvCreator(env_id=env, seed=seed, env_type=env_type)
+                
+                # Determine if this episode should be recorded
+                should_record = record_video and i < 5  # Record up to 5 episodes
+                
+                # Add to worker arguments
+                worker_args.append((
+                    env_creator,
+                    algo, 
                     i,
-                    record_video and i < 3,
-                    video_path,
-                    video_fps,
-                )
-                for i in range(n_episodes)
-            ]
-
+                    should_record, 
+                    video_path, 
+                    video_fps
+                ))
+            
             # Use 'spawn' context for better compatibility across platforms
             ctx = get_context("spawn")
             with ctx.Pool(processes=num_workers) as pool:
@@ -501,28 +546,24 @@ def evaluate_policy_manual(
         video_recorders = []
         if record_video and video_path:
             try:
-                # Record at most 3 episodes to save space
-                n_videos = min(n_episodes, 3)
-
+                # Record at most 5 episodes to save space
+                n_videos = min(n_episodes, 5)
+                
                 # For video recording, we'll create a recorder for each episode
                 # but initialize it only when needed to avoid rendering issues
                 for i in range(n_videos):
                     video_recorders.append(None)  # Placeholder
-
-                print(
-                    f"Will record up to {n_videos} evaluation episodes to {video_path}_episode_*.mp4"
-                )
+                
+                if verbose:
+                    print(f"Will record up to {n_videos} evaluation episodes to {video_path}_episode_*.mp4")
             except Exception as e:
                 print(f"Error setting up video recording: {e}")
                 record_video = False
 
         if verbose:
             print(f"Running sequential evaluation for {n_episodes} episodes")
-            print(
-                f"Using different seeds for each episode to ensure diverse initial states"
-            )
-
-        for episode in tqdm(range(n_episodes), desc="Evaluating policy"):
+        
+        for episode in tqdm(range(n_episodes), desc="Evaluating policy", disable=not verbose):
             # Get the base seed for this episode
             episode_seed = base_seeds[episode]
 
@@ -716,101 +757,78 @@ def custom_evaluate_on_environment(env):
 
     def scorer(algo, *args, **kwargs):
         # Create a fresh environment for evaluation if env is a creator function
-        try:
-            eval_env = env() if callable(env) else env
-
-            # Check if environment creation failed
-            if eval_env is None:
-                print("Environment creation failed, skipping evaluation")
-                return 0.0
-
-            # Set a unique seed to ensure diverse initial states
-            if hasattr(eval_env, "seed"):
-                unique_seed = int(time.time() * 1000) % 100000 + random.randint(
-                    0, 10000
-                )
-                eval_env.seed(unique_seed)
-
-            # Check environment compatibility with the model
-            if (
-                not hasattr(eval_env, "observation_space")
-                or eval_env.observation_space is None
-            ):
-                print("Environment has no observation space, skipping evaluation")
-                return 0.0
-
-            env_obs_dim = eval_env.observation_space.shape[0]
-
-            # Get model's expected observation dimension through various ways
-            model_obs_dim = None
-            if hasattr(algo, "observation_shape"):
-                model_obs_dim = algo.observation_shape[0]
-            elif hasattr(algo, "_impl") and hasattr(algo._impl, "observation_shape"):
-                model_obs_dim = algo._impl.observation_shape[0]
-
-            if model_obs_dim is not None and env_obs_dim != model_obs_dim:
-                print(
-                    f"Warning: Environment observation dimension ({env_obs_dim}) doesn't match model's expected dimension ({model_obs_dim})"
-                )
-                print("Skipping evaluation with incompatible environment")
-                return 0.0
-
-            total_reward = 0.0
-            n_episodes = 5
-
-            for episode in range(n_episodes):
-                # Set a different seed for each episode to ensure diversity
-                if hasattr(eval_env, "seed"):
-                    episode_seed = unique_seed + episode * 100
-                    eval_env.seed(episode_seed)
-
-                observation = eval_env.reset()
-                episode_reward = 0.0
-                done = False
-
-                while not done:
-                    # Extract observation if it's a tuple
-                    if isinstance(observation, tuple):
-                        obs_array = observation[0]
-                    else:
-                        obs_array = observation
-
-                    # Ensure observation is a numpy array with batch dimension
-                    if not isinstance(obs_array, np.ndarray):
-                        obs_array = np.array(obs_array, dtype=np.float32)
-
-                    if len(obs_array.shape) == 1:
-                        obs_array = np.expand_dims(obs_array, axis=0)
-
-                    action = algo.predict(obs_array)[0]
-
-                    # Handle different step return formats
-                    step_result = eval_env.step(action)
-
-                    # MetaWorld environments return 4 values: obs, reward, done, info
-                    if len(step_result) == 4:
-                        observation, reward, done, _ = step_result
-                    # Some environments might return 5 values including truncated flag (gym>=0.26)
-                    elif len(step_result) == 5:
-                        observation, reward, terminated, truncated, _ = step_result
-                        done = terminated or truncated
-                    else:
-                        print(f"Warning: Unexpected step result format: {step_result}")
-                        break
-
-                    episode_reward += reward
-
-                total_reward += episode_reward
-
-            # Return average reward across episodes
-            avg_reward = total_reward / n_episodes
-            print(
-                f"Evaluation during training: {avg_reward:.2f} average reward over {n_episodes} episodes"
-            )
-            return avg_reward
-
-        except Exception as e:
-            print(f"Error during environment evaluation: {str(e)}")
+        eval_env = env() if callable(env) else env
+        
+        # Set a unique seed to ensure diverse initial states
+        if hasattr(eval_env, 'seed'):
+            unique_seed = int(time.time() * 1000) % 100000 + random.randint(0, 10000)
+            eval_env.seed(unique_seed)
+        
+        # Check environment compatibility with the model
+        env_obs_dim = eval_env.observation_space.shape[0]
+        
+        # Get model's expected observation dimension through various ways
+        model_obs_dim = None
+        if hasattr(algo, 'observation_shape'):
+            model_obs_dim = algo.observation_shape[0]
+        elif hasattr(algo, '_impl') and hasattr(algo._impl, 'observation_shape'):
+            model_obs_dim = algo._impl.observation_shape[0]
+        
+        if model_obs_dim is not None and env_obs_dim != model_obs_dim:
+            print(f"Warning: Environment observation dimension ({env_obs_dim}) doesn't match model's expected dimension ({model_obs_dim})")
+            print("Skipping evaluation with incompatible environment")
             return 0.0
-
-    return scorer
+        
+        total_reward = 0.0
+        n_episodes = 5  # Number of episodes to evaluate on for each call
+        
+        for episode in range(n_episodes):
+            # Set a different seed for each episode to ensure diversity
+            if hasattr(eval_env, 'seed'):
+                episode_seed = unique_seed + episode * 100
+                eval_env.seed(episode_seed)
+                
+            observation = eval_env.reset()
+            episode_reward = 0.0
+            done = False
+            
+            while not done:
+                # Extract observation if it's a tuple
+                if isinstance(observation, tuple):
+                    obs_array = observation[0]
+                else:
+                    obs_array = observation
+                    
+                # Ensure observation is a numpy array with batch dimension
+                if not isinstance(obs_array, np.ndarray):
+                    obs_array = np.array(obs_array, dtype=np.float32)
+                
+                if len(obs_array.shape) == 1:
+                    obs_array = np.expand_dims(obs_array, axis=0)
+                
+                action = algo.predict(obs_array)[0]
+                
+                # Handle different step return formats
+                step_result = eval_env.step(action)
+                
+                # MetaWorld environments return 4 values: obs, reward, done, info
+                if len(step_result) == 4:
+                    observation, reward, done, _ = step_result
+                # Some environments might return 5 values including truncated flag (gym>=0.26)
+                elif len(step_result) == 5:
+                    observation, reward, terminated, truncated, _ = step_result
+                    done = terminated or truncated
+                else:
+                    print(f"Warning: Unexpected step result format: {step_result}")
+                    break
+                    
+                episode_reward += reward
+            
+            total_reward += episode_reward
+            
+        # Return average reward across episodes
+        avg_reward = total_reward / n_episodes
+        # More concise output
+        return avg_reward
+    
+    return scorer 
