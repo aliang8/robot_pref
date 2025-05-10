@@ -127,9 +127,14 @@ def create_segments(data, segment_length=20, max_segments=None):
     # Create mask for NaN values
     obs_valid = ~torch.isnan(observations).any(dim=1)
     
+    # Get unique episodes
     unique_episodes = torch.unique(episode_ids_cpu).tolist()
     print(f"Found {len(unique_episodes)} unique episodes")
     
+    # Collect all valid episode data for sampling
+    all_valid_blocks = []
+    
+    print("Finding valid blocks in all episodes...")
     with tqdm(total=len(unique_episodes), desc="Processing episodes") as pbar:
         for episode_id in unique_episodes:
             # Get indices for this episode
@@ -140,66 +145,97 @@ def create_segments(data, segment_length=20, max_segments=None):
             
             # Skip if no valid observations
             if not ep_valid.any():
+                pbar.update(1)
                 continue
                 
             # Get valid indices
             valid_indices = ep_indices[ep_valid]
             
-            # Ensure valid_indices is on CPU for consistent processing
-            valid_indices = valid_indices.cpu()
-            
-            # Check for consecutive indices
+            # Check if we have enough consecutive indices
             if len(valid_indices) < segment_length:
+                pbar.update(1)
                 continue
                 
             # Find consecutive blocks using diff
             diffs = torch.diff(valid_indices)
-            breaks = torch.where(diffs > 1)[0]
+            breaks = torch.where(diffs > 1)[0].tolist() + [len(valid_indices) - 1]
             
-            # Process each block of consecutive indices
+            # Process each block
             start_idx = 0
             for b in breaks:
                 # Check if block is long enough
                 if b - start_idx + 1 >= segment_length:
-                    # Create segments from this block
-                    for i in range(start_idx, b - segment_length + 2):
-                        start = valid_indices[i].item()
-                        end = valid_indices[i + segment_length - 1].item()
-                        
-                        # Get observations for this segment
-                        segment_obs = observations[start:end+1]
-                        
-                        # Check again for NaN values (redundancy check)
-                        if not torch.isnan(segment_obs).any():
-                            segments.append(segment_obs)
-                            segment_indices.append((start, end))
-                
-                start_idx = b.item() + 1
-            
-            # Process final block
-            if len(valid_indices) - start_idx >= segment_length:
-                for i in range(start_idx, len(valid_indices) - segment_length + 1):
-                    start = valid_indices[i].item()
-                    end = valid_indices[i + segment_length - 1].item()
-                    
-                    # Get observations for this segment
-                    segment_obs = observations[start:end+1]
-                    
-                    # Check again for NaN values
-                    if not torch.isnan(segment_obs).any():
-                        segments.append(segment_obs)
-                        segment_indices.append((start, end))
+                    # Store this valid block
+                    all_valid_blocks.append({
+                        'episode_id': episode_id,
+                        'start_block': start_idx,
+                        'end_block': b,
+                        'valid_indices': valid_indices,
+                        'length': b - start_idx + 1
+                    })
+                start_idx = b + 1
             
             pbar.update(1)
     
-    # Subsample if needed
-    if max_segments is not None and max_segments < len(segments) and max_segments > 0:
-        # Sample segments
-        indices = random.sample(range(len(segments)), max_segments)
-        segments = [segments[i] for i in indices]
-        segment_indices = [segment_indices[i] for i in indices]
+    print(f"Found {len(all_valid_blocks)} valid blocks across all episodes")
     
-    print(f"Created {len(segments)} segments across {len(unique_episodes)} episodes")
+    # Simple loop: sample blocks until we have enough segments
+    total_attempts = 0
+    max_attempts = 10000  # Safety limit
+    
+    # If no max_segments specified, set a reasonable default based on number of blocks
+    if max_segments is None:
+        max_segments = min(5000, len(all_valid_blocks) * 2)
+        print(f"No max_segments specified, setting to {max_segments}")
+    
+    # Shuffle blocks once at the beginning for variety
+    random.shuffle(all_valid_blocks)
+    
+    with tqdm(total=max_segments, desc="Sampling segments") as pbar:
+        block_idx = 0
+        while len(segments) < max_segments and total_attempts < max_attempts:
+            total_attempts += 1
+            
+            # Get current block and move to next (circle back when reaching the end)
+            block = all_valid_blocks[block_idx]
+            block_idx = (block_idx + 1) % len(all_valid_blocks)
+            
+            valid_indices = block['valid_indices']
+            start_block = block['start_block'] 
+            end_block = block['end_block']
+            
+            # Calculate how many possible segments can be created from this block
+            possible_segments = block['length'] - segment_length + 1
+            if possible_segments <= 0:
+                continue
+                
+            # Choose a position within this block (sequentially if multiple samples from same block)
+            # Use the total_attempts to ensure we pick different positions for the same block
+            segment_offset = total_attempts % possible_segments
+            start_idx = start_block + segment_offset
+            end_idx = start_idx + segment_length - 1
+            
+            # Get start and end indices in the original data
+            start = valid_indices[start_idx].item()
+            end = valid_indices[end_idx].item()
+                        
+            # Get observations for this segment
+            segment_obs = observations[start:end+1]
+            
+            # Double check for NaN values
+            if torch.isnan(segment_obs).any():
+                continue
+                
+            segments.append(segment_obs)
+            segment_indices.append((start, end))
+            pbar.update(1)
+            
+            # Exit early if we're taking too many attempts with little progress
+            if total_attempts >= 10 * max_segments and len(segments) < max_segments / 10:
+                print(f"Warning: Made {total_attempts} attempts but only found {len(segments)} valid segments. Stopping early.")
+                break
+    
+    print(f"Created {len(segments)} segments with {total_attempts} sampling attempts")
     if segments:
         print(f"Each segment has shape: {segments[0].shape}")
     
