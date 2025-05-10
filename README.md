@@ -80,6 +80,10 @@ python train_reward_model.py data.data_path="/scr/shared/clam/datasets/metaworld
 ```bash
 python train_iql_policy.py data.data_path="/scr/shared/clam/datasets/metaworld/assembly-v2/buffer_assembly-v2.pt" data.reward_model_path="reward_model/state_action_reward_model.pt"
 ```
+#### robomimic
+```bash
+python train_iql_policy.py --config_name=robomimic_config
+```
 
 ## Video Recording
 

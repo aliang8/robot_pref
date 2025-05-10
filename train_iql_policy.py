@@ -13,13 +13,11 @@ from d3rlpy.algos import IQL, IQLConfig
 from d3rlpy.datasets import MDPDataset
 from d3rlpy.models.encoders import VectorEncoderFactory
 from pathlib import Path
-import imageio  # For video recording
 import time
 import hydra
 from omegaconf import DictConfig, OmegaConf
 import wandb
 
-from robomimic.utils.env_utils import create_env, get_env_type
 import robomimic.utils.file_utils as FileUtils
 import robomimic.utils.obs_utils as ObsUtils
 import robomimic.utils.env_utils as EnvUtils
@@ -34,11 +32,9 @@ from train_reward_model import SegmentRewardModel, StateActionRewardModel
 
 # Import evaluation and rendering utilities
 from utils.eval_utils import (
-    SimpleVideoRecorder,
     RenderWrapper,
     evaluate_policy_manual,
     custom_evaluate_on_environment,
-    create_video_recorder,
 )
 
 # Set seed for reproducibility
@@ -491,7 +487,6 @@ def get_robomimic_env(
     env.env.hard_reset = False
 
     env = RobomimicLowdimWrapper(env)
-    env = RenderWrapper(env)
 
     return env
 
@@ -562,12 +557,20 @@ def log_evaluation_to_wandb(metrics, epoch=None, prefix=""):
         wandb.log(log_dict, step=epoch if epoch is not None else None)
 
 
-@hydra.main(config_path="config/train_iql", config_name="config", version_base=None)
+@hydra.main(config_path="config/train_iql", version_base=None)
 def main(cfg: DictConfig):
     """Train an IQL policy using learned reward model with Hydra config."""
     print("\n" + "=" * 50)
     print("Training IQL policy with learned rewards")
     print("=" * 50)
+
+    if cfg.debug:
+        print("Debug mode enabled")
+        cfg.training.iql_epochs = 5
+        cfg.training.n_steps_per_epoch = 100
+        cfg.training.eval_interval = 1
+        cfg.training.eval_episodes = 1
+        cfg.training.save_interval = 1
 
     # Print config for visibility
     print("\nConfiguration:")
@@ -708,17 +711,21 @@ def main(cfg: DictConfig):
         if env is None:
             print(f"Epoch {epoch}: Skipping evaluation (no environment available)")
             return
-
         # Set up video path if recording is enabled
         video_path = None
         if cfg.evaluation.record_video:
+            run_id = cfg.run_id
             # Lazy initialization of video_dir
             if video_dir is None:
+                # Use the run_id from the config
+                if run_id is None:
+                    run_id = f"{int(time.time())}_{random.randint(0, 10000):05d}"
+                
                 # Check if d3rlpy has created its log directory yet
                 if not os.path.exists(d3rlpy_logdir):
-                    # Create a fallback directory for videos
-                    os.makedirs(f"{cfg.output.output_dir}/videos", exist_ok=True)
-                    video_dir = f"{cfg.output.output_dir}/videos"
+                    # Create a unique fallback directory for videos
+                    video_dir = f"{cfg.output.output_dir}/videos_{run_id}"
+                    os.makedirs(video_dir, exist_ok=True)
                 else:
                     # Find the most recent experiment directory
                     experiment_dirs = [
@@ -726,15 +733,15 @@ def main(cfg: DictConfig):
                     ]
                     experiment_dirs.sort()  # Sort by name which includes timestamp
                     if experiment_dirs:
-                        video_dir = f"{d3rlpy_logdir}/{experiment_dirs[-1]}/videos"
+                        video_dir = f"{d3rlpy_logdir}/{experiment_dirs[-1]}/videos_{run_id}"
                         os.makedirs(video_dir, exist_ok=True)
                     else:
                         # Fallback if no experiment dir found
-                        os.makedirs(f"{cfg.output.output_dir}/videos", exist_ok=True)
-                        video_dir = f"{cfg.output.output_dir}/videos"
+                        video_dir = f"{cfg.output.output_dir}/videos_{run_id}"
+                        os.makedirs(video_dir, exist_ok=True)
 
-            # Create epoch-specific video path
-            video_path = f"{video_dir}/epoch_{epoch}"
+            # Create unique epoch-specific video path
+            video_path = f"{video_dir}/epoch_{epoch}_{run_id}"
 
         # Evaluate policy
         print(f"\nEvaluating policy at epoch {epoch}...")
@@ -790,6 +797,10 @@ def main(cfg: DictConfig):
         for epoch, metrics in training_metrics:
             metrics_str = ", ".join([f"{k}: {v:.4f}" for k, v in metrics.items()])
             print(f"Epoch {epoch}: {metrics_str}")
+
+            # Log training metrics to wandb
+            if cfg.wandb.use_wandb:
+                log_evaluation_to_wandb(metrics, epoch=epoch, prefix="train")
 
     except Exception as e:
         print(f"Error during IQL training: {str(e)}")

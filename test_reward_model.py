@@ -11,7 +11,7 @@ from tqdm import tqdm
 import random
 
 # Import the reward model class
-from train_preference_reward_model import RewardModel, PreferenceDataset
+from train_reward_model import SegmentRewardModel, PreferenceDataset
 
 # Set random seed for reproducibility
 RANDOM_SEED = 42
@@ -20,9 +20,9 @@ np.random.seed(RANDOM_SEED)
 torch.manual_seed(RANDOM_SEED)
 
 
-def load_reward_model(model_path, input_dim, hidden_dims=[256, 128, 64], device="cpu"):
+def load_reward_model(model_path, state_dim, action_dim, hidden_dims=[256, 256], device="cpu"):
     """Load a trained reward model."""
-    model = RewardModel(input_dim, hidden_dims=hidden_dims).to(device)
+    model = SegmentRewardModel(state_dim, action_dim, hidden_dims=hidden_dims).to(device)
     model.load_state_dict(torch.load(model_path, map_location=device))
     model.eval()
     return model
@@ -32,7 +32,7 @@ def evaluate_model_on_dataset(model, dataset, device="cpu", num_samples=1000):
     """Evaluate the reward model on a dataset.
 
     Args:
-        model: RewardModel
+        model: SegmentRewardModel
         dataset: PreferenceDataset
         device: Device to use for evaluation
         num_samples: Number of samples to evaluate on
@@ -53,30 +53,24 @@ def evaluate_model_on_dataset(model, dataset, device="cpu", num_samples=1000):
 
     with torch.no_grad():
         for idx in tqdm(sample_indices, desc="Evaluating model"):
-            segment1, segment2, target = dataset[idx]
+            obs1, actions1, obs2, actions2, pref = dataset[idx]
 
             # Move to device
-            segment1 = segment1.to(device)
-            segment2 = segment2.to(device)
+            obs1, actions1 = obs1.to(device), actions1.to(device)
+            obs2, actions2 = obs2.to(device), actions2.to(device)
 
             # Get rewards
-            reward1 = model(segment1.unsqueeze(0)).item()
-            reward2 = model(segment2.unsqueeze(0)).item()
+            reward1 = model(obs1, actions1).item()
+            reward2 = model(obs2, actions2).item()
 
             # Determine predicted preference
             if reward1 > reward2:
                 pred = 1  # Prefer segment1
             else:
-                pred = 2  # Prefer segment2
-
-            # Get ground truth preference
-            if target[0] > target[1]:
-                true_pref = 1
-            else:
-                true_pref = 2
+                pred = 0  # Prefer segment2
 
             # Check accuracy
-            if pred == true_pref:
+            if pred == pref.item():
                 correct += 1
             total += 1
 
@@ -101,49 +95,22 @@ def predict_reward_for_segments(model, test_segments, device="cpu"):
     """Predict rewards for test segments.
 
     Args:
-        model: RewardModel
-        test_segments: List of test segments
+        model: SegmentRewardModel
+        test_segments: List of test segments (obs, actions)
         device: Device to use for prediction
 
     Returns:
         list: Predicted rewards for each segment
     """
-    # Preprocess segments
-    processed_segments = []
-
-    for segment in tqdm(test_segments, desc="Preprocessing test segments"):
-        # Use only the EEF positions (first 3 dimensions)
-        if segment.shape[1] >= 3:
-            eef_trajectory = segment[:, :3]
-        else:
-            eef_trajectory = segment  # Use all dims if less than 3
-
-        # Get fixed-length representation (match training data)
-        target_length = 64
-
-        if len(eef_trajectory) >= target_length:
-            # Truncate to target length
-            fixed_length = eef_trajectory[:target_length]
-        else:
-            # Pad with the last frame
-            padding_length = target_length - len(eef_trajectory)
-            padding = eef_trajectory[-1:].repeat(padding_length, 1)
-            fixed_length = torch.cat([eef_trajectory, padding], dim=0)
-
-        # Flatten the fixed-length trajectory
-        flattened = fixed_length.reshape(-1)
-        processed_segments.append(flattened)
-
-    # Predict rewards
     rewards = []
 
     with torch.no_grad():
-        for segment in tqdm(processed_segments, desc="Predicting rewards"):
+        for obs, actions in tqdm(test_segments, desc="Predicting rewards"):
             # Move to device
-            segment = segment.to(device)
+            obs, actions = obs.to(device), actions.to(device)
 
             # Get reward
-            reward = model(segment.unsqueeze(0)).item()
+            reward = model(obs, actions).item()
             rewards.append(reward)
 
     return rewards
@@ -191,7 +158,7 @@ def create_reward_heatmap(model, device="cpu", output_path=None):
     """Create a heatmap of predicted rewards for varying inputs.
 
     Args:
-        model: RewardModel
+        model: SegmentRewardModel
         device: Device to use for prediction
         output_path: Path to save the plot
 
@@ -206,34 +173,25 @@ def create_reward_heatmap(model, device="cpu", output_path=None):
     # Initialize reward grid
     reward_grid = np.zeros((len(x_values), len(y_values)))
 
-    # Get input dimension from model
-    input_dim = model.network[0].in_features
-    # Assuming 64 timesteps with 3D positions
-    timesteps = 64
-    features_per_timestep = 3
-
     # Generate a template trajectory (all zeros)
-    template = torch.zeros(input_dim)
+    obs_template = torch.zeros(1, model.state_dim)
+    action_template = torch.zeros(1, model.action_dim)
 
     # Fill reward grid
     with torch.no_grad():
         for i, x in enumerate(tqdm(x_values, desc="Computing reward heatmap")):
             for j, y in enumerate(y_values):
-                # Create a synthetic trajectory where (x,y) values are set
-                trajectory = template.clone()
+                # Create a synthetic observation and action
+                obs = obs_template.clone()
+                action = action_template.clone()
 
-                # Set x values for all timesteps
-                for t in range(timesteps):
-                    idx_x = t * features_per_timestep + 0  # X coordinate
-                    idx_y = t * features_per_timestep + 1  # Y coordinate
-
-                    # Set trajectory at this position - can be customized
-                    trajectory[idx_x] = x
-                    trajectory[idx_y] = y
+                # Set x, y values for observation
+                obs[0, 0] = x
+                obs[0, 1] = y
 
                 # Predict reward
-                trajectory = trajectory.to(device)
-                reward = model(trajectory.unsqueeze(0)).item()
+                obs, action = obs.to(device), action.to(device)
+                reward = model(obs, action).item()
 
                 # Update grid
                 reward_grid[i, j] = reward
@@ -280,7 +238,7 @@ def main():
         "--hidden_dims",
         type=int,
         nargs="+",
-        default=[256, 128, 64],
+        default=[256, 256],
         help="Hidden layer dimensions (must match trained model)",
     )
     args = parser.parse_args()
@@ -293,19 +251,19 @@ def main():
     print(f"Using device: {device}")
 
     # Load test dataset
-    with open(args.test_dataset, "rb") as f:
-        test_data = pickle.load(f)
+    test_data = torch.load(args.test_dataset)
 
     test_dataset = PreferenceDataset(test_data)
     print(f"Test dataset loaded with {len(test_dataset)} preference pairs")
 
-    # Get input dimension from a sample
-    sample_segment, _, _ = test_dataset[0]
-    input_dim = sample_segment.shape[0]
+    # Get state and action dimensions from a sample
+    obs1, actions1, _, _, _ = test_dataset[0]
+    state_dim = obs1.shape[1]
+    action_dim = actions1.shape[1]
 
     # Load model
     model = load_reward_model(
-        args.model_path, input_dim, hidden_dims=args.hidden_dims, device=device
+        args.model_path, state_dim, action_dim, hidden_dims=args.hidden_dims, device=device
     )
     print(f"Loaded model from {args.model_path}")
 
@@ -332,13 +290,10 @@ def main():
     plt.savefig(os.path.join(args.output_dir, "reward_diffs.png"))
 
     # Get segments from test data
-    test_segments = test_data["segments"]
+    test_segments = list(zip(test_data["obs"], test_data["action"]))
 
     # If clusters are available in the data, get those too
-    if "clusters" in test_data:
-        segment_labels = test_data["clusters"]
-    else:
-        segment_labels = None
+    segment_labels = test_data.get("clusters", None)
 
     # Predict rewards for test segments
     rewards = predict_reward_for_segments(model, test_segments, device=device)

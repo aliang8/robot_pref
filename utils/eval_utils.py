@@ -304,6 +304,14 @@ def evaluate_episode_worker(worker_args):
         if isinstance(info, dict) and "success" in info and info["success"]:
             success = True
             break
+    
+        # Check for success in robomimic lift task
+        if isinstance(info, dict) and "task_success" in info:
+            # Use robomimic's built-in success check
+            success = info["task_success"]
+        elif isinstance(info, dict) and "cube_height" in info and "table_height" in info:
+            # Check cube height vs table height if provided
+            success = info["cube_height"] > info["table_height"] + 0.04
 
     # Close video recorder
     if video_recorder:
@@ -487,6 +495,7 @@ def evaluate_policy_manual(
         returns = []
         success_rate = 0
         steps_to_complete = []
+        unique_info_keys = set()
 
         # Setup video recording if requested
         video_recorders = []
@@ -636,6 +645,10 @@ def evaluate_policy_manual(
                     success_rate += 1
                     break
 
+                # Track unique info keys
+                if isinstance(info, dict):
+                    unique_info_keys.update(info.keys())
+
             returns.append(episode_return)
             steps_to_complete.append(steps)
 
@@ -658,6 +671,11 @@ def evaluate_policy_manual(
 
         # Calculate success rate for sequential evaluation
         success_rate = success_rate / n_episodes if n_episodes > 0 else 0
+
+        # Print unique info keys
+        print("\nUnique info keys seen during evaluation:")
+        for key in unique_info_keys:
+            print(f"- {key}")
 
     # Process results
     if len(returns) > 0:

@@ -132,6 +132,8 @@ class RobomimicLowdimWrapper(gym.Env):
         raw_obs, reward, done, info = self.env.step(action)
         obs = self.get_observation(raw_obs)
 
+        info["success"] = self.env.is_success()["task"]
+
         # render if specified
         if self.video_writer is not None:
             video_img = self.render(mode="rgb_array")
