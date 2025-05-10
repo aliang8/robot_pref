@@ -11,8 +11,6 @@ from scipy.cluster.hierarchy import dendrogram, linkage, fcluster
 import pickle
 import argparse
 import dtw
-from PIL import Image
-from IPython.display import HTML, display
 
 # Import utility functions
 from trajectory_utils import (
@@ -210,22 +208,16 @@ def compute_dtw_distance(query_segment, reference_segment):
     Returns:
         float: DTW distance between segments
     """
-    try:
-        # Convert to numpy for dtw
-        query = query_segment.cpu().numpy()
-        reference = reference_segment.cpu().numpy()
-        
-        # Use the custom DTW implementation
-        cost, _, _ = dtw.get_single_match(query, reference)
-        
-        # Check if the cost is finite
-        if not np.isfinite(cost):
-            # Fall back to a simpler distance metric
-            cost = np.mean((query.mean(0) - reference.mean(0))**2)
-    except Exception as e:
+    # Convert to numpy for dtw
+    query = query_segment.cpu().numpy()
+    reference = reference_segment.cpu().numpy()
+    
+    # Use the custom DTW implementation
+    cost, _, _ = dtw.get_single_match(query, reference)
+    
+    # Check if the cost is finite
+    if not np.isfinite(cost):
         # Fall back to a simpler distance metric
-        query = query_segment.cpu().numpy()
-        reference = reference_segment.cpu().numpy()
         cost = np.mean((query.mean(0) - reference.mean(0))**2)
     
     return cost

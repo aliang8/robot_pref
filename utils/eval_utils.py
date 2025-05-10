@@ -11,6 +11,75 @@ from multiprocessing import get_context
 # Default random seed for reproducibility
 RANDOM_SEED = 42
 
+# Define a picklable environment creator class
+class PicklableEnvCreator:
+    """A picklable environment creator that can be passed between processes."""
+    
+    def __init__(self, env_id=None, seed=None, env_type=None):
+        """Initialize with either an environment ID or a reference environment.
+        
+        Args:
+            env_id: The environment ID (string) or a callable that creates an environment
+            seed: Random seed to use
+            env_type: Optional environment type information for reconstruction
+        """
+        self.env_id = env_id
+        self.seed = seed
+        self.env_type = env_type
+        
+        # Store additional information for MetaWorld environments
+        if env_type == "metaworld" and not callable(env_id):
+            try:
+                self.env_name = env_id.__class__.__name__
+            except:
+                self.env_name = str(env_id)
+        
+    def __call__(self):
+        """Create and return a new environment instance."""
+        # If env_id is callable, it's already a creator function
+        if callable(self.env_id):
+            env = self.env_id()
+        # If it's a string, it's a gym environment ID
+        elif isinstance(self.env_id, str):
+            env = gym.make(self.env_id)
+        # Handle MetaWorld environments
+        elif self.env_type == "metaworld":
+            try:
+                # Try to import MetaWorld
+                import metaworld
+                from metaworld.envs import ALL_V2_ENVIRONMENTS_GOAL_OBSERVABLE
+                
+                # Try to find the environment by name
+                for name, constructor in ALL_V2_ENVIRONMENTS_GOAL_OBSERVABLE.items():
+                    if self.env_name in name:
+                        env = constructor(seed=self.seed)
+                        return env
+                        
+                # If not found, try to create it using ML1
+                if hasattr(metaworld, 'ML1'):
+                    try:
+                        ml1 = metaworld.ML1(self.env_name)
+                        env = ml1.train_classes[self.env_name]()
+                        task = ml1.train_tasks[0]
+                        env.set_task(task)
+                        return env
+                    except:
+                        pass
+            except ImportError:
+                # If MetaWorld is not available, we can't create the environment
+                raise ValueError("MetaWorld is not available in this process")
+                
+            # If we couldn't create the environment, raise an error
+            raise ValueError(f"Could not create MetaWorld environment: {self.env_name}")
+        else:
+            raise ValueError(f"Unable to create environment from: {self.env_id}")
+            
+        # Apply seed if provided
+        if self.seed is not None and hasattr(env, 'seed'):
+            env.seed(self.seed)
+            
+        return env
+
 class SimpleVideoRecorder:
     """A simple video recorder using imageio for saving environment frames as videos."""
     
@@ -187,8 +256,7 @@ def evaluate_episode_worker(worker_args):
     """Worker function for parallel episode evaluation."""
     env_creator, algo, episode_idx, record_video, video_path, video_fps = worker_args
     
-    # The env_creator function is already configured with the proper seed
-    # as we're using a lambda with default argument in the parent function
+    # Create the environment using the provided creator
     env_instance = env_creator()
     
     # Wrap the environment to ensure proper rendering if video recording is requested
@@ -356,52 +424,6 @@ def evaluate_policy_manual(env, algo, n_episodes=10, verbose=True, record_video=
             import multiprocessing as mp
             from multiprocessing import get_context
             
-            # Create a function that can recreate environments
-            if not callable(env):
-                # Store the environment configuration for recreation
-                env_type = type(env)
-                if hasattr(env, 'spec') and hasattr(env.spec, 'id'):
-                    env_id = env.spec.id
-                    env_creator = lambda seed=None: gym.make(env_id)
-                else:
-                    # For MetaWorld environments, we need to recreate using fallback methods
-                    print("Warning: Using approximate environment recreation for parallel evaluation")
-                    original_env = env
-                    
-                    # Create a generic environment recreation function
-                    # Note: The implementation may need to be adjusted based on your specific environments
-                    def create_similar_env(seed=None):
-                        try:
-                            # Try to use a specific recreation method if available
-                            # You'll need to implement this based on your environment type
-                            from metaworld.envs import ALL_V2_ENVIRONMENTS_GOAL_OBSERVABLE
-                            
-                            # Try to determine the environment type/name from the original
-                            if hasattr(original_env, '__class__') and hasattr(original_env.__class__, '__name__'):
-                                env_name = original_env.__class__.__name__
-                                for name, constructor in ALL_V2_ENVIRONMENTS_GOAL_OBSERVABLE.items():
-                                    if env_name in name:
-                                        return constructor(seed=seed)
-                        except:
-                            pass
-                        
-                        # If creation with seed fails, return original env
-                        if seed is not None and hasattr(original_env, 'seed'):
-                            # If we can't create a new env, at least try to seed the original
-                            original_env.seed(seed)
-                        return original_env
-                    
-                    env_creator = create_similar_env
-            else:
-                # If environment is already a creator function, wrap it to accept a seed
-                original_creator = env
-                def seeded_env_creator(seed=None):
-                    new_env = original_creator()
-                    if seed is not None and hasattr(new_env, 'seed'):
-                        new_env.seed(seed)
-                    return new_env
-                env_creator = seeded_env_creator
-            
             # Determine number of workers
             if num_workers is None:
                 num_workers = min(n_episodes, mp.cpu_count())
@@ -410,11 +432,45 @@ def evaluate_policy_manual(env, algo, n_episodes=10, verbose=True, record_video=
                 print(f"Running parallel evaluation with {num_workers} workers for {n_episodes} episodes")
                 print(f"Using different seeds for each environment to ensure diverse initial states")
             
-            # Prepare arguments for workers
-            worker_args = [
-                (lambda seed=base_seeds[i]: env_creator(seed), algo, i, record_video and i < 3, video_path, video_fps)
-                for i in range(n_episodes)
-            ]
+            # Prepare arguments for workers using the picklable environment creator
+            worker_args = []
+            for i in range(n_episodes):
+                # Create a distinct environment creator for each episode with appropriate seed
+                seed = base_seeds[i]
+                
+                # For gym environments with environment ID
+                if hasattr(env, 'spec') and hasattr(env.spec, 'id'):
+                    env_id = env.spec.id
+                    env_creator = PicklableEnvCreator(env_id=env_id, seed=seed)
+                # For environment creation functions
+                elif callable(env):
+                    env_creator = PicklableEnvCreator(env_id=env, seed=seed)
+                # For MetaWorld environments
+                else:
+                    # Try to determine if this is a MetaWorld environment
+                    is_metaworld = False
+                    try:
+                        import metaworld
+                        if isinstance(env, metaworld.envs.base.Env) or 'metaworld' in env.__class__.__module__:
+                            is_metaworld = True
+                    except (ImportError, AttributeError):
+                        # If we can't import metaworld or env doesn't have __module__, try other methods
+                        if hasattr(env, 'model') and hasattr(env, 'data'):
+                            # Likely MuJoCo-based environment
+                            is_metaworld = True
+                    
+                    env_type = "metaworld" if is_metaworld else None
+                    env_creator = PicklableEnvCreator(env_id=env, seed=seed, env_type=env_type)
+                
+                # Add to worker arguments
+                worker_args.append((
+                    env_creator,
+                    algo, 
+                    i,
+                    record_video and i < 3, 
+                    video_path, 
+                    video_fps
+                ))
             
             # Use 'spawn' context for better compatibility across platforms
             ctx = get_context('spawn')

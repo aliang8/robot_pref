@@ -3,10 +3,7 @@ import torch
 import numpy as np
 import random
 from tqdm import tqdm
-import matplotlib.pyplot as plt
 import pickle
-import argparse
-import gym
 import metaworld
 import d3rlpy
 from d3rlpy.algos import IQL
@@ -14,7 +11,6 @@ from d3rlpy.datasets import MDPDataset
 from d3rlpy.metrics.scorer import evaluate_on_environment
 from d3rlpy.models.encoders import VectorEncoderFactory
 from pathlib import Path
-import imageio  # For video recording
 import time
 import hydra
 from omegaconf import DictConfig, OmegaConf
@@ -22,21 +18,17 @@ import wandb
 
 # Import utility functions
 from trajectory_utils import (
-    DEFAULT_DATA_PATHS,
     RANDOM_SEED,
     load_tensordict
 )
 
 # Import reward models
-from train_reward_model import SegmentRewardModel, StateActionRewardModel
+from train_reward_model import SegmentRewardModel
 
 # Import evaluation and rendering utilities
 from utils.eval_utils import (
-    SimpleVideoRecorder,
-    RenderWrapper,
     evaluate_policy_manual,
-    custom_evaluate_on_environment,
-    create_video_recorder
+    custom_evaluate_on_environment
 )
 
 # Set seed for reproducibility
@@ -280,138 +272,83 @@ def get_metaworld_env(task_name, seed=42):
     
     print(f"Creating MetaWorld environment for task: {task_name} (from {original_task_name})")
     
-    try:
-        # Method 1: Direct access to environment constructors (preferred method)
-        from metaworld.envs import (ALL_V2_ENVIRONMENTS_GOAL_OBSERVABLE,
-                                  ALL_V2_ENVIRONMENTS_GOAL_HIDDEN)
-        
-        # Prepare task name formats to try
-        task_name_base = task_name
-        if task_name.endswith('-v2') or task_name.endswith('-v1'):
-            task_name_base = task_name[:-3]
-        
-        # Try different variations of the environment name
-        env_variations = [
-            f"{task_name}-goal-observable",                # If already has version suffix
-            f"{task_name}-v2-goal-observable",             # Add v2 if not there
-            f"{task_name_base}-v2-goal-observable",        # Clean base name with v2
-            f"{task_name}-goal-hidden",                    # Hidden goal versions
-            f"{task_name}-v2-goal-hidden",
-            f"{task_name_base}-v2-goal-hidden",
-        ]
-        
-        # Try to find and use the environment constructor
-        env_constructor = None
-        found_env_name = None
-        
-        for env_name in env_variations:
-            if env_name in ALL_V2_ENVIRONMENTS_GOAL_OBSERVABLE:
-                env_constructor = ALL_V2_ENVIRONMENTS_GOAL_OBSERVABLE[env_name]
-                found_env_name = env_name
-                print(f"Found goal-observable environment: {env_name}")
-                break
-            elif env_name in ALL_V2_ENVIRONMENTS_GOAL_HIDDEN:
-                env_constructor = ALL_V2_ENVIRONMENTS_GOAL_HIDDEN[env_name]
-                found_env_name = env_name
-                print(f"Found goal-hidden environment: {env_name}")
-                break
-        
-        # If we found a constructor directly, use it
-        if env_constructor is not None:
-            env = env_constructor(seed=seed)  # Use provided seed
-            print(f"Successfully created environment: {found_env_name}")
-            print(f"Observation space: {env.observation_space}")
-            print(f"Action space: {env.action_space}")
-            return env
-            
-        # If no direct match, list available environments for debugging
-        print("Available MetaWorld environments:")
-        print("\nGoal Observable environments:")
-        for name in sorted(ALL_V2_ENVIRONMENTS_GOAL_OBSERVABLE.keys()):
-            print(f"  - {name}")
-        print("\nGoal Hidden environments:")
-        for name in sorted(ALL_V2_ENVIRONMENTS_GOAL_HIDDEN.keys()):
-            print(f"  - {name}")
-            
-        # Try to find a similar environment name
-        best_match = None
-        best_score = 0
-        
-        # Check for partial matches in environment names
-        for env_dict in [ALL_V2_ENVIRONMENTS_GOAL_OBSERVABLE, ALL_V2_ENVIRONMENTS_GOAL_HIDDEN]:
-            for env_name in env_dict.keys():
-                # Simple string similarity - check if task name is in env name
-                if task_name_base in env_name:
-                    score = len(task_name_base)
-                    if score > best_score:
-                        best_score = score
-                        best_match = (env_name, env_dict[env_name])
-        
-        if best_match:
-            env_name, constructor = best_match
-            print(f"Found closest matching environment: {env_name}")
-            env = constructor(seed=seed)  # Use provided seed
-            print(f"Successfully created environment: {env_name}")
-            print(f"Observation space: {env.observation_space}")
-            print(f"Action space: {env.action_space}")
-            return env
-                
-        # Fall back to ML1 method if direct environment access fails
-        raise ValueError(f"Could not find a direct environment constructor for {task_name}")
-        
-    except ImportError as e:
-        print(f"Could not import ALL_V2_ENVIRONMENTS: {e}")
-        print("Falling back to ML1 method...")
-    except Exception as e:
-        print(f"Error using direct environment constructors: {e}")
-        print("Falling back to ML1 method...")
+    # Method 1: Direct access to environment constructors (preferred method)
+    from metaworld.envs import (ALL_V2_ENVIRONMENTS_GOAL_OBSERVABLE,
+                              ALL_V2_ENVIRONMENTS_GOAL_HIDDEN)
     
-    # Method 2: ML1 method (fallback if direct environment access fails)
-    try:
-        # Try to create an ML1 environment with the given task
-        if not task_name.endswith('-v2') and not task_name.endswith('-v1'):
-            task_name = f"{task_name}-v2"  # Add version if not present
-            
-        print(f"Trying ML1 with task: {task_name}")
-        ml1 = metaworld.ML1(task_name)
-        
-        # Get base name without version
-        base_name = task_name
-        if '-v' in base_name:
-            base_name = base_name.split('-v')[0]
-            
-        env = ml1.train_classes[base_name]()
-        task = ml1.train_tasks[0]
-        env.set_task(task)
-        
-        # Set seed manually since ML1 doesn't take seed directly in constructor
-        if hasattr(env, 'seed'):
-            env.seed(seed)
-        
-        print(f"Successfully created environment with ML1: {task_name}")
+    # Prepare task name formats to try
+    task_name_base = task_name
+    if task_name.endswith('-v2') or task_name.endswith('-v1'):
+        task_name_base = task_name[:-3]
+    
+    # Try different variations of the environment name
+    env_variations = [
+        f"{task_name}-goal-observable",                # If already has version suffix
+        f"{task_name}-v2-goal-observable",             # Add v2 if not there
+        f"{task_name_base}-v2-goal-observable",        # Clean base name with v2
+        f"{task_name}-goal-hidden",                    # Hidden goal versions
+        f"{task_name}-v2-goal-hidden",
+        f"{task_name_base}-v2-goal-hidden",
+    ]
+    
+    # Try to find and use the environment constructor
+    env_constructor = None
+    found_env_name = None
+    
+    for env_name in env_variations:
+        if env_name in ALL_V2_ENVIRONMENTS_GOAL_OBSERVABLE:
+            env_constructor = ALL_V2_ENVIRONMENTS_GOAL_OBSERVABLE[env_name]
+            found_env_name = env_name
+            print(f"Found goal-observable environment: {env_name}")
+            break
+        elif env_name in ALL_V2_ENVIRONMENTS_GOAL_HIDDEN:
+            env_constructor = ALL_V2_ENVIRONMENTS_GOAL_HIDDEN[env_name]
+            found_env_name = env_name
+            print(f"Found goal-hidden environment: {env_name}")
+            break
+    
+    # If we found a constructor directly, use it
+    if env_constructor is not None:
+        env = env_constructor(seed=seed)  # Use provided seed
+        print(f"Successfully created environment: {found_env_name}")
         print(f"Observation space: {env.observation_space}")
         print(f"Action space: {env.action_space}")
         return env
         
-    except Exception as e:
-        print(f"Error creating environment with ML1: {e}")
+    # If no direct match, list available environments for debugging
+    print("Available MetaWorld environments:")
+    print("\nGoal Observable environments:")
+    for name in sorted(ALL_V2_ENVIRONMENTS_GOAL_OBSERVABLE.keys()):
+        print(f"  - {name}")
+    print("\nGoal Hidden environments:")
+    for name in sorted(ALL_V2_ENVIRONMENTS_GOAL_HIDDEN.keys()):
+        print(f"  - {name}")
         
-        # Try to get list of available ML1 environments
-        try:
-            ml1_envs = [attr for attr in dir(metaworld.ML1) if attr.startswith('ENV_')]
-            available_tasks = []
-            for env_set in ml1_envs:
-                env_names = getattr(metaworld.ML1, env_set)
-                available_tasks.extend(env_names)
-                
-            print("Available ML1 environments:")
-            for task in sorted(available_tasks):
-                print(f"  - {task}")
-                
-        except Exception:
-            print("Could not list available ML1 environments")
-            
-        raise ValueError(f"Could not create environment for task: {original_task_name}")
+    # Try to find a similar environment name
+    best_match = None
+    best_score = 0
+    
+    # Check for partial matches in environment names
+    for env_dict in [ALL_V2_ENVIRONMENTS_GOAL_OBSERVABLE, ALL_V2_ENVIRONMENTS_GOAL_HIDDEN]:
+        for env_name in env_dict.keys():
+            # Simple string similarity - check if task name is in env name
+            if task_name_base in env_name:
+                score = len(task_name_base)
+                if score > best_score:
+                    best_score = score
+                    best_match = (env_name, env_dict[env_name])
+    
+    if best_match:
+        env_name, constructor = best_match
+        print(f"Found closest matching environment: {env_name}")
+        env = constructor(seed=seed)  # Use provided seed
+        print(f"Successfully created environment: {env_name}")
+        print(f"Observation space: {env.observation_space}")
+        print(f"Action space: {env.action_space}")
+        return env
+    
+    # If we can't find any matching environment
+    raise ValueError(f"Could not create environment for task: {original_task_name}")
 
 def get_d3rlpy_experiment_path(base_logdir, experiment_name, with_timestamp=True):
     """Get the path to the d3rlpy experiment directory.
@@ -517,8 +454,7 @@ def main(cfg: DictConfig):
     dataset_name = Path(cfg.data.data_path).stem
     experiment_name = f"IQL_{dataset_name}_SA"
     
-    # Set up video directories - we'll create them after d3rlpy creates its log dir
-    base_video_dir = cfg.output.video_dir  # Store user-provided directory if any
+    # Set up d3rlpy log directory
     d3rlpy_logdir = f"{cfg.output.output_dir}/logs"
     
     # Load data
@@ -553,25 +489,21 @@ def main(cfg: DictConfig):
     env = None
     if not cfg.evaluation.skip_env_creation:
         dataset_name = Path(cfg.data.data_path).stem
-        try:
-            # Create a function that returns a new environment with a different seed each time
-            def create_env_with_different_seed():
-                # Generate a unique seed each time this function is called
-                # Uses a combination of current time and random number to create diversity
-                unique_seed = int(time.time() * 1000) % 100000 + random.randint(0, 10000)
-                return get_metaworld_env(dataset_name, seed=unique_seed)
-                
-            # Create one environment to verify it works
-            test_env = create_env_with_different_seed()
-            print("Successfully created environment for evaluation")
-            
-            # Return the function instead of a single environment instance
-            # This allows new environment instances with different seeds to be created for each episode
-            env = create_env_with_different_seed
-        except Exception as e:
-            print(f"Warning: Could not create environment for evaluation: {str(e)}")
-            print("Will train without environment evaluation.")
-    
+        print(f"Creating environment for evaluation using dataset: {dataset_name}")
+        
+        # Create a function that returns a new environment with a different seed each time
+        def create_env_with_different_seed():
+            # Generate a unique seed each time this function is called
+            unique_seed = int(time.time() * 1000) % 100000 + random.randint(0, 10000)
+            return get_metaworld_env(dataset_name, seed=unique_seed)
+        
+        # Create one environment to verify it works
+        test_env = create_env_with_different_seed()
+        print("Successfully created environment for evaluation")
+        
+        # Use the function as the environment for evaluation
+        env = create_env_with_different_seed
+
     # Initialize IQL algorithm
     print("Initializing IQL algorithm...")
     iql = IQL(
@@ -591,20 +523,9 @@ def main(cfg: DictConfig):
     evaluation_results = []
     last_eval_epoch = -1
     
-    # If video_dir is None, use d3rlpy's log directory
-    video_dir = None
-    if cfg.evaluation.record_video:
-        import os
-        # Start with user-specified dir if provided
-        if base_video_dir is not None:
-            video_dir = base_video_dir
-        else:
-            # Wait for d3rlpy to create its log dir during training
-            pass
-    
-    # Create a custom callback to evaluate the policy at regular intervals
+    # Define callback function for evaluation
     def evaluation_callback(algo, epoch, total_step):
-        nonlocal last_eval_epoch, video_dir
+        nonlocal last_eval_epoch
             
         # Only evaluate at specified intervals
         if epoch <= last_eval_epoch or (epoch % cfg.training.eval_interval != 0 and epoch != cfg.training.iql_epochs - 1):
@@ -618,31 +539,6 @@ def main(cfg: DictConfig):
             print(f"Epoch {epoch}: Skipping evaluation (no environment available)")
             return
             
-        # Set up video path if recording is enabled
-        video_path = None
-        if cfg.evaluation.record_video:
-            # Lazy initialization of video_dir
-            if video_dir is None:
-                # Check if d3rlpy has created its log directory yet
-                if not os.path.exists(d3rlpy_logdir):
-                    # Create a fallback directory for videos
-                    os.makedirs(f"{cfg.output.output_dir}/videos", exist_ok=True)
-                    video_dir = f"{cfg.output.output_dir}/videos"
-                else:
-                    # Find the most recent experiment directory
-                    experiment_dirs = [d for d in os.listdir(d3rlpy_logdir) if experiment_name in d]
-                    experiment_dirs.sort()  # Sort by name which includes timestamp
-                    if experiment_dirs:
-                        video_dir = f"{d3rlpy_logdir}/{experiment_dirs[-1]}/videos"
-                        os.makedirs(video_dir, exist_ok=True)
-                    else:
-                        # Fallback if no experiment dir found
-                        os.makedirs(f"{cfg.output.output_dir}/videos", exist_ok=True)
-                        video_dir = f"{cfg.output.output_dir}/videos"
-                            
-            # Create epoch-specific video path
-            video_path = f"{video_dir}/epoch_{epoch}"
-                
         # Evaluate policy
         print(f"\nEvaluating policy at epoch {epoch}...")
             
@@ -651,9 +547,6 @@ def main(cfg: DictConfig):
             algo, 
             n_episodes=cfg.training.eval_episodes, 
             verbose=False,
-            record_video=cfg.evaluation.record_video,
-            video_path=video_path,
-            video_fps=30,
             parallel=cfg.evaluation.parallel_eval,
             num_workers=cfg.evaluation.eval_workers
         )
@@ -666,43 +559,36 @@ def main(cfg: DictConfig):
     
     # Train IQL
     print(f"Training IQL for {cfg.training.iql_epochs} epochs...")
-    training_metrics = []
-    try:
-        # Define scorers based on environment availability
-        if env is not None:
-            print("Using environment for evaluation during training")
-            scorers = {
-                'environment': custom_evaluate_on_environment(env)
-            }
-        else:
-            print("Training without environment evaluation")
-            scorers = {}
-            
-        # Train the model
-        training_metrics = iql.fit(
-            dataset,
-            n_epochs=cfg.training.iql_epochs,
-            eval_episodes=None,  # Don't use the built-in eval which expects episodes format
-            save_interval=10,
-            scorers=scorers,
-            experiment_name=experiment_name,
-            with_timestamp=True,
-            logdir=d3rlpy_logdir,
-            verbose=True,
-            callback=evaluation_callback
-        )
+    
+    # Define scorers based on environment availability
+    if env is not None:
+        print("Using environment for evaluation during training")
+        scorers = {
+            'environment': custom_evaluate_on_environment(env)
+        }
+    else:
+        print("Training without environment evaluation")
+        scorers = {}
         
-        # Print the training metrics summary
-        print("\nTraining metrics summary:")
-        for epoch, metrics in training_metrics:
-            metrics_str = ", ".join([f"{k}: {v:.4f}" for k, v in metrics.items()])
-            print(f"Epoch {epoch}: {metrics_str}")
-            
-    except Exception as e:
-        print(f"Error during IQL training: {str(e)}")
-        import traceback
-        traceback.print_exc()
-        print("Continuing with trained model so far...")
+    # Train the model
+    training_metrics = iql.fit(
+        dataset,
+        n_epochs=cfg.training.iql_epochs,
+        eval_episodes=None,  # Don't use the built-in eval which expects episodes format
+        save_interval=10,
+        scorers=scorers,
+        experiment_name=experiment_name,
+        with_timestamp=True,
+        logdir=d3rlpy_logdir,
+        verbose=True,
+        callback=evaluation_callback
+    )
+    
+    # Print the training metrics summary
+    print("\nTraining metrics summary:")
+    for epoch, metrics in training_metrics:
+        metrics_str = ", ".join([f"{k}: {v:.4f}" for k, v in metrics.items()])
+        print(f"Epoch {epoch}: {metrics_str}")
     
     # Save the model
     model_path = f"{cfg.output.output_dir}/iql_{Path(cfg.data.data_path).stem}_sa.pt"
@@ -712,20 +598,11 @@ def main(cfg: DictConfig):
     # Run final comprehensive evaluation
     print("\nRunning final comprehensive evaluation...")
     if env is not None:
-        # Create descriptive video path for final evaluation
-        if cfg.evaluation.record_video and video_dir is not None:
-            video_path = f"{video_dir}/final_eval"
-        else:
-            video_path = None
-            
         evaluation_metrics = evaluate_policy_manual(
             env, 
             iql, 
             n_episodes=cfg.training.eval_episodes, 
             verbose=True,
-            record_video=cfg.evaluation.record_video,
-            video_path=video_path,
-            video_fps=30,
             parallel=cfg.evaluation.parallel_eval,
             num_workers=cfg.evaluation.eval_workers
         )

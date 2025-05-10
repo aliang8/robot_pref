@@ -17,7 +17,6 @@ import wandb
 
 # Import utility functions
 from trajectory_utils import (
-    DEFAULT_DATA_PATHS,
     RANDOM_SEED,
     load_tensordict,
     create_segments,
@@ -29,20 +28,14 @@ torch.manual_seed(RANDOM_SEED)
 np.random.seed(RANDOM_SEED)
 random.seed(RANDOM_SEED)
 
-# Set random seed for reproducibility
-RANDOM_SEED = 42
-random.seed(RANDOM_SEED)
-np.random.seed(RANDOM_SEED)
-torch.manual_seed(RANDOM_SEED)
+# Set up CUDA memory management for better stability
 if torch.cuda.is_available():
     torch.cuda.manual_seed(RANDOM_SEED)
     torch.cuda.manual_seed_all(RANDOM_SEED)  # For multi-GPU
     # Set deterministic behavior
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
-
-# Set up CUDA memory management for better stability
-if torch.cuda.is_available():
+    
     # Reduce memory fragmentation
     torch.cuda.empty_cache()
     # Use more aggressive memory caching if available (PyTorch 1.11+)
@@ -86,20 +79,12 @@ class StateActionRewardModel(nn.Module):
     
     def forward(self, obs, action):
         """Forward pass using observation and action."""
-        # Check for NaN inputs
-        if torch.isnan(obs).any() or torch.isnan(action).any():
-            print("WARNING: NaN detected in model inputs")
-            
         # Concatenate observation and action
         x = torch.cat([obs, action], dim=-1)
         
         # Apply model
         result = self.model(x).squeeze(-1)  # Squeeze to remove last dimension if batch size = 1
         
-        # Check for NaN outputs
-        if torch.isnan(result).any():
-            print("WARNING: NaN detected in model outputs")
-            
         return result
     
     def logpdf(self, obs, action, reward):
@@ -301,13 +286,6 @@ def bradley_terry_loss(rewards1, rewards2, preferences):
     # Use a more numerically stable binary cross-entropy loss
     loss = -torch.mean(prefs * torch.log(pred_probs + eps) + (1 - prefs) * torch.log(1 - pred_probs + eps))
     
-    # Check for NaN loss and return a fallback value if needed
-    if torch.isnan(loss).any():
-        print("WARNING: NaN loss detected. Using fallback MSE loss.")
-        # Use a fallback MSE loss instead
-        mse_loss = torch.mean((rewards1 - rewards2 - (2 * prefs - 1))**2)
-        return mse_loss
-    
     return loss
 
 def log_wandb_metrics(train_loss, val_loss, epoch, lr=None):
@@ -357,7 +335,6 @@ def train_reward_model(model, train_loader, val_loader, device, num_epochs=50, l
         # Training
         model.train()
         train_loss = 0
-        nan_batches = 0
         
         # Use a progress bar with ETA
         progress_bar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{num_epochs} (Train)", 
@@ -372,12 +349,6 @@ def train_reward_model(model, train_loader, val_loader, device, num_epochs=50, l
                 actions2.to(device, non_blocking=True),
                 pref.to(device, non_blocking=True)
             )
-
-            # Skip batches with NaN values
-            if (torch.isnan(obs1).any() or torch.isnan(actions1).any() or 
-                torch.isnan(obs2).any() or torch.isnan(actions2).any()):
-                nan_batches += 1
-                continue
             
             optimizer.zero_grad(set_to_none=True)
             
@@ -385,49 +356,23 @@ def train_reward_model(model, train_loader, val_loader, device, num_epochs=50, l
             reward1 = model(obs1, actions1)
             reward2 = model(obs2, actions2)
             
-            # Skip if NaN rewards
-            if torch.isnan(reward1).any() or torch.isnan(reward2).any():
-                nan_batches += 1
-                continue
-            
             loss = bradley_terry_loss(reward1, reward2, pref)
-            
-            # Skip problematic batches
-            if torch.isnan(loss).any():
-                nan_batches += 1
-                continue
-                
             loss.backward()
             
             # Clip gradients
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
-            
-            # Check for NaN gradients
-            nan_grad = False
-            for param in model.parameters():
-                if param.grad is not None and torch.isnan(param.grad).any():
-                    nan_grad = True
-                    break
-            
-            if nan_grad:
-                nan_batches += 1
-                continue
             
             optimizer.step()
             
             train_loss += loss.item()
             progress_bar.set_postfix({"loss": f"{loss.item():.4f}"})
             
-        if nan_batches > 0:
-            print(f"WARNING: {nan_batches}/{len(train_loader)} training batches skipped due to NaN issues")
-            
-        avg_train_loss = train_loss / (len(train_loader) - nan_batches) if len(train_loader) > nan_batches else float('nan')
+        avg_train_loss = train_loss / len(train_loader)
         train_losses.append(avg_train_loss)
         
         # Validation
         model.eval()
         val_loss = 0
-        val_nan_batches = 0
         
         val_progress = tqdm(val_loader, desc=f"Epoch {epoch+1}/{num_epochs} (Val)", 
                            leave=False, dynamic_ncols=True)
@@ -443,40 +388,22 @@ def train_reward_model(model, train_loader, val_loader, device, num_epochs=50, l
                     pref.to(device, non_blocking=True)
                 )
                 
-                # Skip batches with NaN values
-                if (torch.isnan(obs1).any() or torch.isnan(actions1).any() or 
-                    torch.isnan(obs2).any() or torch.isnan(actions2).any()):
-                    val_nan_batches += 1
-                    continue
-                
                 reward1 = model(obs1, actions1)
                 reward2 = model(obs2, actions2)
                 
-                # Skip if NaN rewards
-                if torch.isnan(reward1).any() or torch.isnan(reward2).any():
-                    val_nan_batches += 1
-                    continue
-                
                 loss = bradley_terry_loss(reward1, reward2, pref)
                 
-                if torch.isnan(loss).any():
-                    val_nan_batches += 1
-                    continue
-                    
                 val_loss += loss.item()
                 val_progress.set_postfix({"loss": f"{loss.item():.4f}"})
         
-        if val_nan_batches > 0:
-            print(f"WARNING: {val_nan_batches}/{len(val_loader)} validation batches skipped due to NaN issues")
-            
-        avg_val_loss = val_loss / (len(val_loader) - val_nan_batches) if len(val_loader) > val_nan_batches else float('nan')
+        avg_val_loss = val_loss / len(val_loader)
         val_losses.append(avg_val_loss)
         
         # Update learning rate
         scheduler.step()
         
-        # Save best model (if not NaN)
-        if not np.isnan(avg_val_loss) and avg_val_loss < best_val_loss:
+        # Save best model
+        if avg_val_loss < best_val_loss:
             best_val_loss = avg_val_loss
             best_model_state = model.state_dict().copy()
         
@@ -484,22 +411,6 @@ def train_reward_model(model, train_loader, val_loader, device, num_epochs=50, l
         log_wandb_metrics(avg_train_loss, avg_val_loss, epoch, scheduler.get_last_lr()[0])
         
         print(f"Epoch {epoch+1}/{num_epochs}: train_loss={avg_train_loss:.4f}, val_loss={avg_val_loss:.4f}, lr={scheduler.get_last_lr()[0]:.6f}")
-    
-    # If we had NaN issues the whole time, try with a simpler model
-    if all(np.isnan(loss) for loss in val_losses):
-        print("All validation losses were NaN. Training a simpler model with fewer parameters...")
-        # Initialize a simpler model with smaller hidden layers and more regularization
-        simpler_model = SegmentRewardModel(model.reward_model.model[0].in_features // 2, 
-                                          model.reward_model.model[0].in_features // 2, 
-                                          hidden_dims=[64, 32])
-        simpler_model = simpler_model.to(device)
-        
-        # Log to wandb
-        if wandb.run:
-            wandb.log({"model_simplified": True})
-            
-        # Train the simpler model with more regularization and lower learning rate
-        return train_reward_model(simpler_model, train_loader, val_loader, device, num_epochs, lr=lr/10)
     
     # Load best model if we found one
     if best_model_state is not None:
@@ -542,7 +453,7 @@ def load_preferences_data(file_path):
     print(f"Loading preference data from {file_path}")
     
     # Load data with torch.load instead of pickle
-    pref_data = torch.load(file_path)
+    pref_data = torch.load(file_path, weights_only=False)
     
     # Extract the necessary components
     segment_pairs = pref_data['segment_pairs']
@@ -818,11 +729,6 @@ def main(cfg: DictConfig):
     
     with torch.no_grad():
         for obs1, actions1, obs2, actions2, pref in tqdm(test_loader, desc="Testing"):
-            # Skip batches with NaN values
-            if (torch.isnan(obs1).any() or torch.isnan(actions1).any() or 
-                torch.isnan(obs2).any() or torch.isnan(actions2).any()):
-                continue
-                
             # Move to device
             obs1, actions1 = obs1.to(device), actions1.to(device)
             obs2, actions2 = obs2.to(device), actions2.to(device)
@@ -832,17 +738,8 @@ def main(cfg: DictConfig):
             reward1 = model(obs1, actions1)
             reward2 = model(obs2, actions2)
             
-            # Skip if NaN rewards
-            if torch.isnan(reward1).any() or torch.isnan(reward2).any():
-                continue
-                
             # Compute loss
             loss = bradley_terry_loss(reward1, reward2, pref)
-            
-            # Skip if NaN loss
-            if torch.isnan(loss).any():
-                continue
-                
             test_loss += loss.item()
             
             # Compute accuracy (prediction matches preference)
