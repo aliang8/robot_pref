@@ -257,7 +257,12 @@ class PreferenceDataset(Dataset):
             actions2 = actions2[:min_len]
         
         # Convert preference to tensor
-        pref = torch.tensor(self.preferences[idx], dtype=torch.long)
+        if isinstance(self.preferences[idx], torch.Tensor):
+            # If it's already a tensor, just clone it
+            pref = self.preferences[idx].clone().detach().long()
+        else:
+            # Otherwise create a new tensor
+            pref = torch.tensor(self.preferences[idx], dtype=torch.long)
         
         # Handle NaN values
         if torch.isnan(obs1).any() or torch.isnan(actions1).any() or torch.isnan(obs2).any() or torch.isnan(actions2).any():
@@ -281,7 +286,11 @@ def bradley_terry_loss(rewards1, rewards2, preferences):
         Loss value
     """
     # Convert preferences to probabilities (1 = first segment preferred, 2 = second segment preferred)
-    prefs = (preferences == 1).float()
+    # Use detach and clone for tensor conversion if input is already a tensor
+    if isinstance(preferences, torch.Tensor):
+        prefs = (preferences == 1).float()
+    else:
+        prefs = (torch.tensor(preferences) == 1).float()
     
     # Compute probability that segment1 is preferred over segment2 using the Bradley-Terry model
     # Add a small epsilon for numerical stability
