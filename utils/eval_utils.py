@@ -416,6 +416,16 @@ def evaluate_policy_manual(env, algo, n_episodes=10, verbose=True, record_video=
         base_seed = RANDOM_SEED + i * 10000 + int(time.time() % 1000)
         base_seeds.append(base_seed)
     
+    # Prepare video path
+    if record_video and video_path:
+        # Ensure video directory exists
+        os.makedirs(os.path.dirname(video_path), exist_ok=True)
+        
+        # Log video recording details
+        max_videos = min(n_episodes, 5)  # Limit to 5 videos to save space
+        if verbose:
+            print(f"Will record up to {max_videos} evaluation episodes to {video_path}_episode_*.mp4")
+    
     # Determine if we should use parallel evaluation
     use_parallel = parallel and n_episodes > 1
     
@@ -429,8 +439,7 @@ def evaluate_policy_manual(env, algo, n_episodes=10, verbose=True, record_video=
                 num_workers = min(n_episodes, mp.cpu_count())
             
             if verbose:
-                print(f"Running parallel evaluation with {num_workers} workers for {n_episodes} episodes")
-                print(f"Using different seeds for each environment to ensure diverse initial states")
+                print(f"Running parallel evaluation ({num_workers} workers, {n_episodes} episodes)")
             
             # Prepare arguments for workers using the picklable environment creator
             worker_args = []
@@ -462,12 +471,15 @@ def evaluate_policy_manual(env, algo, n_episodes=10, verbose=True, record_video=
                     env_type = "metaworld" if is_metaworld else None
                     env_creator = PicklableEnvCreator(env_id=env, seed=seed, env_type=env_type)
                 
+                # Determine if this episode should be recorded
+                should_record = record_video and i < 5  # Record up to 5 episodes
+                
                 # Add to worker arguments
                 worker_args.append((
                     env_creator,
                     algo, 
                     i,
-                    record_video and i < 3, 
+                    should_record, 
                     video_path, 
                     video_fps
                 ))
@@ -505,24 +517,24 @@ def evaluate_policy_manual(env, algo, n_episodes=10, verbose=True, record_video=
         video_recorders = []
         if record_video and video_path:
             try:
-                # Record at most 3 episodes to save space
-                n_videos = min(n_episodes, 3)
+                # Record at most 5 episodes to save space
+                n_videos = min(n_episodes, 5)
                 
                 # For video recording, we'll create a recorder for each episode
                 # but initialize it only when needed to avoid rendering issues
                 for i in range(n_videos):
                     video_recorders.append(None)  # Placeholder
                 
-                print(f"Will record up to {n_videos} evaluation episodes to {video_path}_episode_*.mp4")
+                if verbose:
+                    print(f"Will record up to {n_videos} evaluation episodes to {video_path}_episode_*.mp4")
             except Exception as e:
                 print(f"Error setting up video recording: {e}")
                 record_video = False
         
         if verbose:
             print(f"Running sequential evaluation for {n_episodes} episodes")
-            print(f"Using different seeds for each episode to ensure diverse initial states")
         
-        for episode in tqdm(range(n_episodes), desc="Evaluating policy"):
+        for episode in tqdm(range(n_episodes), desc="Evaluating policy", disable=not verbose):
             # Get the base seed for this episode
             episode_seed = base_seeds[episode]
             
@@ -770,7 +782,7 @@ def custom_evaluate_on_environment(env):
             
         # Return average reward across episodes
         avg_reward = total_reward / n_episodes
-        print(f"Evaluation during training: {avg_reward:.2f} average reward over {n_episodes} episodes")
+        # More concise output
         return avg_reward
     
     return scorer 

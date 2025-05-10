@@ -270,8 +270,6 @@ def get_metaworld_env(task_name, seed=42):
     if task_name.endswith('.pt') or task_name.endswith('.pkl'):
         task_name = task_name.rsplit('.', 1)[0]
     
-    print(f"Creating MetaWorld environment for task: {task_name} (from {original_task_name})")
-    
     # Method 1: Direct access to environment constructors (preferred method)
     from metaworld.envs import (ALL_V2_ENVIRONMENTS_GOAL_OBSERVABLE,
                               ALL_V2_ENVIRONMENTS_GOAL_HIDDEN)
@@ -299,29 +297,24 @@ def get_metaworld_env(task_name, seed=42):
         if env_name in ALL_V2_ENVIRONMENTS_GOAL_OBSERVABLE:
             env_constructor = ALL_V2_ENVIRONMENTS_GOAL_OBSERVABLE[env_name]
             found_env_name = env_name
-            print(f"Found goal-observable environment: {env_name}")
             break
         elif env_name in ALL_V2_ENVIRONMENTS_GOAL_HIDDEN:
             env_constructor = ALL_V2_ENVIRONMENTS_GOAL_HIDDEN[env_name]
             found_env_name = env_name
-            print(f"Found goal-hidden environment: {env_name}")
             break
     
     # If we found a constructor directly, use it
     if env_constructor is not None:
         env = env_constructor(seed=seed)  # Use provided seed
-        print(f"Successfully created environment: {found_env_name}")
-        print(f"Observation space: {env.observation_space}")
-        print(f"Action space: {env.action_space}")
         return env
         
     # If no direct match, list available environments for debugging
-    print("Available MetaWorld environments:")
-    print("\nGoal Observable environments:")
-    for name in sorted(ALL_V2_ENVIRONMENTS_GOAL_OBSERVABLE.keys()):
+    print("\nCould not find exact environment match. Available MetaWorld environments:")
+    print("Goal Observable environments (first 5):")
+    for name in sorted(list(ALL_V2_ENVIRONMENTS_GOAL_OBSERVABLE.keys()))[:5]:
         print(f"  - {name}")
-    print("\nGoal Hidden environments:")
-    for name in sorted(ALL_V2_ENVIRONMENTS_GOAL_HIDDEN.keys()):
+    print("Goal Hidden environments (first 5):")
+    for name in sorted(list(ALL_V2_ENVIRONMENTS_GOAL_HIDDEN.keys()))[:5]:
         print(f"  - {name}")
         
     # Try to find a similar environment name
@@ -342,9 +335,6 @@ def get_metaworld_env(task_name, seed=42):
         env_name, constructor = best_match
         print(f"Found closest matching environment: {env_name}")
         env = constructor(seed=seed)  # Use provided seed
-        print(f"Successfully created environment: {env_name}")
-        print(f"Observation space: {env.observation_space}")
-        print(f"Action space: {env.action_space}")
         return env
     
     # If we can't find any matching environment
@@ -509,7 +499,10 @@ def main(cfg: DictConfig):
         
         # Create one environment to verify it works
         test_env = env_creator()
-        print("Successfully created environment for evaluation")
+        
+        if test_env is not None:
+            # Print environment information once
+            print(f"Successfully created environment with observation space: {test_env.observation_space.shape}, action space: {test_env.action_space.shape}")
         
         # Use the environment creator for evaluation
         env = env_creator
@@ -550,22 +543,61 @@ def main(cfg: DictConfig):
             return
             
         # Evaluate policy
-        print(f"\nEvaluating policy at epoch {epoch}...")
+        print(f"Evaluating policy at epoch {epoch}...")
+        
+        # Set up video recording directory in the d3rlpy results folder
+        video_recording = cfg.evaluation.record_video
+        video_path = None
+        
+        if video_recording:
+            # Get the current experiment directory
+            experiment_dir = get_d3rlpy_experiment_path(d3rlpy_logdir, experiment_name, with_timestamp=True)
             
+            if experiment_dir:
+                # Create a videos directory inside the experiment directory
+                video_dir = experiment_dir / "videos" / f"epoch_{epoch}"
+                os.makedirs(video_dir, exist_ok=True)
+                video_path = str(video_dir / "eval")
+                print(f"Videos will be saved to: {video_dir}")
+            else:
+                print("Warning: Could not find experiment directory for video recording")
+                # Fall back to a general videos directory
+                video_dir = Path(cfg.output.output_dir) / "videos" / f"epoch_{epoch}"
+                os.makedirs(video_dir, exist_ok=True)
+                video_path = str(video_dir / "eval")
+            
+        # Evaluate policy with video recording if enabled
         metrics = evaluate_policy_manual(
             env, 
             algo, 
             n_episodes=cfg.training.eval_episodes, 
             verbose=False,
             parallel=cfg.evaluation.parallel_eval,
-            num_workers=cfg.evaluation.eval_workers
+            num_workers=cfg.evaluation.eval_workers,
+            record_video=video_recording,
+            video_path=video_path,
+            video_fps=cfg.evaluation.video_fps if hasattr(cfg.evaluation, 'video_fps') else 30
         )
-        print(f"Mean return: {metrics['mean_return']:.2f}, Success rate: {metrics['success_rate']:.2f}")
+        print(f"Epoch {epoch} evaluation: Return={metrics['mean_return']:.2f}, Success={metrics['success_rate']:.2f}")
         evaluation_results.append((epoch, metrics))
         
         # Log to wandb if enabled
         if cfg.wandb.use_wandb:
             log_evaluation_to_wandb(metrics, epoch=epoch, prefix="eval")
+            
+            # Log video paths if videos were recorded
+            if video_recording and video_path and wandb.run:
+                # Try to find and upload videos
+                try:
+                    import glob
+                    video_files = glob.glob(f"{video_path}_episode_*.mp4")
+                    if video_files:
+                        video_artifacts = [wandb.Video(video_file, fps=cfg.evaluation.video_fps if hasattr(cfg.evaluation, 'video_fps') else 30, format="mp4") 
+                                           for video_file in video_files[:3]]  # Upload up to 3 videos
+                        
+                        wandb.log({f"eval_videos_epoch_{epoch}": video_artifacts}, step=epoch)
+                except Exception as e:
+                    print(f"Warning: Could not upload videos to wandb: {e}")
     
     # Train IQL
     print(f"Training IQL for {cfg.training.iql_epochs} epochs...")
@@ -608,18 +640,50 @@ def main(cfg: DictConfig):
     # Run final comprehensive evaluation
     print("\nRunning final comprehensive evaluation...")
     if env is not None:
+        # Set up video directory for final evaluation
+        video_recording = cfg.evaluation.record_video
+        video_path = None
+        
+        if video_recording:
+            # Create a final evaluation video directory
+            video_dir = Path(cfg.output.output_dir) / "videos" / "final_evaluation"
+            os.makedirs(video_dir, exist_ok=True)
+            video_path = str(video_dir / "final_eval")
+            print(f"Final evaluation videos will be saved to: {video_dir}")
+            
         evaluation_metrics = evaluate_policy_manual(
             env, 
             iql, 
             n_episodes=cfg.training.eval_episodes, 
             verbose=True,
             parallel=cfg.evaluation.parallel_eval,
-            num_workers=cfg.evaluation.eval_workers
+            num_workers=cfg.evaluation.eval_workers,
+            record_video=video_recording,
+            video_path=video_path,
+            video_fps=cfg.evaluation.video_fps if hasattr(cfg.evaluation, 'video_fps') else 30
         )
+        
+        # Print summary
+        print(f"Final evaluation results: Mean return = {evaluation_metrics['mean_return']:.2f}, " + 
+              f"Success rate = {evaluation_metrics['success_rate']:.2f}, " +
+              f"Episodes = {evaluation_metrics['num_episodes']}")
         
         # Log final evaluation to wandb
         if cfg.wandb.use_wandb:
             log_evaluation_to_wandb(evaluation_metrics, prefix="final")
+            
+            # Upload final evaluation videos if available
+            if video_recording and video_path and wandb.run:
+                try:
+                    import glob
+                    video_files = glob.glob(f"{video_path}_episode_*.mp4")
+                    if video_files:
+                        video_artifacts = [wandb.Video(video_file, fps=cfg.evaluation.video_fps if hasattr(cfg.evaluation, 'video_fps') else 30, format="mp4") 
+                                           for video_file in video_files[:3]]  # Upload up to 3 videos
+                        
+                        wandb.log({f"final_eval_videos": video_artifacts})
+                except Exception as e:
+                    print(f"Warning: Could not upload final videos to wandb: {e}")
     else:
         print("\nSkipping evaluation (no environment available)")
         evaluation_metrics = {
