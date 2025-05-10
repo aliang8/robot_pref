@@ -531,32 +531,44 @@ def load_preferences_data(file_path):
         Tuple of (segment_pairs, segment_indices, preferences, segments)
     """
     print(f"Loading preference data from {file_path}")
-    with open(file_path, 'rb') as f:
-        pref_data = pickle.load(f)
-    
-    # Extract the necessary components
-    segment_pairs = pref_data['segment_pairs']
-    segment_indices = pref_data['segment_indices']
-    
-    # Check if we have collected human preferences or need to use synthetic ones
-    if 'human_preferences' in pref_data and len(pref_data['human_preferences']) > 0:
-        print("Using collected human preferences")
-        preferences = pref_data['human_preferences']
-    else:
-        print("Using synthetic preferences (based on rewards)")
-        preferences = pref_data['synthetic_preferences']
-    
-    # Check if segments are included in the preference data
-    segments = None
-    if 'segments' in pref_data:
-        segments = pref_data['segments']
-        print(f"Found {len(segments)} segments in preference data")
-    elif 'original_segments' in pref_data:
-        segments = pref_data['original_segments']
-        print(f"Found {len(segments)} original segments in preference data")
-    
-    print(f"Loaded {len(segment_pairs)} preference pairs")
-    return segment_pairs, segment_indices, preferences, segments
+    try:
+        with open(file_path, 'rb') as f:
+            pref_data = pickle.load(f)
+        
+        # Extract the necessary components
+        segment_pairs = pref_data['segment_pairs']
+        segment_indices = pref_data['segment_indices']
+        
+        # Get preferences - different files might have different keys
+        if 'preference_labels' in pref_data:
+            print("Using preference_labels from dataset")
+            preferences = pref_data['preference_labels']
+        elif 'human_preferences' in pref_data and len(pref_data['human_preferences']) > 0:
+            print("Using collected human preferences")
+            preferences = pref_data['human_preferences']
+        elif 'synthetic_preferences' in pref_data:
+            print("Using synthetic preferences (based on rewards)")
+            preferences = pref_data['synthetic_preferences']
+        else:
+            print("Could not find preferences in dataset! Available keys:", list(pref_data.keys()))
+            raise KeyError("No preference data found in file")
+        
+        # Check if segments are included in the preference data
+        segments = None
+        if 'segments' in pref_data:
+            segments = pref_data['segments']
+            print(f"Found {len(segments)} segments in preference data")
+        elif 'original_segments' in pref_data:
+            segments = pref_data['original_segments']
+            print(f"Found {len(segments)} original segments in preference data")
+        
+        print(f"Loaded {len(segment_pairs)} preference pairs")
+        return segment_pairs, segment_indices, preferences, segments
+    except Exception as e:
+        print(f"Error loading preference data: {e}")
+        import traceback
+        traceback.print_exc()
+        raise ValueError(f"Failed to load preference data from {file_path}: {e}")
 
 @hydra.main(config_path="config/train_reward_model", config_name="config", version_base=None)
 def main(cfg: DictConfig):
