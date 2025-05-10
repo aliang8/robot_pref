@@ -16,9 +16,6 @@ import hydra
 from omegaconf import DictConfig, OmegaConf
 import wandb
 import matplotlib.pyplot as plt
-import matplotlib.animation as animation
-from matplotlib import gridspec
-import cv2
 import glob
 
 # Import utility functions
@@ -36,24 +33,22 @@ from utils.eval_utils import (
     custom_evaluate_on_environment
 )
 
+# Import visualization utilities
+from utils.viz import create_video_grid
+
+# Import data utilities
+from utils.data_utils import AttrDict
+
+# Import callback utilities
+from utils.callbacks import WandbCallback, CompositeCallback
+
+# Import wandb utilities
+from utils.wandb_utils import log_to_wandb
+
 # Set seed for reproducibility
 torch.manual_seed(RANDOM_SEED)
 np.random.seed(RANDOM_SEED)
 random.seed(RANDOM_SEED)
-
-# Define a simple AttrDict class that provides dot access to dictionaries
-class AttrDict(dict):
-    def __init__(self, *args, **kwargs):
-        super(AttrDict, self).__init__(*args, **kwargs)
-        self.__dict__ = self
-
-    @staticmethod
-    def from_nested_dict(data):
-        """Create nested AttrDict from nested dict."""
-        if not isinstance(data, dict):
-            return data
-        else:
-            return AttrDict({key: AttrDict.from_nested_dict(data[key]) for key in data})
 
 def create_mdp_dataset_with_sa_reward(data, reward_model, device, max_segments=1000, batch_size=32):
     """Create MDPDataset from tensordict data using a state-action reward model.
@@ -393,80 +388,6 @@ def get_d3rlpy_experiment_path(base_logdir, experiment_name, with_timestamp=True
         
     return None
 
-def log_to_wandb(metrics, epoch=None, prefix="", step=None):
-    """Log any metrics to wandb with proper prefixing.
-    
-    Args:
-        metrics: Dict of metrics or list of (epoch, metrics_dict) tuples from d3rlpy
-        epoch: Current epoch (optional)
-        prefix: Prefix to add to metric names (e.g., "train", "eval")
-        step: Step to use for wandb logging (defaults to epoch if provided)
-    
-    Returns:
-        bool: True if metrics were logged, False otherwise
-    """
-    if not wandb.run:
-        return False
-    
-    # Use epoch as step if step not specified
-    if step is None and epoch is not None:
-        step = epoch
-        
-    # Ensure prefix ends with / if it's not empty
-    if prefix and not prefix.endswith("/"):
-        prefix = f"{prefix}/"
-    
-    # Handle d3rlpy training_metrics format (list of tuples)
-    if isinstance(metrics, list) and len(metrics) > 0 and isinstance(metrics[0], tuple) and len(metrics[0]) == 2:
-        # Log each epoch's metrics separately
-        for epoch, epoch_metrics in metrics:
-            # Create metrics dict with prefix
-            log_dict = {f"{prefix}{k}": v for k, v in epoch_metrics.items() 
-                       if isinstance(v, (int, float, np.int64, np.float32, np.float64, np.number))}
-            
-            # Add epoch
-            log_dict["epoch"] = epoch
-            
-            # Log to wandb
-            if log_dict:
-                wandb.log(log_dict, step=epoch)
-        
-        print(f"Logged {len(metrics)} epochs of {prefix.rstrip('/')} metrics to wandb")
-        return True
-    
-    # Handle single metrics dict
-    elif isinstance(metrics, dict):
-        log_dict = {}
-        
-        # Add epoch if provided
-        if epoch is not None:
-            log_dict[f"{prefix}epoch"] = epoch
-        
-        # Add all numerical metrics with prefix
-        for key, value in metrics.items():
-            if isinstance(value, (int, float, np.int64, np.float32, np.float64, np.number)):
-                log_dict[f"{prefix}{key}"] = value
-        
-        # Log histogram for returns if available
-        if "returns" in metrics and isinstance(metrics["returns"], (list, np.ndarray)):
-            wandb.log({f"{prefix}returns_histogram": wandb.Histogram(metrics["returns"])}, step=step)
-        
-        # Log to wandb
-        if log_dict:
-            wandb.log(log_dict, step=step)
-            return True
-    
-    return False
-
-# Keep these functions for backward compatibility but implement them using the unified function
-def log_evaluation_to_wandb(metrics, epoch=None, prefix=""):
-    """Log evaluation metrics to wandb."""
-    return log_to_wandb(metrics, epoch=epoch, prefix=prefix)
-
-def log_training_metrics_to_wandb(training_metrics, prefix="train"):
-    """Log d3rlpy training metrics to wandb."""
-    return log_to_wandb(training_metrics, prefix=prefix)
-
 class MetaWorldEnvCreator:
     """A picklable environment creator for MetaWorld environments."""
     
@@ -479,241 +400,6 @@ class MetaWorldEnvCreator:
         # Generate a unique seed each time this function is called
         unique_seed = int(time.time() * 1000) % 100000 + random.randint(0, 10000)
         return get_metaworld_env(self.dataset_name, seed=unique_seed)
-
-class WandbCallback:
-    """Callback for d3rlpy to log metrics to wandb.
-    
-    This callback is designed to capture training metrics that d3rlpy logs
-    during training, including loss values and evaluation scores.
-    """
-    
-    def __init__(self, use_wandb=True, prefix="train"):
-        self.use_wandb = use_wandb
-        self.prefix = prefix
-        self.epoch = 0
-        self.best_eval_metrics = None
-        self.best_eval_epoch = -1
-        # Track metrics across epochs
-        self.training_losses = {}
-        self.current_epoch_metrics = {}
-        self.evaluation_scores = []
-        
-    def __call__(self, algo, epoch, total_step):
-        """Called by d3rlpy at the end of each epoch or update step."""
-        self.epoch = epoch
-        
-        # Basic metrics to track
-        metrics = {
-            "epoch": epoch,
-            "total_step": total_step
-        }
-
-        logger = algo._active_logger
-        
-        # Get metrics from the metrics_buffer
-        if hasattr(logger, '_metrics_buffer'):
-            for name, buffer in logger._metrics_buffer.items():
-                if buffer:  # Check if there are values
-                    # Calculate the mean of accumulated values
-                    mean_value = np.mean(buffer)
-                    metrics[name] = mean_value
-                    
-                    # Store loss metrics separately for tracking over time
-                    if name.endswith('_loss') or name.startswith('loss'):
-                        self.training_losses[name] = self.training_losses.get(name, []) + [mean_value]
-            
-            # Store evaluation scores if present
-            if 'evaluation' in logger._metrics_buffer and logger._metrics_buffer['evaluation']:
-                eval_score = np.mean(logger._metrics_buffer['evaluation'])
-                self.evaluation_scores.append((epoch, eval_score))
-                metrics['evaluation_score'] = eval_score
-                    
-            # Store metrics for this epoch
-            self.current_epoch_metrics = metrics.copy()
-
-        # Log to wandb if enabled
-        if self.use_wandb and wandb.run:
-            log_to_wandb(metrics, epoch=epoch, prefix=self.prefix)
-        
-        return metrics
-    
-    def update_eval_metrics(self, eval_metrics, epoch):
-        """Track the best evaluation metrics so far."""
-        # Check if these are the best metrics so far
-        is_best = False
-        if self.best_eval_metrics is None:
-            is_best = True
-        elif 'mean_return' in eval_metrics and 'mean_return' in self.best_eval_metrics:
-            if eval_metrics['mean_return'] > self.best_eval_metrics['mean_return']:
-                is_best = True
-        
-        # Update best metrics if applicable
-        if is_best:
-            self.best_eval_metrics = eval_metrics.copy()
-            self.best_eval_epoch = epoch
-            
-        # Add a flag for best metrics
-        eval_metrics_with_best = eval_metrics.copy()
-        eval_metrics_with_best['is_best'] = is_best
-        
-        return eval_metrics_with_best
-    
-    def get_training_summary(self):
-        """Get a summary of training losses and metrics."""
-        summary = {
-            "epoch": self.epoch,
-            "best_eval_epoch": self.best_eval_epoch,
-        }
-        
-        # Add latest values of each loss
-        for loss_name, values in self.training_losses.items():
-            if values:
-                summary[f"final_{loss_name}"] = values[-1]
-                summary[f"mean_{loss_name}"] = np.mean(values)
-        
-        # Add latest evaluation score if available
-        if self.evaluation_scores:
-            latest_eval = self.evaluation_scores[-1]
-            summary["final_evaluation_score"] = latest_eval[1]
-        
-        return summary
-
-class CompositeCallback:
-    """A callback that combines multiple callbacks into one."""
-    
-    def __init__(self, callbacks):
-        """Initialize with a list of callbacks.
-        
-        Args:
-            callbacks: List of callback functions/objects to call
-        """
-        self.callbacks = callbacks
-    
-    def __call__(self, algo, epoch, total_step):
-        """Call all callbacks in order."""
-        results = []
-        for callback in self.callbacks:
-            try:
-                result = callback(algo, epoch, total_step)
-                results.append(result)
-            except Exception as e:
-                print(f"Error in callback {callback}: {e}")
-        return results
-
-def create_video_grid(video_files, output_path, max_videos=6, fps=30, title=None):
-    """Create a grid of videos from individual mp4 files.
-    
-    Args:
-        video_files: List of paths to mp4 video files
-        output_path: Path to save the output video
-        max_videos: Maximum number of videos to include in the grid
-        fps: Frames per second of the output video
-        title: Optional title to display above the grid
-        
-    Returns:
-        Path to the saved grid video
-    """
-    if not video_files:
-        return None
-    
-    # Limit the number of videos
-    video_files = video_files[:max_videos]
-    n_videos = len(video_files)
-    
-    # Determine grid dimensions
-    if n_videos <= 2:
-        grid_dims = (1, n_videos)
-    elif n_videos <= 4:
-        grid_dims = (2, 2)
-    elif n_videos <= 6:
-        grid_dims = (2, 3)
-    else:
-        grid_dims = (3, 3)
-    
-    # Open all video captures
-    video_captures = [cv2.VideoCapture(vf) for vf in video_files]
-    
-    # Check if videos were opened successfully
-    if not all(vc.isOpened() for vc in video_captures):
-        print("Warning: Could not open one or more video files")
-        return None
-    
-    # Get video properties
-    widths = []
-    heights = []
-    frame_counts = []
-    
-    for vc in video_captures:
-        widths.append(int(vc.get(cv2.CAP_PROP_FRAME_WIDTH)))
-        heights.append(int(vc.get(cv2.CAP_PROP_FRAME_HEIGHT)))
-        frame_counts.append(int(vc.get(cv2.CAP_PROP_FRAME_COUNT)))
-    
-    # Find the size of each cell in the grid
-    cell_width = max(widths)
-    cell_height = max(heights)
-    
-    # Find the minimum frame count (all videos must have the same number of frames)
-    min_frames = min(frame_counts)
-    
-    # Set up the matplotlib figure and grid
-    fig = plt.figure(figsize=(grid_dims[1] * 4, grid_dims[0] * 3 + (0.5 if title else 0)))
-    
-    if title:
-        fig.suptitle(title, fontsize=16)
-    
-    grid = gridspec.GridSpec(grid_dims[0], grid_dims[1], figure=fig)
-    
-    # Create axes for each video
-    axes = []
-    for i in range(n_videos):
-        row = i // grid_dims[1]
-        col = i % grid_dims[1]
-        ax = fig.add_subplot(grid[row, col])
-        ax.set_title(f"Episode {i+1}")
-        ax.set_xticks([])
-        ax.set_yticks([])
-        ax.set_frame_on(True)
-        axes.append(ax)
-    
-    # Create image objects for each video
-    images = []
-    for i, vc in enumerate(video_captures):
-        ret, frame = vc.read()
-        if ret:
-            # Convert BGR to RGB (cv2 uses BGR, matplotlib uses RGB)
-            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            img = axes[i].imshow(frame_rgb)
-            images.append(img)
-    
-    # Set up animation update function
-    def update(frame_idx):
-        for i, vc in enumerate(video_captures):
-            # Set the position to the current frame
-            vc.set(cv2.CAP_PROP_POS_FRAMES, frame_idx % frame_counts[i])
-            ret, frame = vc.read()
-            if ret:
-                # Convert BGR to RGB
-                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                images[i].set_array(frame_rgb)
-        
-        return images
-    
-    # Create the animation
-    anim = animation.FuncAnimation(
-        fig, update, frames=min_frames, blit=True, interval=1000/fps
-    )
-    
-    # Save the animation
-    writer = animation.FFMpegWriter(fps=fps, metadata=dict(artist='d3rlpy'))
-    anim.save(output_path, writer=writer)
-    
-    # Close figure and video captures
-    plt.close(fig)
-    for vc in video_captures:
-        vc.release()
-    
-    print(f"Created video grid with {n_videos} videos at {output_path}")
-    return output_path
 
 @hydra.main(config_path="config", config_name="iql")
 def main(cfg: DictConfig):
@@ -884,26 +570,6 @@ def main(cfg: DictConfig):
             encoder_factory=VectorEncoderFactory(cfg.model.encoder_dims),
             use_gpu=torch.cuda.is_available()
         )
-        
-        # For BC with weight decay
-        if hasattr(cfg.model, 'use_weight_decay') and cfg.model.use_weight_decay:
-            if hasattr(algo, 'create_impl'):
-                impl = algo.create_impl(
-                    state_dim, 
-                    action_dim, 
-                    algo._encoder_factory, 
-                    algo._optim_factory
-                )
-                # Set weight decay if it's used
-                if hasattr(impl.optim, 'param_groups'):
-                    for param_group in impl.optim.param_groups:
-                        param_group['weight_decay'] = cfg.model.weight_decay
-                        
-            # Fallback for older d3rlpy versions
-            if hasattr(algo, '_impl') and hasattr(algo._impl, 'optim'):
-                for param_group in algo._impl.optim.param_groups:
-                    param_group['weight_decay'] = cfg.model.weight_decay
-        
     else:
         raise ValueError(f"Unsupported algorithm: {algorithm_name}")
     
@@ -1001,7 +667,7 @@ def main(cfg: DictConfig):
                             grid_video_path, 
                             max_videos=6,
                             fps=cfg.evaluation.video_fps,
-                            title=f"Evaluation Episodes (Epoch {epoch})"
+                            title=None  # Remove title
                         )
                         
                         if grid_video:
@@ -1180,7 +846,7 @@ def main(cfg: DictConfig):
                             grid_video_path, 
                             max_videos=6,
                             fps=cfg.evaluation.video_fps,
-                            title="Final Evaluation Episodes"
+                            title=None  # Remove title
                         )
                         
                         if grid_video:

@@ -3,7 +3,7 @@
 # Training parameters
 training:
   eval_interval: 10
-  eval_episodes: 10
+  eval_episodes: 30
 
 # Evaluation settings
 evaluation:
