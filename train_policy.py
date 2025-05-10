@@ -407,13 +407,17 @@ def log_to_wandb(metrics, epoch=None, prefix="", step=None):
     # Use epoch as step if step not specified
     if step is None and epoch is not None:
         step = epoch
+        
+    # Ensure prefix ends with / if it's not empty
+    if prefix and not prefix.endswith("/"):
+        prefix = f"{prefix}/"
     
     # Handle d3rlpy training_metrics format (list of tuples)
     if isinstance(metrics, list) and len(metrics) > 0 and isinstance(metrics[0], tuple) and len(metrics[0]) == 2:
         # Log each epoch's metrics separately
         for epoch, epoch_metrics in metrics:
             # Create metrics dict with prefix
-            log_dict = {f"{prefix}_{k}": v for k, v in epoch_metrics.items() 
+            log_dict = {f"{prefix}{k}": v for k, v in epoch_metrics.items() 
                        if isinstance(v, (int, float, np.int64, np.float32, np.float64, np.number))}
             
             # Add epoch
@@ -423,28 +427,25 @@ def log_to_wandb(metrics, epoch=None, prefix="", step=None):
             if log_dict:
                 wandb.log(log_dict, step=epoch)
         
-        print(f"Logged {len(metrics)} epochs of {prefix} metrics to wandb")
+        print(f"Logged {len(metrics)} epochs of {prefix.rstrip('/')} metrics to wandb")
         return True
     
     # Handle single metrics dict
     elif isinstance(metrics, dict):
         log_dict = {}
         
-        # Add prefix to metric names if provided
-        pre = f"{prefix}_" if prefix else ""
-        
         # Add epoch if provided
         if epoch is not None:
-            log_dict[f"{pre}epoch"] = epoch
+            log_dict[f"{prefix}epoch"] = epoch
         
         # Add all numerical metrics with prefix
         for key, value in metrics.items():
             if isinstance(value, (int, float, np.int64, np.float32, np.float64, np.number)):
-                log_dict[f"{pre}{key}"] = value
+                log_dict[f"{prefix}{key}"] = value
         
         # Log histogram for returns if available
         if "returns" in metrics and isinstance(metrics["returns"], (list, np.ndarray)):
-            wandb.log({f"{pre}returns_histogram": wandb.Histogram(metrics["returns"])}, step=step)
+            wandb.log({f"{prefix}returns_histogram": wandb.Histogram(metrics["returns"])}, step=step)
         
         # Log to wandb
         if log_dict:
@@ -871,7 +872,7 @@ def main(cfg: DictConfig):
                         video_artifacts = [wandb.Video(video_file, fps=cfg.evaluation.video_fps, format="mp4") 
                                            for video_file in video_files[:3]]  # Upload up to 3 videos
                         
-                        wandb.log({f"eval_videos_epoch_{epoch}": video_artifacts}, step=epoch)
+                        wandb.log({f"media/videos/eval_epoch_{epoch}": video_artifacts}, step=epoch)
                 except Exception as e:
                     print(f"Warning: Could not upload videos to wandb: {e}")
 
@@ -976,7 +977,7 @@ def main(cfg: DictConfig):
                 plt.tight_layout()
                 
                 # Log to wandb
-                wandb.log({"training_losses": wandb.Image(plt)})
+                wandb.log({"media/plots/training_losses": wandb.Image(plt)})
                 plt.close()
             except Exception as e:
                 print(f"Warning: Could not create training loss plot: {e}")
@@ -1030,7 +1031,7 @@ def main(cfg: DictConfig):
                         video_artifacts = [wandb.Video(video_file, fps=cfg.evaluation.video_fps, format="mp4") 
                                            for video_file in video_files[:3]]  # Upload up to 3 videos
                         
-                        wandb.log({f"final_eval_videos": video_artifacts})
+                        wandb.log({f"media/videos/final_eval": video_artifacts})
                 except Exception as e:
                     print(f"Warning: Could not upload final videos to wandb: {e}")
     else:
