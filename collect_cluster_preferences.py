@@ -115,7 +115,7 @@ def display_segment(data, start_idx, end_idx, title=None, cluster_id=None):
     
     return anim
 
-def present_preference_query(data, segment1, segment2, query_id=None, skip_videos=False, no_auto_open=False):
+def present_preference_query(data, segment1, segment2, query_id=None, skip_videos=False, no_auto_open=False, ground_truth=None):
     """Present a preference query to the user.
     
     Args:
@@ -125,6 +125,7 @@ def present_preference_query(data, segment1, segment2, query_id=None, skip_video
         query_id: Optional ID for the query
         skip_videos: If True, skip generating visualizations to save time
         no_auto_open: If True, don't automatically open videos
+        ground_truth: Optional ground truth preference (1 if segment1 is preferred, 2 if segment2 is preferred, 0 if equal)
         
     Returns:
         int: 1 if segment1 is preferred, 2 if segment2 is preferred, 0 if equal
@@ -187,7 +188,48 @@ def present_preference_query(data, segment1, segment2, query_id=None, skip_video
         except ValueError:
             print("Invalid input. Please enter a number.")
     
+    # Check if user preference matches ground truth for statistics
+    if ground_truth is not None and preference != 0:  # Only count non-equal user preferences
+        if preference == ground_truth:
+            print(f"✓ Your preference matches ground truth!")
+        else:
+            print(f"✗ Your preference differs from ground truth.")
+    
     return preference
+
+def get_reward_based_preference(data, segment1, segment2):
+    """Determine ground truth preference based on cumulative reward.
+    
+    Args:
+        data: TensorDict with observations and rewards
+        segment1: (idx1, start_idx1, end_idx1) for first segment
+        segment2: (idx2, start_idx2, end_idx2) for second segment
+        
+    Returns:
+        int: 1 if segment1 has higher reward, 2 if segment2 has higher reward, 0 if equal
+    """
+    if "reward" not in data:
+        print("WARNING: No reward data found, cannot determine ground truth preference")
+        return None
+    
+    # Extract segment information
+    _, start_idx1, end_idx1 = segment1
+    _, start_idx2, end_idx2 = segment2
+    
+    # Get rewards - ensure they're on CPU
+    rewards = data["reward"].cpu()
+    
+    # Calculate cumulative reward for each segment
+    reward1 = rewards[start_idx1:end_idx1+1].sum().item()
+    reward2 = rewards[start_idx2:end_idx2+1].sum().item()
+    
+    # Determine preference
+    if abs(reward1 - reward2) < 1e-6:  # Small epsilon for float comparison
+        return 0  # Equal rewards
+    elif reward1 > reward2:
+        return 1  # First segment preferred
+    else:
+        return 2  # Second segment preferred
 
 def collect_cluster_preferences(data, cluster_representatives, num_comparisons=None, skip_videos=False, no_auto_open=False):
     """Collect user preferences between cluster representatives.
@@ -200,7 +242,8 @@ def collect_cluster_preferences(data, cluster_representatives, num_comparisons=N
         no_auto_open: If True, don't automatically open videos
         
     Returns:
-        list: User preferences in format [(cluster_id1, cluster_id2, preference), ...]
+        list: User preferences and ground truth in format 
+             [(cluster_id1, cluster_id2, user_preference, gt_preference), ...]
               where preference is 1 if cluster_id1 is preferred, 2 if cluster_id2 is preferred
     """
     # Get all cluster IDs
@@ -220,6 +263,8 @@ def collect_cluster_preferences(data, cluster_representatives, num_comparisons=N
     
     # Collect preferences
     preferences = []
+    user_correct_count = 0
+    total_comparable_queries = 0
     
     for i, (cluster_id1, cluster_id2) in enumerate(cluster_pairs):
         print(f"\nComparison {i+1}/{len(cluster_pairs)}: Cluster {cluster_id1} vs Cluster {cluster_id2}")
@@ -228,17 +273,36 @@ def collect_cluster_preferences(data, cluster_representatives, num_comparisons=N
         segment1 = random.choice(cluster_representatives[cluster_id1])
         segment2 = random.choice(cluster_representatives[cluster_id2])
         
-        # Present preference query
-        preference = present_preference_query(
+        # Get ground truth preference based on reward
+        gt_preference = get_reward_based_preference(data, segment1, segment2)
+        if gt_preference is not None:
+            print(f"Ground truth preference (based on reward): {gt_preference}")
+        
+        # Present preference query to the user
+        user_preference = present_preference_query(
             data, segment1, segment2, 
             query_id=i+1, 
             skip_videos=skip_videos,
-            no_auto_open=no_auto_open
+            no_auto_open=no_auto_open,
+            ground_truth=gt_preference  # Pass ground truth to show it after user's choice
         )
         
-        # Record preference
-        preferences.append((cluster_id1, cluster_id2, preference))
-        print(f"Recorded preference: {preference}")
+        # Record preference with ground truth
+        preferences.append((cluster_id1, cluster_id2, user_preference, gt_preference))
+        
+        # Check if user preference matches ground truth for statistics
+        if gt_preference is not None and user_preference != 0:  # Only count non-equal user preferences
+            total_comparable_queries += 1
+            if user_preference == gt_preference:
+                user_correct_count += 1
+                print(f"✓ Your preference matches ground truth!")
+            else:
+                print(f"✗ Your preference differs from ground truth.")
+    
+    # Calculate overall user accuracy
+    if total_comparable_queries > 0:
+        accuracy = user_correct_count / total_comparable_queries
+        print(f"\nOverall accuracy: {user_correct_count}/{total_comparable_queries} = {accuracy:.2%}")
     
     return preferences
 
@@ -246,39 +310,94 @@ def derive_cluster_ranking(preferences):
     """Derive an approximate ranking of clusters from pairwise preferences.
     
     Args:
-        preferences: List of (cluster_id1, cluster_id2, preference) tuples
+        preferences: List of (cluster_id1, cluster_id2, user_preference, gt_preference) tuples
         
     Returns:
-        list: Ordered list of cluster IDs from most to least preferred
+        tuple: (user_ranking, gt_ranking) ordered lists of cluster IDs from most to least preferred
     """
-    print("Deriving cluster ranking from preferences...")
+    print("Deriving cluster rankings from preferences...")
     
     # Extract all unique cluster IDs
     cluster_ids = set()
-    for c1, c2, _ in preferences:
+    for c1, c2, _, _ in preferences:
         cluster_ids.add(c1)
         cluster_ids.add(c2)
     
     cluster_ids = sorted(list(cluster_ids))
     
-    # Initialize win counts for each cluster
-    win_counts = {cluster_id: 0 for cluster_id in cluster_ids}
+    # Initialize win counts for user preferences and ground truth
+    user_win_counts = {cluster_id: 0 for cluster_id in cluster_ids}
+    gt_win_counts = {cluster_id: 0 for cluster_id in cluster_ids}
     
-    # Count wins for each cluster
-    for c1, c2, pref in preferences:
-        if pref == 1:
-            win_counts[c1] += 1
-        elif pref == 2:
-            win_counts[c2] += 1
+    # Count wins for each cluster based on user preferences and ground truth
+    valid_user_comparisons = 0
+    valid_gt_comparisons = 0
+    
+    for c1, c2, user_pref, gt_pref in preferences:
+        # Count user preference wins (only for non-equal preferences)
+        if user_pref == 1:
+            user_win_counts[c1] += 1
+            valid_user_comparisons += 1
+        elif user_pref == 2:
+            user_win_counts[c2] += 1
+            valid_user_comparisons += 1
+            
+        # Count ground truth preference wins (only for non-equal and non-None preferences)
+        if gt_pref is not None:
+            if gt_pref == 1:
+                gt_win_counts[c1] += 1
+                valid_gt_comparisons += 1
+            elif gt_pref == 2:
+                gt_win_counts[c2] += 1
+                valid_gt_comparisons += 1
     
     # Sort clusters by win count (descending)
-    ranked_clusters = sorted(win_counts.keys(), key=lambda c: win_counts[c], reverse=True)
+    user_ranked_clusters = sorted(user_win_counts.keys(), key=lambda c: user_win_counts[c], reverse=True)
+    gt_ranked_clusters = sorted(gt_win_counts.keys(), key=lambda c: gt_win_counts[c], reverse=True)
     
-    print("Cluster ranking (most to least preferred):")
-    for i, cluster_id in enumerate(ranked_clusters):
-        print(f"  {i+1}. Cluster {cluster_id} (wins: {win_counts[cluster_id]})")
+    # Print user-based ranking
+    print("\nUser-based cluster ranking (most to least preferred):")
+    for i, cluster_id in enumerate(user_ranked_clusters):
+        print(f"  {i+1}. Cluster {cluster_id} (wins: {user_win_counts[cluster_id]})")
     
-    return ranked_clusters
+    # Print ground truth-based ranking
+    print("\nGround truth-based cluster ranking (most to least preferred):")
+    for i, cluster_id in enumerate(gt_ranked_clusters):
+        print(f"  {i+1}. Cluster {cluster_id} (wins: {gt_win_counts[cluster_id]})")
+    
+    # Calculate rank correlation between user and ground truth rankings
+    if valid_user_comparisons > 0 and valid_gt_comparisons > 0:
+        # Create maps from cluster ID to rank position
+        user_rank_map = {cluster: rank for rank, cluster in enumerate(user_ranked_clusters)}
+        gt_rank_map = {cluster: rank for rank, cluster in enumerate(gt_ranked_clusters)}
+        
+        # Calculate Spearman's rank correlation coefficient (simplified)
+        # Using sum of squared differences in ranks
+        squared_diff_sum = 0
+        n = len(cluster_ids)
+        
+        for cluster in cluster_ids:
+            user_rank = user_rank_map[cluster]
+            gt_rank = gt_rank_map[cluster]
+            squared_diff_sum += (user_rank - gt_rank)**2
+        
+        # Spearman's formula: rho = 1 - (6 * sum(d²) / (n³ - n))
+        if n > 1:  # Need at least 2 clusters to calculate correlation
+            rho = 1 - (6 * squared_diff_sum) / (n**3 - n)
+            print(f"\nRank correlation between user and ground truth rankings: {rho:.2f}")
+            print(f"  (1.0 = perfect agreement, -1.0 = perfect disagreement, 0.0 = no relationship)")
+            
+            # Print clusters with biggest rank differences
+            rank_diffs = [(c, abs(user_rank_map[c] - gt_rank_map[c])) for c in cluster_ids]
+            rank_diffs.sort(key=lambda x: x[1], reverse=True)
+            
+            if len(rank_diffs) > 0 and rank_diffs[0][1] > 0:
+                print("\nClusters with largest ranking disagreement:")
+                for cluster, diff in rank_diffs[:3]:  # Show top 3 disagreements
+                    if diff > 0:
+                        print(f"  Cluster {cluster}: User rank: {user_rank_map[cluster]+1}, GT rank: {gt_rank_map[cluster]+1}, Diff: {diff}")
+    
+    return user_ranked_clusters, gt_ranked_clusters
 
 def generate_augmented_preferences(data, clusters, segment_indices, cluster_ranking):
     """Generate augmented preferences based on cluster ranking.
@@ -355,7 +474,7 @@ def generate_augmented_preferences(data, clusters, segment_indices, cluster_rank
     
     return augmented_preferences
 
-def create_preference_dataset(data, segment_indices, augmented_preferences, output_file):
+def create_preference_dataset(data, segment_indices, augmented_preferences, output_file, preference_stats=None):
     """Create a dataset for training a reward model from augmented preferences.
     
     Args:
@@ -363,6 +482,7 @@ def create_preference_dataset(data, segment_indices, augmented_preferences, outp
         segment_indices: List of (start_idx, end_idx) for each segment
         augmented_preferences: List of (i, j, pref) preference tuples
         output_file: Path to save the dataset
+        preference_stats: Optional dictionary with preference comparison statistics
         
     Returns:
         dict: Preference dataset with segments and labels
@@ -378,13 +498,22 @@ def create_preference_dataset(data, segment_indices, augmented_preferences, outp
         preference_labels.append(pref)
     
     # Convert lists to tensors for better compatibility
-    segment_indices_tensor = torch.tensor(segment_indices) if not isinstance(segment_indices, torch.Tensor) else segment_indices
+    if isinstance(segment_indices, torch.Tensor):
+        segment_indices_tensor = segment_indices.detach().clone()
+    else:
+        segment_indices_tensor = torch.tensor(segment_indices)
     
     # For segment pairs, we need a special approach since it's a list of tuples
-    segment_pairs_tensor = torch.tensor(segment_pairs) if not isinstance(segment_pairs, torch.Tensor) else segment_pairs
+    if isinstance(segment_pairs, torch.Tensor):
+        segment_pairs_tensor = segment_pairs.detach().clone()
+    else:
+        segment_pairs_tensor = torch.tensor(segment_pairs)
     
     # Convert preference labels to tensor
-    preference_labels_tensor = torch.tensor(preference_labels) if not isinstance(preference_labels, torch.Tensor) else preference_labels
+    if isinstance(preference_labels, torch.Tensor):
+        preference_labels_tensor = preference_labels.detach().clone()
+    else:
+        preference_labels_tensor = torch.tensor(preference_labels)
     
     # Create compact data representation with only necessary fields
     compact_data = {}
@@ -397,19 +526,26 @@ def create_preference_dataset(data, segment_indices, augmented_preferences, outp
             # Clone to avoid modifying original data and ensure it's on CPU
             compact_data[field] = data[field].clone().cpu() if isinstance(data[field], torch.Tensor) else data[field]
     
+    # Create metadata including preference statistics if available
+    metadata = {
+        'source_file': data.get('_source_path', 'unknown'),
+        'n_segments': len(segment_indices),
+        'n_pairs': len(preference_labels),
+        'creation_date': time.strftime("%Y-%m-%d %H:%M:%S"),
+        'included_fields': list(compact_data.keys())
+    }
+    
+    # Add preference statistics if available
+    if preference_stats:
+        metadata['preference_stats'] = preference_stats
+    
     # Create standardized dataset structure
     preference_dataset = {
-        'data': compact_data,                # Essential tensor data
-        'segment_indices': segment_indices_tensor,  # Indices for segments
-        'segment_pairs': segment_pairs_tensor,      # Pairs for preference learning 
+        'data': compact_data,                        # Essential tensor data
+        'segment_indices': segment_indices_tensor,   # Indices for segments
+        'segment_pairs': segment_pairs_tensor,       # Pairs for preference learning 
         'preference_labels': preference_labels_tensor,  # Preference labels (1=first preferred, 2=second)
-        'metadata': {
-            'source_file': data.get('_source_path', 'unknown'),
-            'n_segments': len(segment_indices),
-            'n_pairs': len(preference_labels),
-            'creation_date': time.strftime("%Y-%m-%d %H:%M:%S"),
-            'included_fields': list(compact_data.keys())
-        }
+        'metadata': metadata
     }
     
     # Create directory if needed
@@ -737,34 +873,73 @@ def main():
         no_auto_open=args.no_auto_open
     )
     
+    # Calculate preference accuracy statistics
+    preference_stats = {
+        'user_vs_ground_truth': {
+            'total_comparisons': len(user_preferences),
+            'comparable_pairs': 0,
+            'matching_preferences': 0,
+            'accuracy': 0.0
+        }
+    }
+    
+    # Count how many user preferences match ground truth
+    for _, _, user_pref, gt_pref in user_preferences:
+        if gt_pref is not None and user_pref != 0:  # Skip equal or None preferences
+            preference_stats['user_vs_ground_truth']['comparable_pairs'] += 1
+            if user_pref == gt_pref:
+                preference_stats['user_vs_ground_truth']['matching_preferences'] += 1
+    
+    # Calculate accuracy if there were any comparable pairs
+    if preference_stats['user_vs_ground_truth']['comparable_pairs'] > 0:
+        accuracy = (preference_stats['user_vs_ground_truth']['matching_preferences'] / 
+                   preference_stats['user_vs_ground_truth']['comparable_pairs'])
+        preference_stats['user_vs_ground_truth']['accuracy'] = accuracy
+    
     # Save raw preferences
     preferences_file = os.path.join(args.output_dir, "raw_preferences.pkl")
     
     raw_data = {
-        'user_preferences': user_preferences,
-        'cluster_representatives': cluster_representatives
+        'user_preferences': user_preferences,  # Now includes ground truth
+        'cluster_representatives': cluster_representatives,
+        'preference_stats': preference_stats
     }
     
     torch.save(raw_data, preferences_file)
     print(f"Saved raw preferences to {preferences_file}")
     
     # Derive cluster ranking
-    cluster_ranking = derive_cluster_ranking(user_preferences)
+    user_ranking, gt_ranking = derive_cluster_ranking(user_preferences)
     
-    # Generate augmented preferences
+    # Store ranking comparison in preference stats
+    preference_stats['rankings'] = {
+        'user_ranking': user_ranking,
+        'ground_truth_ranking': gt_ranking
+    }
+    
+    # Generate augmented preferences (using user ranking by default)
     augmented_preferences = generate_augmented_preferences(
-        data, clusters, segment_indices, cluster_ranking
+        data, clusters, segment_indices, user_ranking
     )
     
     # Create preference dataset
     dataset_file = os.path.join(args.output_dir, "preference_dataset.pkl")
     preference_dataset = create_preference_dataset(
-        data, segment_indices, augmented_preferences, dataset_file
+        data, segment_indices, augmented_preferences, dataset_file, 
+        preference_stats=preference_stats  # Include stats in metadata
     )
     
     print("Process complete!")
     print(f"Collected {len(user_preferences)} direct user preferences")
     print(f"Generated {len(augmented_preferences)} augmented preferences")
+    
+    # Print preference accuracy summary
+    if preference_stats['user_vs_ground_truth']['comparable_pairs'] > 0:
+        print("\nUser preference vs. ground truth summary:")
+        print(f"  Total comparable preferences: {preference_stats['user_vs_ground_truth']['comparable_pairs']}")
+        print(f"  Matching preferences: {preference_stats['user_vs_ground_truth']['matching_preferences']}")
+        print(f"  Accuracy: {preference_stats['user_vs_ground_truth']['accuracy']:.2%}")
+    
     print(f"Results saved to {args.output_dir}")
 
 if __name__ == "__main__":
