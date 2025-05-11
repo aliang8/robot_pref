@@ -320,123 +320,205 @@ def plot_algorithm_comparisons(df, output_dir="algorithm_plots"):
     
     print(f"Using {len(df_filtered)} runs with valid metrics out of {len(df)} total runs")
     
-    # Group and analyze data
-    stats = group_and_analyze(df_filtered)
+    # Define metrics to plot
+    metrics_to_plot = [
+        {"column": "top_eval_success_1", "title": "Top 1 Checkpoint Success Rate"},
+        {"column": "top_eval_success_2", "title": "Top 2 Checkpoint Success Rate"},
+        {"column": "top_eval_success_3", "title": "Top 3 Checkpoint Success Rate"},
+        {"column": "top3_avg_eval_success_rate", "title": "Average of Top 3 Checkpoints Success Rate"}
+    ]
     
-    # Check if we have any data to plot
-    if len(stats) == 0:
-        print("No data to plot after grouping. Cannot generate plots.")
-        return output_dir
+    # Get unique datasets
+    datasets = df_filtered["dataset"].unique()
     
-    # Get unique datasets and algorithms
-    datasets = stats["dataset"].unique()
-    algorithms = stats["algorithm"].unique()
-    
-    print(f"Found {len(datasets)} datasets and {len(algorithms)} algorithms to plot")
+    print(f"Found {len(datasets)} datasets to plot")
     
     # Set up the style
     sns.set_style("whitegrid")
     plt.rcParams.update({'font.size': 12})
     
-    # Create a plot for each dataset
-    for dataset in datasets:
-        dataset_stats = stats[stats["dataset"] == dataset]
+    # For each metric, create plots for each dataset
+    for metric in metrics_to_plot:
+        metric_column = metric["column"]
+        metric_title = metric["title"]
         
-        # Skip if we only have one algorithm
-        if len(dataset_stats) <= 1:
-            print(f"Skipping {dataset} - only has {len(dataset_stats)} algorithm")
+        # Skip if metric is not available in dataframe
+        if metric_column not in df_filtered.columns:
+            print(f"Metric {metric_column} not found in dataframe. Skipping.")
             continue
             
-        # Sort by mean performance (descending)
-        dataset_stats = dataset_stats.sort_values("mean", ascending=False)
+        # Group and analyze for this specific metric
+        grouped = df_filtered.groupby(["dataset", "algorithm"])
         
-        # Set up the figure
-        plt.figure(figsize=(12, 6))
+        # Calculate statistics for the current metric
+        stats = grouped[metric_column].agg([
+            ("mean", np.mean),
+            ("std", np.std),
+            ("min", np.min),
+            ("max", np.max),
+            ("count", "count"),
+            ("median", np.median)
+        ]).reset_index()
         
-        # Create bar plot with error bars
-        ax = sns.barplot(
-            x="algorithm", 
-            y="mean", 
-            data=dataset_stats,
-            palette="viridis",
-            alpha=0.8
-        )
+        # Add 95% confidence interval
+        stats["ci_95"] = 1.96 * stats["std"] / np.sqrt(stats["count"].clip(1))
         
-        # Add error bars for standard deviation
-        for i, row in enumerate(dataset_stats.itertuples()):
-            plt.errorbar(
-                i, row.mean, 
-                yerr=row.std, 
-                fmt='none', 
-                ecolor='black', 
-                capsize=5
+        # Round statistics for readability
+        for col in ["mean", "std", "min", "max", "median", "ci_95"]:
+            stats[col] = stats[col].round(3)
+        
+        # Create a plot for each dataset
+        for dataset in datasets:
+            dataset_stats = stats[stats["dataset"] == dataset]
+            
+            # Skip if no data for this dataset
+            if len(dataset_stats) == 0:
+                continue
+                
+            # Sort by mean performance (descending)
+            dataset_stats = dataset_stats.sort_values("mean", ascending=False)
+            
+            # Set up the figure
+            plt.figure(figsize=(12, 6))
+            
+            # Create bar plot with error bars
+            ax = sns.barplot(
+                x="algorithm", 
+                y="mean", 
+                data=dataset_stats,
+                palette="viridis",
+                alpha=0.8
             )
-        
-        # Add data labels on top of bars
-        for i, row in enumerate(dataset_stats.itertuples()):
-            plt.text(
-                i, row.mean + 0.02, 
-                f"{row.mean:.3f}±{row.std:.3f}\nn={row.count}", 
-                ha='center', 
-                va='bottom',
-                fontsize=10
-            )
-        
-        # Add a title and labels
-        plt.title(f"Algorithm Performance on {dataset} Dataset\n(Average of Top 3 Checkpoints Success Rate)")
-        plt.ylabel("Success Rate")
-        plt.xlabel("Algorithm")
-        
-        # Add gridlines for readability
-        plt.grid(axis='y', linestyle='--', alpha=0.7)
-        
-        # Adjust the y-axis to start at 0 and have some headroom
-        max_value = dataset_stats["mean"].max() + dataset_stats["std"].max()
-        plt.ylim(0, min(1.0, max_value * 1.2))
-        
-        # Save the figure
-        safe_dataset = str(dataset).replace("/", "_")
-        plt.tight_layout()
-        output_path = os.path.join(output_dir, f"{safe_dataset}_comparison.png")
-        plt.savefig(output_path, dpi=300, bbox_inches='tight')
-        print(f"Saved plot to {output_path}")
-        plt.close()
+            
+            # Add error bars for standard deviation
+            for i, row in enumerate(dataset_stats.itertuples()):
+                plt.errorbar(
+                    i, row.mean, 
+                    yerr=row.std, 
+                    fmt='none', 
+                    ecolor='black', 
+                    capsize=5
+                )
+            
+            # Add data labels on top of bars
+            for i, row in enumerate(dataset_stats.itertuples()):
+                plt.text(
+                    i, row.mean + 0.02, 
+                    f"{row.mean:.3f}±{row.std:.3f}\nn={row.count}", 
+                    ha='center', 
+                    va='bottom',
+                    fontsize=10
+                )
+            
+            # Add a title and labels
+            plt.title(f"Algorithm Performance on {dataset} Dataset\n({metric_title})")
+            plt.ylabel("Success Rate")
+            plt.xlabel("Algorithm")
+            
+            # Add gridlines for readability
+            plt.grid(axis='y', linestyle='--', alpha=0.7)
+            
+            # Adjust the y-axis to start at 0 and have some headroom
+            max_value = dataset_stats["mean"].max() + dataset_stats["std"].max()
+            plt.ylim(0, min(1.0, max_value * 1.2))
+            
+            # Save the figure
+            safe_dataset = str(dataset).replace("/", "_")
+            metric_short_name = metric_column.replace("top3_avg_eval_success_rate", "top3_avg").replace("top_eval_success_", "top")
+            plt.tight_layout()
+            output_path = os.path.join(output_dir, f"{safe_dataset}_{metric_short_name}_comparison.png")
+            plt.savefig(output_path, dpi=300, bbox_inches='tight')
+            print(f"Saved {metric_short_name} plot for {dataset} to {output_path}")
+            plt.close()
     
     # Create a summary CSV with algorithm performance by dataset
-    create_algorithm_summary_csv(stats, output_dir)
+    create_algorithm_summary_csv(df_filtered, output_dir)
     
     return output_dir
 
-def create_algorithm_summary_csv(stats, output_dir="algorithm_plots"):
+def create_algorithm_summary_csv(df, output_dir="algorithm_plots"):
     """Create a summary CSV with algorithm performance by dataset."""
-    # Reshape the data for better readability
-    pivot_mean = stats.pivot(index="dataset", columns="algorithm", values="mean")
-    pivot_std = stats.pivot(index="dataset", columns="algorithm", values="std")
-    pivot_count = stats.pivot(index="dataset", columns="algorithm", values="count")
+    # Define metrics to include in summary
+    metrics = [
+        "top_eval_success_1",
+        "top_eval_success_2", 
+        "top_eval_success_3",
+        "top3_avg_eval_success_rate"
+    ]
     
-    # Create a clean CSV with formatted values
+    # Create a clean CSV with formatted values for each metric
     summary_rows = []
     
-    for dataset in pivot_mean.index:
+    # Group by dataset and algorithm
+    grouped = df.groupby(["dataset", "algorithm"])
+    
+    # Get unique datasets and algorithms
+    datasets = df["dataset"].unique()
+    algorithms = df["algorithm"].unique()
+    
+    # For each dataset, create a row in the summary
+    for dataset in datasets:
         row = {"Dataset": dataset}
         
-        for alg in pivot_mean.columns:
-            mean_val = pivot_mean.loc[dataset, alg]
-            std_val = pivot_std.loc[dataset, alg]
-            count_val = pivot_count.loc[dataset, alg]
+        # For each algorithm, calculate statistics for each metric
+        for alg in algorithms:
+            group_data = df[(df["dataset"] == dataset) & (df["algorithm"] == alg)]
             
-            if pd.notna(mean_val):
-                row[f"{alg}_success"] = f"{mean_val:.3f}±{std_val:.3f} (n={int(count_val)})"
-            else:
-                row[f"{alg}_success"] = "N/A"
+            if len(group_data) == 0:
+                # No data for this combination
+                for metric in metrics:
+                    if metric in df.columns:
+                        row[f"{alg}_{metric}"] = "N/A"
+                continue
+                
+            # Calculate statistics for each metric
+            for metric in metrics:
+                if metric in df.columns:
+                    values = group_data[metric].dropna()
+                    
+                    if len(values) > 0:
+                        mean_val = values.mean()
+                        std_val = values.std()
+                        row[f"{alg}_{metric}"] = f"{mean_val:.3f}±{std_val:.3f} (n={len(values)})"
+                    else:
+                        row[f"{alg}_{metric}"] = "N/A"
                 
         summary_rows.append(row)
     
     # Create summary DataFrame and save to CSV
     summary_df = pd.DataFrame(summary_rows)
-    output_path = os.path.join(output_dir, "algorithm_comparison_summary.csv")
+    output_path = os.path.join(output_dir, "algorithm_comparison_detailed.csv")
     summary_df.to_csv(output_path, index=False)
-    print(f"Saved algorithm comparison summary CSV to {output_path}")
+    print(f"Saved detailed algorithm comparison CSV to {output_path}")
+    
+    # Also create a simplified version with just the top3_avg metric
+    simplified_rows = []
+    for dataset in datasets:
+        row = {"Dataset": dataset}
+        
+        for alg in algorithms:
+            group_data = df[(df["dataset"] == dataset) & (df["algorithm"] == alg)]
+            
+            if len(group_data) == 0 or "top3_avg_eval_success_rate" not in df.columns:
+                row[f"{alg}_success"] = "N/A"
+                continue
+                
+            values = group_data["top3_avg_eval_success_rate"].dropna()
+            
+            if len(values) > 0:
+                mean_val = values.mean()
+                std_val = values.std()
+                row[f"{alg}_success"] = f"{mean_val:.3f}±{std_val:.3f} (n={len(values)})"
+            else:
+                row[f"{alg}_success"] = "N/A"
+                
+        simplified_rows.append(row)
+    
+    # Create simplified summary DataFrame and save to CSV
+    simplified_df = pd.DataFrame(simplified_rows)
+    simplified_path = os.path.join(output_dir, "algorithm_comparison_summary.csv")
+    simplified_df.to_csv(simplified_path, index=False)
+    print(f"Saved simplified algorithm comparison summary CSV to {simplified_path}")
     
     return output_path
 

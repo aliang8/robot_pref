@@ -89,45 +89,7 @@ python train_policy.py --config-name=bc data.data_path="/path/to/dataset.pt"
 python train_policy.py --config-name=bc data.data_path="/path/to/dataset.pt" model.learning_rate=1e-4 training.n_epochs=200 evaluation.record_video=true
 ```
 
-## Parallel Evaluation
 
-The codebase supports parallel evaluation of policies for faster performance:
-
-```bash
-# Enable parallel evaluation with 4 processes
-python train_policy.py --config-name=iql data.data_path="/path/to/dataset.pt" evaluation.parallel_eval=true evaluation.eval_workers=4
-
-# Adjust frequency of evaluations
-python train_policy.py --config-name=iql data.data_path="/path/to/dataset.pt" evaluation.parallel_eval=true training.eval_interval=10
-```
-
-Note: The parallel evaluation uses a pickle-safe environment creation mechanism to avoid serialization issues when using multiprocessing. 
-
-
-python train_policy.py --config-name=iql data.use_ground_truth=true data.scale_rewards=True wandb.use_wandb=True data.reward_model_path="/scr/aliang80/robot_pref/reward_model/state_action_reward_model.pt"
-
-
-python train_policy.py --config-name=bc  \
+python train_policy.py --config-name=iql \
     data.data_path="/scr/aliang80/robot_pref/labeled_datasets/buffer_assembly-v2_balanced.pt" \
-
-python train_policy.py --config-name=iql  \
-    data.data_path="/scr/aliang80/robot_pref/labeled_datasets/buffer_assembly-v2_balanced.pt" \
-    data.reward_model_path="
-```
-
-## SLURM Job Submission
-
-The codebase supports running jobs on SLURM clusters while maintaining the same output structure as local runs:
-
-```bash
-# Run with SLURM using the default configuration
-python train_reward_model.py --multirun
-
-# Customize SLURM settings at runtime
-python train_policy.py --config-name=iql hydra.launcher.partition=gpu hydra.launcher.timeout_min=1440
-
-# Run multiple hyperparameter combinations
-python train_policy.py --multirun training.n_epochs=50,100,200 model.actor_learning_rate=1e-4,3e-4
-```
-
-The SLURM configuration can be customized in `config/hydra/launcher.yaml`. Job outputs are stored in the same `outputs/YYYY-MM-DD/HH-MM-SS` directory structure as local runs, with SLURM logs in `.submitit` subdirectories.
+    data.reward_model_path="/scr/aliang80/robot_pref
