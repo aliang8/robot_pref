@@ -479,7 +479,7 @@ def main(cfg: DictConfig):
                                 video_file,
                                 name=f"videos_epoch_{epoch}_{i+1}",
                                 fps=cfg.evaluation.video_fps,
-                                prefix="eval"
+                                prefix="eval_rollout"
                             )
                             
                         # Create a grid of videos if we have multiple
@@ -499,7 +499,7 @@ def main(cfg: DictConfig):
                                         grid_video,
                                         name=f"video_grid_epoch_{epoch}",
                                         fps=cfg.evaluation.video_fps,
-                                        prefix="eval"
+                                        prefix="eval_rollout"
                                     )
                             except Exception as e:
                                 print(f"Error creating video grid: {e}")
@@ -690,7 +690,7 @@ def main(cfg: DictConfig):
                                 video_file,
                                 name=f"video_{i+1}",
                                 fps=cfg.evaluation.video_fps,
-                                prefix="final_eval"
+                                prefix="final_rollout"
                             )
                             
                         # Create a grid of videos if we have multiple
@@ -710,7 +710,7 @@ def main(cfg: DictConfig):
                                         grid_video,
                                         name="video_grid",
                                         fps=cfg.evaluation.video_fps,
-                                        prefix="final_eval"
+                                        prefix="final_rollout"
                                     )
                             except Exception as e:
                                 print(f"Error creating final video grid: {e}")
