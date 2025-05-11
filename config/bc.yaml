@@ -29,4 +29,4 @@ output:
 # Wandb configuration specific to BC
 wandb:
   tags: ["bc", "imitation_learning"]
-  notes: "BC policy training with behavioral cloning" 
+  notes: "BC policy training with behavioral cloning"

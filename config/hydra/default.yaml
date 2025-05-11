@@ -1,0 +1,10 @@
+job:
+  name: test
+
+output_subdir: null
+run:
+  dir: ${output.output_dir}
+
+sweep:
+  dir: ${output.output_dir}
+  subdir: ${hydra.job.num}

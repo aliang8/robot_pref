@@ -232,13 +232,13 @@ def plot_reward_grid(episodes, output_dir, grid_size=(3, 3), smooth_window=5):
     plt.savefig(f"{output_dir}/reward_grid.png", dpi=300, bbox_inches='tight')
     plt.close()
 
-def analyze_rewards(data_path, model_path, output_dir, num_episodes=9, device=None):
+def analyze_rewards(data_path, model_path, output_dir=None, num_episodes=9, device=None):
     """Analyze rewards for episodes in the dataset.
     
     Args:
         data_path: Path to the dataset
         model_path: Path to the trained reward model
-        output_dir: Directory to save the plots
+        output_dir: Directory to save the plots. If None, uses the model directory.
         num_episodes: Number of episodes to analyze
         device: Device to run the model on
     """
@@ -247,6 +247,11 @@ def analyze_rewards(data_path, model_path, output_dir, num_episodes=9, device=No
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
     print(f"Using device: {device}")
+    
+    # If output_dir is not provided, use the directory of the model path
+    if output_dir is None:
+        output_dir = os.path.dirname(model_path)
+        print(f"Using model directory for output: {output_dir}")
     
     # Load data
     print(f"Loading data from {data_path}")
@@ -293,8 +298,8 @@ def analyze_rewards(data_path, model_path, output_dir, num_episodes=9, device=No
 def main():
     parser = argparse.ArgumentParser(description="Analyze rewards predicted by a reward model")
     parser.add_argument("--data_path", type=str, default=DEFAULT_DATA_PATHS[0], help="Path to the dataset")
-    parser.add_argument("--model_path", type=str, default="/scr/aliang80/robot_pref/reward_model/state_action_reward_model.pt", help="Path to the trained reward model")
-    parser.add_argument("--output_dir", type=str, default="reward_analysis", help="Directory to save the plots")
+    parser.add_argument("--model_path", type=str, default="/scr/aliang80/robot_pref/models/state_action_reward_model.pt", help="Path to the trained reward model")
+    parser.add_argument("--output_dir", type=str, help="Directory to save the plots (default: same directory as model_path)")
     parser.add_argument("--num_episodes", type=int, default=9, help="Number of episodes to analyze (default: 9 for a 3x3 grid)")
     parser.add_argument("--use_cpu", action="store_true", help="Use CPU instead of CUDA")
     args = parser.parse_args()

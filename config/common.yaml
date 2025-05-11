@@ -13,7 +13,7 @@ training:
 evaluation:
   skip_env_creation: false
   record_video: true
-  parallel_eval: true
+  parallel_eval: false
   eval_workers: null  # null will use min(n_episodes, cpu_count)
   video_fps: 30
 
@@ -27,3 +27,9 @@ wandb:
   project: robot_pref
   entity: clvr
   name: null  # Will be auto-generated if null 
+
+
+defaults:
+  - hydra: default  # set the directory where the output files get saved
+  # - override hydra/hydra_logging: default
+  - override hydra/launcher: slurm

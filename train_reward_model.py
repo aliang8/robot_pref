@@ -698,6 +698,12 @@ def main(cfg: DictConfig):
     # Create output directory
     os.makedirs(cfg.output.output_dir, exist_ok=True)
     
+    # Get dataset name for the subdirectory
+    dataset_name = Path(cfg.data.data_path).stem
+    
+    os.makedirs(cfg.output.output_dir, exist_ok=True)
+    model_dir = cfg.output.output_dir
+    
     # Setup CUDA device
     if cfg.hardware.use_cpu:
         device = torch.device("cpu")
@@ -886,12 +892,14 @@ def main(cfg: DictConfig):
     # Create a descriptive model filename
     dataset_name = Path(cfg.data.data_path).stem
     hidden_dims_str = "_".join(map(str, cfg.model.hidden_dims))
-    model_filename = f"reward_model_{dataset_name}_seg{cfg.data.segment_length}_pairs{cfg.data.num_pairs}_hidden{hidden_dims_str}_epochs{cfg.training.num_epochs}.pt"
     
-    # Save model with descriptive filename
-    model_path = f"{cfg.output.output_dir}/{model_filename}"
+    # Also save a version with more detailed filename for versioning
+    sub_dir = f"{dataset_name}_model_seg{cfg.data.segment_length}_hidden{hidden_dims_str}_epochs{cfg.training.num_epochs}_pairs{cfg.data.num_pairs}"
+    
+    os.makedirs(os.path.join(model_dir, sub_dir), exist_ok=True)
+    model_path = os.path.join(model_dir, sub_dir, "model.pt")
     torch.save(model.state_dict(), model_path)
-    print(f"Model saved to {model_path}")
+    print(f"Model also saved with detailed name: {model_path}")
     
     # Log as wandb artifact
     if cfg.wandb.use_wandb:
@@ -912,7 +920,7 @@ def main(cfg: DictConfig):
             artifact = log_artifact(
                 model_path, 
                 artifact_type="reward_model", 
-                name=f"reward_model_{dataset_name}_seg{cfg.data.segment_length}_pairs{cfg.data.num_pairs}_epochs{cfg.training.num_epochs}", 
+                name=f"{dataset_name}_seg{cfg.data.segment_length}_pairs{cfg.data.num_pairs}_epochs{cfg.training.num_epochs}", 
                 metadata=metadata
             )
             if artifact:
@@ -933,9 +941,8 @@ def main(cfg: DictConfig):
         "config": OmegaConf.to_container(cfg, resolve=True)
     }
     
-    # Save segment info with descriptive filename
-    info_filename = f"reward_model_info_{dataset_name}_seg{cfg.data.segment_length}_pairs{cfg.data.num_pairs}_hidden{hidden_dims_str}_epochs{cfg.training.num_epochs}.pkl"
-    info_path = f"{cfg.output.output_dir}/{info_filename}"
+    info_filename = f"info.pkl"
+    info_path = os.path.join(model_dir, sub_dir, info_filename)
     with open(info_path, "wb") as f:
         pickle.dump(segment_info, f)
     
