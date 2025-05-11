@@ -1,6 +1,9 @@
 import wandb
 import numpy as np
 
+# Track global step for consistent wandb logging
+_global_step = 0
+
 def log_to_wandb(metrics, epoch=None, prefix="", step=None):
     """Log any metrics to wandb with proper prefixing.
     
@@ -13,12 +16,22 @@ def log_to_wandb(metrics, epoch=None, prefix="", step=None):
     Returns:
         bool: True if metrics were logged, False otherwise
     """
+    global _global_step
+    
     if not wandb.run:
         return False
     
     # Use epoch as step if step not specified
     if step is None and epoch is not None:
         step = epoch
+    
+    # If step is still None, use and increment global step
+    if step is None:
+        step = _global_step
+        _global_step += 1
+    else:
+        # Ensure global step is at least as large as the provided step
+        _global_step = max(_global_step, step + 1)
         
     # Ensure prefix ends with / if it's not empty
     if prefix and not prefix.endswith("/"):
@@ -26,18 +39,25 @@ def log_to_wandb(metrics, epoch=None, prefix="", step=None):
     
     # Handle d3rlpy training_metrics format (list of tuples)
     if isinstance(metrics, list) and len(metrics) > 0 and isinstance(metrics[0], tuple) and len(metrics[0]) == 2:
+        # Sort metrics by epoch to ensure increasing steps
+        sorted_metrics = sorted(metrics, key=lambda x: x[0])
+        
         # Log each epoch's metrics separately
-        for epoch, epoch_metrics in metrics:
+        for epoch_val, epoch_metrics in sorted_metrics:
             # Create metrics dict with prefix
             log_dict = {f"{prefix}{k}": v for k, v in epoch_metrics.items() 
                       if isinstance(v, (int, float, np.int64, np.float32, np.float64, np.number))}
             
             # Add epoch
-            log_dict["epoch"] = epoch
+            log_dict["epoch"] = epoch_val
+            
+            # Use current global step for consistent ordering
+            curr_step = _global_step
+            _global_step += 1
             
             # Log to wandb
             if log_dict:
-                wandb.log(log_dict, step=epoch)
+                wandb.log(log_dict, step=curr_step)
         
         print(f"Logged {len(metrics)} epochs of {prefix.rstrip('/')} metrics to wandb")
         return True
@@ -55,13 +75,16 @@ def log_to_wandb(metrics, epoch=None, prefix="", step=None):
             if isinstance(value, (int, float, np.int64, np.float32, np.float64, np.number)):
                 log_dict[f"{prefix}{key}"] = value
         
+        # Use same step for all related logs
+        curr_step = step
+        
         # Log histogram for returns if available
         if "returns" in metrics and isinstance(metrics["returns"], (list, np.ndarray)):
-            wandb.log({f"{prefix}returns_histogram": wandb.Histogram(metrics["returns"])}, step=step)
+            wandb.log({f"{prefix}returns_histogram": wandb.Histogram(metrics["returns"])}, step=curr_step)
         
         # Log to wandb
         if log_dict:
-            wandb.log(log_dict, step=step)
+            wandb.log(log_dict, step=curr_step)
             return True
     
     return False

@@ -1,157 +1,37 @@
 import os
+import time
+import json
 import torch
 import numpy as np
+from pathlib import Path
 import random
 from tqdm import tqdm
-import pickle
-import metaworld
-import d3rlpy
-from d3rlpy.algos import IQL, BC
-from d3rlpy.datasets import MDPDataset
-from d3rlpy.metrics.scorer import evaluate_on_environment
-from d3rlpy.models.encoders import VectorEncoderFactory
-from pathlib import Path
-import time
 import hydra
 from omegaconf import DictConfig, OmegaConf
 import wandb
 import matplotlib.pyplot as plt
 import glob
+from sklearn.preprocessing import StandardScaler
+
+# Import d3rlpy components
+from d3rlpy.dataset import MDPDataset
+from d3rlpy.algos import IQL, DiscreteBC, BC
+from d3rlpy.metrics.scorer import evaluate_on_environment
+from d3rlpy.models.encoders import VectorEncoderFactory
 
 # Import utility functions
-from trajectory_utils import (
-    RANDOM_SEED,
-    load_tensordict
-)
-
-# Import reward models
-from train_reward_model import SegmentRewardModel
-
-# Import evaluation and rendering utilities
-from utils.eval_utils import (
-    evaluate_policy_manual,
-    custom_evaluate_on_environment
-)
-
-# Import environment utilities
-from utils.env_utils import (
-    get_metaworld_env,
-    MetaWorldEnvCreator
-)
-
-# Import visualization utilities
-from utils.viz import create_video_grid
-
-# Import data utilities
-from utils.data_utils import AttrDict
-
-# Import callback utilities
+from trajectory_utils import load_tensordict, RANDOM_SEED
+from utils.env_utils import MetaWorldEnvCreator
 from utils.callbacks import WandbCallback, CompositeCallback
-
-# Import wandb utilities
 from utils.wandb_utils import log_to_wandb
+from utils.eval_utils import evaluate_policy_manual, custom_evaluate_on_environment
+from utils.data_utils import AttrDict
+from train_reward_model import SegmentRewardModel
 
 # Set seed for reproducibility
 torch.manual_seed(RANDOM_SEED)
 np.random.seed(RANDOM_SEED)
 random.seed(RANDOM_SEED)
-
-def create_mdp_dataset_with_sa_reward(data, reward_model, device, max_segments=1000, batch_size=32):
-    """Create an MDP dataset with rewards predicted by a state-action reward model.
-    
-    Args:
-        data: TensorDict with observations, actions, and episode IDs
-        reward_model: Trained reward model to predict rewards
-        device: Device to run the reward model on
-        max_segments: Maximum number of segments to process (None for all)
-        batch_size: Batch size for processing
-        
-    Returns:
-        d3rlpy MDPDataset with predicted rewards
-    """
-    # Extract necessary data
-    observations = data["obs"] if "obs" in data else data["state"]
-    actions = data["action"]
-    episode_ids = data["episode"]
-    
-    # Make sure data is on CPU for preprocessing
-    observations = observations.cpu()
-    actions = actions.cpu()
-    episode_ids = episode_ids.cpu()
-    
-    # Filter out observations with NaN values
-    valid_mask = ~torch.isnan(observations).any(dim=1) & ~torch.isnan(actions).any(dim=1)
-    
-    if not valid_mask.any():
-        raise ValueError("No valid observations found in the dataset.")
-    
-    # Extract valid data
-    valid_obs = observations[valid_mask]
-    valid_actions = actions[valid_mask]
-    valid_episodes = episode_ids[valid_mask]
-    
-    print(f"Using {valid_obs.shape[0]} valid observations out of {observations.shape[0]} total")
-    
-    # Process in manageable batches to avoid memory issues
-    process_batch_size = 1024  # Batch size for processing through reward model
-    all_rewards = []
-    
-    # Compute rewards using the trained reward model
-    reward_model.eval()  # Ensure model is in evaluation mode
-    
-    with torch.no_grad():
-        for start_idx in tqdm(range(0, len(valid_obs), process_batch_size), desc="Computing rewards"):
-            end_idx = min(start_idx + process_batch_size, len(valid_obs))
-            
-            # Move batch to device
-            batch_obs = valid_obs[start_idx:end_idx].to(device)
-            batch_actions = valid_actions[start_idx:end_idx].to(device)
-            
-            # Compute rewards, need the per step reward not the summed reward
-            batch_rewards = reward_model.reward_model(batch_obs, batch_actions).cpu().numpy()
-            
-            # Ensure proper shape for concatenation
-            if np.isscalar(batch_rewards) or (hasattr(batch_rewards, 'shape') and batch_rewards.shape == ()):
-                batch_rewards = np.array([batch_rewards])
-                
-            all_rewards.append(batch_rewards)
-    
-    # Combine all rewards
-    if len(all_rewards) == 1:
-        rewards = all_rewards[0]
-    else:
-        rewards = np.concatenate(all_rewards)
-    
-    # Create terminals array (True at the end of each episode)
-    episode_ends = torch.cat([
-        valid_episodes[1:] != valid_episodes[:-1],
-        torch.tensor([True])  # Last observation is always an episode end
-    ])
-    terminals = episode_ends.numpy()
-    
-    # Convert to numpy for d3rlpy
-    observations_np = valid_obs.numpy()
-    actions_np = valid_actions.numpy()
-    
-    # Create MDPDataset with learned rewards
-    dataset = MDPDataset(
-        observations=observations_np,
-        actions=actions_np,
-        rewards=rewards,
-        terminals=terminals
-    )
-    
-    # Print final dataset statistics
-    print(f"Final dataset size: {dataset.size()} transitions with {dataset.size() - np.sum(terminals)} non-terminal transitions")
-    reward_stats = {
-        'mean': np.mean(rewards),
-        'std': np.std(rewards),
-        'min': np.min(rewards),
-        'max': np.max(rewards)
-    }
-    print(f"Reward statistics: mean={reward_stats['mean']:.4f}, std={reward_stats['std']:.4f}, min={reward_stats['min']:.4f}, max={reward_stats['max']:.4f}")
-    
-    return dataset
 
 def get_d3rlpy_experiment_path(base_logdir, experiment_name, with_timestamp=True):
     """Find the experiment directory in d3rlpy's logs.
@@ -189,6 +69,122 @@ def get_d3rlpy_experiment_path(base_logdir, experiment_name, with_timestamp=True
             return experiment_dir
     
     return None
+
+def load_dataset(data, reward_model=None, device=None, use_ground_truth=False, max_segments=None, reward_batch_size=32):
+    """Load and process dataset for either IQL or BC training.
+    
+    Args:
+        data: TensorDict with observations, actions, rewards, and episode IDs
+        reward_model: Trained reward model (required for IQL, None for BC)
+        device: Device to run the reward model on (required for IQL)
+        use_ground_truth: If True, use ground truth rewards for IQL instead of reward model predictions
+        max_segments: Maximum number of segments to process (optional)
+        reward_batch_size: Batch size for reward computation (for IQL)
+        
+    Returns:
+        d3rlpy MDPDataset with observations, actions, rewards, and terminals
+    """
+    # Extract necessary data
+    observations = data["obs"] if "obs" in data else data["state"]
+    actions = data["action"]
+    episode_ids = data["episode"]
+    
+    # For BC or ground truth rewards, extract original rewards
+    if reward_model is None or use_ground_truth:
+        if "reward" not in data:
+            raise ValueError("Ground truth rewards requested but 'reward' not found in data.")
+        rewards = data["reward"].cpu()
+        if use_ground_truth:
+            print("Using ground truth rewards from data instead of reward model predictions.")
+    
+    # Make sure data is on CPU for preprocessing
+    observations = observations.cpu()
+    actions = actions.cpu()
+    episode_ids = episode_ids.cpu()
+    
+    # Filter out observations with NaN values
+    valid_mask = ~torch.isnan(observations).any(dim=1) & ~torch.isnan(actions).any(dim=1)
+    if reward_model is None or use_ground_truth:
+        valid_mask = valid_mask & ~torch.isnan(rewards)
+    
+    if not valid_mask.any():
+        raise ValueError("No valid observations found in the dataset.")
+    
+    # Extract valid data
+    valid_obs = observations[valid_mask]
+    valid_actions = actions[valid_mask]
+    valid_episodes = episode_ids[valid_mask]
+    
+    if reward_model is None or use_ground_truth:
+        valid_rewards = rewards[valid_mask].numpy()
+    
+    print(f"Using {valid_obs.shape[0]} valid observations out of {observations.shape[0]} total")
+    
+    # Process rewards based on algorithm and options
+    if reward_model is not None and not use_ground_truth:
+        # IQL with reward model - Process in manageable batches
+        process_batch_size = reward_batch_size or 1024
+        all_rewards = []
+        
+        # Compute rewards using the trained reward model
+        reward_model.eval()  # Ensure model is in evaluation mode
+        
+        with torch.no_grad():
+            for start_idx in tqdm(range(0, len(valid_obs), process_batch_size), desc="Computing rewards"):
+                end_idx = min(start_idx + process_batch_size, len(valid_obs))
+                
+                # Move batch to device
+                batch_obs = valid_obs[start_idx:end_idx].to(device)
+                batch_actions = valid_actions[start_idx:end_idx].to(device)
+                
+                # Compute rewards, need the per step reward not the summed reward
+                batch_rewards = reward_model.reward_model(batch_obs, batch_actions).cpu().numpy()
+                
+                # Ensure proper shape for concatenation
+                if np.isscalar(batch_rewards) or (hasattr(batch_rewards, 'shape') and batch_rewards.shape == ()):
+                    batch_rewards = np.array([batch_rewards])
+                    
+                all_rewards.append(batch_rewards)
+        
+        # Combine all rewards
+        if len(all_rewards) == 1:
+            rewards_np = all_rewards[0]
+        else:
+            rewards_np = np.concatenate(all_rewards)
+    else:
+        # BC or IQL with ground truth - use the extracted rewards
+        rewards_np = valid_rewards
+    
+    # Create terminals array (True at the end of each episode)
+    episode_ends = torch.cat([
+        valid_episodes[1:] != valid_episodes[:-1],
+        torch.tensor([True])  # Last observation is always an episode end
+    ])
+    terminals_np = episode_ends.numpy()
+    
+    # Convert to numpy for d3rlpy
+    observations_np = valid_obs.numpy()
+    actions_np = valid_actions.numpy()
+    
+    # Create MDPDataset with the rewards
+    dataset = MDPDataset(
+        observations=observations_np,
+        actions=actions_np,
+        rewards=rewards_np,
+        terminals=terminals_np
+    )
+    
+    # Print final dataset statistics
+    print(f"Final dataset size: {dataset.size()} transitions with {dataset.size() - np.sum(terminals_np)} non-terminal transitions")
+    reward_stats = {
+        'mean': np.mean(rewards_np),
+        'std': np.std(rewards_np),
+        'min': np.min(rewards_np),
+        'max': np.max(rewards_np)
+    }
+    print(f"Reward statistics: mean={reward_stats['mean']:.4f}, std={reward_stats['std']:.4f}, min={reward_stats['min']:.4f}, max={reward_stats['max']:.4f}")
+    
+    return dataset
 
 @hydra.main(config_path="config", config_name="iql")
 def main(cfg: DictConfig):
@@ -263,56 +259,25 @@ def main(cfg: DictConfig):
         reward_model.eval()
         print(f"Loaded reward model from {cfg.data.reward_model_path}")
         
-        # Create MDP dataset with learned rewards
-        print("Creating MDP dataset with learned rewards...")
-        dataset = create_mdp_dataset_with_sa_reward(
+        # Check if we should use ground truth rewards
+        use_ground_truth = cfg.data.get('use_ground_truth', False)
+        if use_ground_truth:
+            print("Using ground truth rewards instead of reward model predictions.")
+        
+        # Create MDP dataset
+        print("Creating MDP dataset with rewards...")
+        dataset = load_dataset(
             data, 
-            reward_model, 
-            device, 
+            reward_model=reward_model, 
+            device=device, 
+            use_ground_truth=use_ground_truth,
             max_segments=cfg.data.max_segments,
-            batch_size=cfg.data.reward_batch_size
+            reward_batch_size=cfg.data.reward_batch_size
         )
     else:  # BC or other algorithms that don't need a reward model
-        # For BC, we can directly use the demonstrations without modifying rewards
+        # For BC, we can directly use the demonstrations
         print("Creating MDP dataset from demonstrations...")
-        # Extract data ensuring no NaN values
-        observations = data["obs"] if "obs" in data else data["state"]
-        actions = data["action"]
-        rewards = data["reward"] if "reward" in data else torch.zeros_like(actions[:, 0])
-        episode_ids = data["episode"] if "episode" in data else torch.zeros_like(rewards, dtype=torch.long)
-        
-        # Convert to numpy and handle NaN values
-        observations = observations.cpu().numpy()
-        actions = actions.cpu().numpy()
-        rewards = rewards.cpu().numpy()
-        
-        # Use episode_ids to create terminals
-        episode_ids = episode_ids.cpu().numpy()
-        
-        # Create terminals array (1 at the end of each episode)
-        terminals = np.zeros_like(rewards)
-        episode_ends = np.where(np.diff(episode_ids, prepend=-1) != 0)[0]
-        if len(episode_ends) > 0:
-            terminals[episode_ends - 1] = 1
-        
-        # Filter out NaN values
-        valid_mask = (~np.isnan(observations).any(axis=1)) & (~np.isnan(actions).any(axis=1)) & (~np.isnan(rewards))
-        if not np.all(valid_mask):
-            print(f"Filtering out {np.sum(~valid_mask)} transitions with NaN values")
-            observations = observations[valid_mask]
-            actions = actions[valid_mask]
-            rewards = rewards[valid_mask]
-            terminals = terminals[valid_mask]
-        
-        # Create the dataset
-        dataset = MDPDataset(
-            observations=observations,
-            actions=actions,
-            rewards=rewards,
-            terminals=terminals
-        )
-    
-    print(f"Created dataset with {dataset.size()} transitions")
+        dataset = load_dataset(data)
     
     # Create environment for evaluation
     env = None
@@ -342,12 +307,11 @@ def main(cfg: DictConfig):
             print(f"Error creating environment: {e}")
             print("Evaluation will be skipped.")
             env = None
-
-    # Initialize algorithm based on the algorithm_name
-    print(f"Initializing {algorithm_name.upper()} algorithm...")
-    
+            
+    # Create d3rlpy algorithm
+    print(f"Creating {algorithm_name.upper()} algorithm...")
     if algorithm_name.lower() == "iql":
-        # Initialize IQL algorithm
+        # Create IQL
         algo = IQL(
             actor_learning_rate=cfg.model.actor_learning_rate,
             critic_learning_rate=cfg.model.critic_learning_rate,
@@ -455,8 +419,8 @@ def main(cfg: DictConfig):
                         # Only log a few videos to save space
                         video_data = [wandb.Video(video_file, fps=cfg.evaluation.video_fps, format="mp4") 
                                     for video_file in video_files[:3]]
-                        wandb.log({f"eval/videos_epoch_{epoch}": video_data})
-                        print(f"Logged {len(video_data)} videos to wandb")
+                        # Use log_to_wandb with the same epoch to ensure consistent step
+                        log_to_wandb({f"videos_epoch_{epoch}": video_data}, epoch=epoch, prefix="eval")
                 except Exception as e:
                     print(f"Error logging videos to wandb: {e}")
 
@@ -561,7 +525,7 @@ def main(cfg: DictConfig):
                 plt.tight_layout()
                 
                 # Log to wandb
-                wandb.log({"media/plots/training_losses": wandb.Image(plt)})
+                log_to_wandb({"media/plots/training_losses": wandb.Image(plt)})
                 plt.close()
             except Exception as e:
                 print(f"Warning: Could not create training loss plot: {e}")
@@ -614,7 +578,8 @@ def main(cfg: DictConfig):
                         # Upload up to 3 videos to save space
                         video_data = [wandb.Video(video_file, fps=cfg.evaluation.video_fps, format="mp4") 
                                      for video_file in video_files[:3]]
-                        wandb.log({"final_eval/videos": video_data})
+                        # Use log_to_wandb for consistent step handling
+                        log_to_wandb({"videos": video_data}, prefix="final_eval")
                 except Exception as e:
                     print(f"Error logging final videos to wandb: {e}")
     
