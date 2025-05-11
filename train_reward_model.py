@@ -17,37 +17,11 @@ import wandb
 
 # Import utility functions
 from trajectory_utils import (
-    RANDOM_SEED,
     load_tensordict,
     create_segments,
     sample_segment_pairs
 )
-from utils.wandb_utils import log_to_wandb, log_artifact, reset_global_step
-
-# Set seed for reproducibility
-torch.manual_seed(RANDOM_SEED)
-np.random.seed(RANDOM_SEED)
-random.seed(RANDOM_SEED)
-
-# Set up CUDA memory management for better stability
-if torch.cuda.is_available():
-    torch.cuda.manual_seed(RANDOM_SEED)
-    torch.cuda.manual_seed_all(RANDOM_SEED)  # For multi-GPU
-    # Set deterministic behavior
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
-    
-    # Reduce memory fragmentation
-    torch.cuda.empty_cache()
-    # Use more aggressive memory caching if available (PyTorch 1.11+)
-    if hasattr(torch.cuda, 'memory_stats'):
-        print("Enabling memory_stats for better CUDA memory management")
-        torch.cuda.memory_stats(device=None)
-    # Set memory allocation strategy to avoid fragmentation
-    if hasattr(torch.cuda, 'set_per_process_memory_fraction'):
-        # Use 80% of available memory to leave room for system
-        torch.cuda.set_per_process_memory_fraction(0.8, 0)
-        print("Set CUDA memory fraction to 80%")
+from utils.wandb_utils import log_to_wandb, log_artifact
 
 class StateActionRewardModel(nn.Module):
     """MLP-based reward model that takes state and action as input."""
@@ -319,7 +293,7 @@ def bradley_terry_loss(rewards1, rewards2, preferences):
     
     return loss
 
-def create_data_loaders(preference_dataset, train_ratio=0.8, val_ratio=0.1, batch_size=32, num_workers=4, pin_memory=True, seed=RANDOM_SEED):
+def create_data_loaders(preference_dataset, train_ratio=0.8, val_ratio=0.1, batch_size=32, num_workers=4, pin_memory=True, seed=42):
     """Create data loaders for training, validation, and testing.
     
     Args:
@@ -670,6 +644,33 @@ def main(cfg: DictConfig):
     print("\nConfiguration:")
     print(OmegaConf.to_yaml(cfg))
     
+    # Set random seed for reproducibility
+    random_seed = cfg.get('random_seed', 42)
+    torch.manual_seed(random_seed)
+    np.random.seed(random_seed)
+    random.seed(random_seed)
+    
+    # Also set CUDA seeds if available
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(random_seed)
+        torch.cuda.manual_seed_all(random_seed)  # For multi-GPU
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+        
+        # Reduce memory fragmentation
+        torch.cuda.empty_cache()
+        # Use more aggressive memory caching if available (PyTorch 1.11+)
+        if hasattr(torch.cuda, 'memory_stats'):
+            print("Enabling memory_stats for better CUDA memory management")
+            torch.cuda.memory_stats(device=None)
+        # Set memory allocation strategy to avoid fragmentation
+        if hasattr(torch.cuda, 'set_per_process_memory_fraction'):
+            # Use 80% of available memory to leave room for system
+            torch.cuda.set_per_process_memory_fraction(0.8, 0)
+            print("Set CUDA memory fraction to 80%")
+            
+    print(f"Using random seed: {random_seed}")
+    
     # Initialize wandb
     if cfg.wandb.use_wandb:
         # Generate experiment name based on data path
@@ -689,9 +690,6 @@ def main(cfg: DictConfig):
             tags=cfg.wandb.tags,
             notes=cfg.wandb.notes
         )
-        
-        # Reset global step counter to ensure clean start
-        reset_global_step(0)
         
         print(f"Wandb initialized: {wandb.run.name}")
     
@@ -823,7 +821,7 @@ def main(cfg: DictConfig):
         batch_size=cfg.training.batch_size,
         num_workers=effective_num_workers,
         pin_memory=effective_pin_memory,
-        seed=RANDOM_SEED
+        seed=random_seed  # Use the same random seed
     )
     
     train_loader = dataloaders['train']

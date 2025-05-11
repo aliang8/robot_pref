@@ -11,16 +11,10 @@ import random
 # Import utility functions
 from trajectory_utils import (
     DEFAULT_DATA_PATHS,
-    RANDOM_SEED,
     load_tensordict
 )
 
 from train_reward_model import SegmentRewardModel
-
-# Set seed for reproducibility
-torch.manual_seed(RANDOM_SEED)
-np.random.seed(RANDOM_SEED)
-random.seed(RANDOM_SEED)
 
 def split_into_episodes(data):
     """Split data into episodes based on episode IDs.
@@ -232,7 +226,7 @@ def plot_reward_grid(episodes, output_dir, grid_size=(3, 3), smooth_window=5):
     plt.savefig(f"{output_dir}/reward_grid.png", dpi=300, bbox_inches='tight')
     plt.close()
 
-def analyze_rewards(data_path, model_path, output_dir=None, num_episodes=9, device=None):
+def analyze_rewards(data_path, model_path, output_dir=None, num_episodes=9, device=None, random_seed=42):
     """Analyze rewards for episodes in the dataset.
     
     Args:
@@ -241,12 +235,19 @@ def analyze_rewards(data_path, model_path, output_dir=None, num_episodes=9, devi
         output_dir: Directory to save the plots. If None, uses the model directory.
         num_episodes: Number of episodes to analyze
         device: Device to run the model on
+        random_seed: Random seed for reproducibility
     """
+    # Set random seed for reproducibility
+    random.seed(random_seed)
+    np.random.seed(random_seed)
+    torch.manual_seed(random_seed)
+    
     # Set device
     if device is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
     print(f"Using device: {device}")
+    print(f"Using random seed: {random_seed}")
     
     # If output_dir is not provided, use the directory of the model path
     if output_dir is None:
@@ -302,13 +303,14 @@ def main():
     parser.add_argument("--output_dir", type=str, help="Directory to save the plots (default: same directory as model_path)")
     parser.add_argument("--num_episodes", type=int, default=9, help="Number of episodes to analyze (default: 9 for a 3x3 grid)")
     parser.add_argument("--use_cpu", action="store_true", help="Use CPU instead of CUDA")
+    parser.add_argument("--random_seed", type=int, default=42, help="Random seed for reproducibility")
     args = parser.parse_args()
     
     # Set device
     device = torch.device("cpu" if args.use_cpu else "cuda")
     
     # Run analysis
-    analyze_rewards(args.data_path, args.model_path, args.output_dir, args.num_episodes, device)
+    analyze_rewards(args.data_path, args.model_path, args.output_dir, args.num_episodes, device, args.random_seed)
 
 if __name__ == "__main__":
     main() 

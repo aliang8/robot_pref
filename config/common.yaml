@@ -1,5 +1,8 @@
 # Common settings shared across different algorithms
 
+# Random seed for reproducibility
+random_seed: 42
+
 # Data parameters
 data:
   env_name: "assembly-v2-goal-observable"  # The exact MetaWorld environment name to use

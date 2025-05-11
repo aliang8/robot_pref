@@ -11,28 +11,26 @@ from omegaconf import DictConfig, OmegaConf
 import wandb
 import matplotlib.pyplot as plt
 import glob
-from sklearn.preprocessing import StandardScaler
 
 # Import d3rlpy components
 from d3rlpy.dataset import MDPDataset
-from d3rlpy.algos import IQL, DiscreteBC, BC
+from d3rlpy.algos import IQL, BC
 from d3rlpy.metrics.scorer import evaluate_on_environment
 from d3rlpy.models.encoders import VectorEncoderFactory
 
 # Import utility functions
-from trajectory_utils import load_tensordict, RANDOM_SEED
+from trajectory_utils import load_tensordict
 from utils.env_utils import MetaWorldEnvCreator
 from utils.callbacks import WandbCallback, CompositeCallback
-from utils.wandb_utils import log_to_wandb, reset_global_step
+from utils.wandb_utils import log_to_wandb
 from utils.eval_utils import evaluate_policy_manual, custom_evaluate_on_environment
 from utils.data_utils import AttrDict
 from utils.viz import create_video_grid
 from train_reward_model import SegmentRewardModel
 
-# Set seed for reproducibility
-torch.manual_seed(RANDOM_SEED)
-np.random.seed(RANDOM_SEED)
-random.seed(RANDOM_SEED)
+def is_valid_video_file(file_path):
+    """Simple check if a video file exists and is valid."""
+    return os.path.exists(file_path) and os.path.getsize(file_path) > 0
 
 def get_d3rlpy_experiment_path(base_logdir, experiment_name, with_timestamp=True):
     """Find the experiment directory in d3rlpy's logs.
@@ -232,6 +230,13 @@ def main(cfg: DictConfig):
     print("\nConfiguration:")
     print(OmegaConf.to_yaml(OmegaConf.create(cfg_dict)))
     
+    # Set random seed for reproducibility
+    random_seed = cfg.get('random_seed', 42)
+    torch.manual_seed(random_seed)
+    np.random.seed(random_seed)
+    random.seed(random_seed)
+    print(f"Using random seed: {random_seed}")
+    
     # Initialize wandb
     if cfg.wandb.use_wandb:
         # Generate experiment name based on data path
@@ -251,9 +256,6 @@ def main(cfg: DictConfig):
             tags=cfg.wandb.tags if hasattr(cfg.wandb, 'tags') else [algorithm_name],
             notes=cfg.wandb.notes
         )
-        
-        # Reset global step counter to ensure clean start
-        reset_global_step(0)
         
         print(f"Wandb initialized: {wandb.run.name}")
     
@@ -461,50 +463,37 @@ def main(cfg: DictConfig):
         eval_metrics_with_best = wandb_callback.update_eval_metrics(metrics, epoch)
         evaluation_results.append((epoch, eval_metrics_with_best))
         
-        # Log to wandb if enabled
+        # Log metrics to wandb if enabled
         if cfg.wandb.use_wandb:
-            log_to_wandb(eval_metrics_with_best, epoch=epoch, prefix="eval")
+            log_to_wandb(eval_metrics_with_best, prefix="eval", epoch=epoch)
             
-            # Log video paths if videos were recorded
+            # Log video grid if videos were recorded
             if video_recording and video_path and wandb.run:
-                # Try to find and upload videos
                 try:
                     video_files = glob.glob(f"{video_path}*.mp4")
-                    print(f"Found {len(video_files)} video files: {video_files}")
+                    # Filter out invalid video files
+                    valid_video_files = [f for f in video_files if is_valid_video_file(f)]
+                    print(f"Found {len(valid_video_files)} valid video files out of {len(video_files)}")
                     
-                    if video_files:
-                        # Log individual videos (maximum 3)
-                        for i, video_file in enumerate(video_files[:3]):
-                            wandb_callback.log_video(
-                                video_file,
-                                name=f"videos_epoch_{epoch}_{i+1}",
-                                fps=cfg.evaluation.video_fps,
-                                prefix="eval_rollout"
+                    # Create a grid of videos if we have multiple
+                    if len(valid_video_files) > 1:
+                        print("Creating video grid from evaluation videos...")
+                        grid_path = f"{os.path.dirname(video_path)}/eval_grid_epoch_{epoch}.mp4"
+                        try:
+                            grid_video = create_video_grid(
+                                valid_video_files, 
+                                grid_path, 
+                                max_videos=6, 
+                                fps=cfg.evaluation.video_fps
                             )
-                            
-                        # Create a grid of videos if we have multiple
-                        if len(video_files) > 1:
-                            print("Creating video grid from evaluation videos...")
-                            grid_path = f"{os.path.dirname(video_path)}/eval_grid_epoch_{epoch}.mp4"
-                            try:
-                                grid_video = create_video_grid(
-                                    video_files, 
-                                    grid_path, 
-                                    max_videos=6, 
-                                    fps=cfg.evaluation.video_fps
-                                )
-                                if grid_video:
-                                    # Log the grid video
-                                    wandb_callback.log_video(
-                                        grid_video,
-                                        name=f"video_grid_epoch_{epoch}",
-                                        fps=cfg.evaluation.video_fps,
-                                        prefix="eval_rollout"
-                                    )
-                            except Exception as e:
-                                print(f"Error creating video grid: {e}")
+                            if grid_video and is_valid_video_file(grid_video):
+                                # Log the grid video
+                                video_obj = wandb.Video(grid_video, fps=cfg.evaluation.video_fps, format="mp4")
+                                log_to_wandb({"video_grid": video_obj}, prefix="eval")
+                        except Exception as e:
+                            print(f"Error creating video grid: {e}")
                 except Exception as e:
-                    print(f"Error logging videos to wandb: {e}")
+                    print(f"Error handling videos: {e}")
 
     # Create a combined callback that handles both wandb logging and evaluation
     composite_callback = CompositeCallback([
@@ -673,49 +662,37 @@ def main(cfg: DictConfig):
               f"Success rate = {evaluation_metrics['success_rate']:.2f}, " +
               f"Episodes = {evaluation_metrics['num_episodes']}")
         
-        # Log final results to wandb
+        # Log final evaluation results to wandb and final video grid only
         if cfg.wandb.use_wandb:
             log_to_wandb(evaluation_metrics, prefix="final_eval")
             
-            # Log videos if available
+            # Log video grid if available
             if video_recording and video_path and wandb.run:
                 try:
                     video_files = glob.glob(f"{video_path}*.mp4")
-                    print(f"Found {len(video_files)} final evaluation video files")
+                    # Filter out invalid video files
+                    valid_video_files = [f for f in video_files if is_valid_video_file(f)]
+                    print(f"Found {len(valid_video_files)} valid video files out of {len(video_files)}")
                     
-                    if video_files:
-                        # Upload up to 3 videos
-                        for i, video_file in enumerate(video_files[:3]):
-                            wandb_callback.log_video(
-                                video_file,
-                                name=f"video_{i+1}",
-                                fps=cfg.evaluation.video_fps,
-                                prefix="final_rollout"
+                    # Create a grid of videos if we have multiple
+                    if len(valid_video_files) > 1:
+                        print("Creating video grid from final evaluation videos...")
+                        grid_path = f"{os.path.dirname(video_path)}/final_eval_grid.mp4"
+                        try:
+                            grid_video = create_video_grid(
+                                valid_video_files, 
+                                grid_path, 
+                                max_videos=6, 
+                                fps=cfg.evaluation.video_fps
                             )
-                            
-                        # Create a grid of videos if we have multiple
-                        if len(video_files) > 1:
-                            print("Creating video grid from final evaluation videos...")
-                            grid_path = f"{os.path.dirname(video_path)}/final_eval_grid.mp4"
-                            try:
-                                grid_video = create_video_grid(
-                                    video_files, 
-                                    grid_path, 
-                                    max_videos=6, 
-                                    fps=cfg.evaluation.video_fps
-                                )
-                                if grid_video:
-                                    # Log the grid video
-                                    wandb_callback.log_video(
-                                        grid_video,
-                                        name="video_grid",
-                                        fps=cfg.evaluation.video_fps,
-                                        prefix="final_rollout"
-                                    )
-                            except Exception as e:
-                                print(f"Error creating final video grid: {e}")
+                            if grid_video and is_valid_video_file(grid_video):
+                                # Log the grid video
+                                video_obj = wandb.Video(grid_video, fps=cfg.evaluation.video_fps, format="mp4")
+                                log_to_wandb({"video_grid": video_obj}, prefix="final_eval")
+                        except Exception as e:
+                            print(f"Error creating final video grid: {e}")
                 except Exception as e:
-                    print(f"Error logging final videos to wandb: {e}")
+                    print(f"Error handling final videos: {e}")
     
     print("\nTraining complete!")
 

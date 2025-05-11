@@ -13,12 +13,6 @@ import dtw
 # Set torch hub cache directory
 os.environ['TORCH_HOME'] = '/scr/aliang80/.cache'
 
-# Set random seed for reproducibility
-RANDOM_SEED = 42
-random.seed(RANDOM_SEED)
-np.random.seed(RANDOM_SEED)
-torch.manual_seed(RANDOM_SEED)
-
 # Default data paths for MetaWorld tasks
 DEFAULT_DATA_PATHS = [
     "/scr/shared/clam/datasets/metaworld/assembly-v2/buffer_assembly-v2.pt",
