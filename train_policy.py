@@ -57,207 +57,97 @@ np.random.seed(RANDOM_SEED)
 random.seed(RANDOM_SEED)
 
 def create_mdp_dataset_with_sa_reward(data, reward_model, device, max_segments=1000, batch_size=32):
-    """Create MDPDataset from tensordict data using a state-action reward model.
+    """Create an MDP dataset with rewards predicted by a state-action reward model.
     
     Args:
-        data: TensorDict containing trajectories
-        reward_model: Trained reward model
-        device: Device to use for computation
-        max_segments: Maximum number of segments to sample (0 for all)
-        batch_size: Batch size for reward prediction to speed up processing
+        data: TensorDict with observations, actions, and episode IDs
+        reward_model: Trained reward model to predict rewards
+        device: Device to run the reward model on
+        max_segments: Maximum number of segments to process (None for all)
+        batch_size: Batch size for processing
+        
+    Returns:
+        d3rlpy MDPDataset with predicted rewards
     """
-    # Extract relevant info from data
+    # Extract necessary data
     observations = data["obs"] if "obs" in data else data["state"]
     actions = data["action"]
-    rewards = data["reward"]  # Original rewards (will be replaced with learned rewards)
     episode_ids = data["episode"]
     
-    # Ensure tensors are on CPU for numpy conversion
+    # Make sure data is on CPU for preprocessing
     observations = observations.cpu()
     actions = actions.cpu()
-    rewards = rewards.cpu()
-    episode_ids = episode_ids.cpu().numpy()
+    episode_ids = episode_ids.cpu()
     
-    # Create clean masks to handle NaN values - use vectorized operations
-    print("Creating masks for NaN values...")
-    obs_mask = ~torch.isnan(observations).any(dim=1)
-    action_mask = ~torch.isnan(actions).any(dim=1)
-    reward_mask = ~torch.isnan(rewards)
+    # Filter out observations with NaN values
+    valid_mask = ~torch.isnan(observations).any(dim=1) & ~torch.isnan(actions).any(dim=1)
     
-    # Combined mask for valid transitions
-    valid_mask = obs_mask & action_mask & reward_mask
+    if not valid_mask.any():
+        raise ValueError("No valid observations found in the dataset.")
     
-    # Count NaNs to report
-    total_transitions = len(observations)
-    valid_transitions = valid_mask.sum().item()
-    print(f"Found {total_transitions - valid_transitions} NaN transitions out of {total_transitions} total transitions")
+    # Extract valid data
+    valid_obs = observations[valid_mask]
+    valid_actions = actions[valid_mask]
+    valid_episodes = episode_ids[valid_mask]
     
-    # Split data into episodes
-    unique_episodes = np.unique(episode_ids)
+    print(f"Using {valid_obs.shape[0]} valid observations out of {observations.shape[0]} total")
     
-    all_valid_segments = []
-    
-    # Process each episode to find valid segments
-    for episode_id in tqdm(unique_episodes, desc="Finding valid segments"):
-        # Get episode data
-        episode_mask = (episode_ids == episode_id)
-        # Apply valid mask within this episode
-        episode_valid_mask = valid_mask[episode_mask].numpy()
-        
-        # Skip if no valid transitions in this episode
-        if not np.any(episode_valid_mask):
-            continue
-            
-        # Get valid episode data
-        episode_indices = np.where(episode_mask)[0][episode_valid_mask]
-        
-        # Skip if less than 2 valid transitions (need at least obs-action-obs)
-        if len(episode_indices) < 2:
-            continue
-            
-        # Check for consecutive indices - multiple segments may exist in one episode if NaNs break it up
-        diffs = np.diff(episode_indices)
-        break_points = np.where(diffs > 1)[0]
-        
-        # Process each consecutive segment in this episode
-        start_idx = 0
-        for bp in list(break_points) + [len(episode_indices) - 1]:
-            # Get consecutive segment
-            segment_indices = episode_indices[start_idx:bp+1]
-            
-            # Skip if too short
-            if len(segment_indices) < 2:
-                start_idx = bp + 1
-                continue
-            
-            # Store this valid segment
-            all_valid_segments.append(segment_indices)
-            
-            start_idx = bp + 1
-    
-    print(f"Found {len(all_valid_segments)} valid segments across all episodes")
-    
-    # Subsample segments if we have more than max_segments
-    if max_segments > 0 and len(all_valid_segments) > max_segments:
-        print(f"Subsampling {max_segments} segments from the {len(all_valid_segments)} available")
-        selected_segments = random.sample(all_valid_segments, max_segments)
-    else:
-        selected_segments = all_valid_segments
-    
-    # Prepare for batch processing of rewards
-    all_observations = []
-    all_actions = []
+    # Process in manageable batches to avoid memory issues
+    process_batch_size = 1024  # Batch size for processing through reward model
     all_rewards = []
-    all_terminals = []
     
-    # Process segments in batches for more efficient reward computation
-    reward_model.eval()  # Ensure model is in eval mode
+    # Compute rewards using the trained reward model
+    reward_model.eval()  # Ensure model is in evaluation mode
     
-    # Group segments by similar length to minimize padding
-    segment_lengths = [len(seg) for seg in selected_segments]
-    length_sorted_indices = np.argsort(segment_lengths)
-    
-    # Process in sorted order for better batching efficiency
-    processed_segments = 0
-    segment_batches = []
-    current_batch = []
-    
-    # Group segments with similar lengths together
-    for idx in length_sorted_indices:
-        current_batch.append(selected_segments[idx])
-        if len(current_batch) >= batch_size:
-            segment_batches.append(current_batch)
-            current_batch = []
-    
-    # Add any remaining segments
-    if current_batch:
-        segment_batches.append(current_batch)
-    
-    # Process each batch of segments
-    for batch_idx, segment_batch in enumerate(tqdm(segment_batches, desc="Processing segment batches")):
-        batch_observations = []
-        batch_actions = []
-        batch_terminals = []
-        batch_learned_rewards = []
-        
-        # First extract all observations and actions for current batch
-        for segment_indices in segment_batch:
-            # Get observations and actions for this segment
-            segment_obs = observations[segment_indices]
-            segment_actions = actions[segment_indices[:-1]]  # Last observation has no action
+    with torch.no_grad():
+        for start_idx in tqdm(range(0, len(valid_obs), process_batch_size), desc="Computing rewards"):
+            end_idx = min(start_idx + process_batch_size, len(valid_obs))
             
-            # Check for NaN values
-            if torch.isnan(segment_obs[:-1]).any() or torch.isnan(segment_actions).any():
-                continue
-                
-            # Add observation and action to batch
-            batch_observations.append(segment_obs[:-1])  # Excluding last observation
-            batch_actions.append(segment_actions)
+            # Move batch to device
+            batch_obs = valid_obs[start_idx:end_idx].to(device)
+            batch_actions = valid_actions[start_idx:end_idx].to(device)
             
-            # Create terminal flags (1 for last state in segment)
-            terminals = np.zeros(len(segment_obs) - 1)
-            terminals[-1] = 1
-            batch_terminals.append(terminals)
-        
-        # Skip batch if all segments had NaNs
-        if not batch_observations:
-            continue
+            # Compute rewards, need the per step reward not the summed reward
+            batch_rewards = reward_model.reward_model(batch_obs, batch_actions).cpu().numpy()
             
-        # Compute rewards for all segments in batch at once
-        with torch.no_grad():
-            # Process each segment separately
-            for i in range(len(batch_observations)):
-                segment_obs = batch_observations[i].to(device)
-                segment_actions = batch_actions[i].to(device)
+            # Ensure proper shape for concatenation
+            if np.isscalar(batch_rewards) or (hasattr(batch_rewards, 'shape') and batch_rewards.shape == ()):
+                batch_rewards = np.array([batch_rewards])
                 
-                # Get reward predictions from reward model
-                segment_rewards = []
-                
-                # Process in smaller sub-batches if the segment is very large
-                sub_batch_size = 1024  # Memory efficient sub-batch size
-                
-                for j in range(0, len(segment_obs), sub_batch_size):
-                    sub_obs = segment_obs[j:j+sub_batch_size]
-                    sub_actions = segment_actions[j:j+sub_batch_size]
-                    
-                    sub_rewards = reward_model(sub_obs, sub_actions).cpu().numpy()
-                    segment_rewards.append(sub_rewards)
-                
-                segment_rewards = np.concatenate(segment_rewards)
-                batch_learned_rewards.append(segment_rewards)
-        
-        # Add batch data to dataset
-        for i in range(len(batch_observations)):
-            all_observations.append(batch_observations[i].cpu().numpy())
-            all_actions.append(batch_actions[i].cpu().numpy())
-            all_rewards.append(batch_learned_rewards[i])
-            all_terminals.append(batch_terminals[i])
+            all_rewards.append(batch_rewards)
     
-    # Check if we have any valid segments after filtering
-    if not all_observations:
-        raise ValueError("No valid segments found after processing.")
+    # Combine all rewards
+    if len(all_rewards) == 1:
+        rewards = all_rewards[0]
+    else:
+        rewards = np.concatenate(all_rewards)
     
-    # Concatenate all data
-    all_observations = np.concatenate(all_observations)
-    all_actions = np.concatenate(all_actions)
-    all_rewards = np.concatenate(all_rewards)
-    all_terminals = np.concatenate(all_terminals)
+    # Create terminals array (True at the end of each episode)
+    episode_ends = torch.cat([
+        valid_episodes[1:] != valid_episodes[:-1],
+        torch.tensor([True])  # Last observation is always an episode end
+    ])
+    terminals = episode_ends.numpy()
     
-    # Create the D3RL dataset with the learned rewards
+    # Convert to numpy for d3rlpy
+    observations_np = valid_obs.numpy()
+    actions_np = valid_actions.numpy()
+    
+    # Create MDPDataset with learned rewards
     dataset = MDPDataset(
-        observations=all_observations,
-        actions=all_actions,
-        rewards=all_rewards,
-        terminals=all_terminals
+        observations=observations_np,
+        actions=actions_np,
+        rewards=rewards,
+        terminals=terminals
     )
     
     # Print final dataset statistics
-    print(f"Final dataset size: {dataset.size()} transitions with {dataset.size() - np.sum(all_terminals)} non-terminal transitions")
+    print(f"Final dataset size: {dataset.size()} transitions with {dataset.size() - np.sum(terminals)} non-terminal transitions")
     reward_stats = {
-        'mean': np.mean(all_rewards),
-        'std': np.std(all_rewards),
-        'min': np.min(all_rewards),
-        'max': np.max(all_rewards)
+        'mean': np.mean(rewards),
+        'std': np.std(rewards),
+        'min': np.min(rewards),
+        'max': np.max(rewards)
     }
     print(f"Reward statistics: mean={reward_stats['mean']:.4f}, std={reward_stats['std']:.4f}, min={reward_stats['min']:.4f}, max={reward_stats['max']:.4f}")
     
