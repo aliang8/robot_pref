@@ -99,3 +99,6 @@ python train_policy.py --config-name=iql data.data_path="/path/to/dataset.pt" ev
 ```
 
 Note: The parallel evaluation uses a pickle-safe environment creation mechanism to avoid serialization issues when using multiprocessing. 
+
+
+python train_policy.py --config-name=iql data.use_ground_truth=true data.scale_rewards=True wandb.use_wandb=True data.reward_model_path="/scr/aliang80/robot_pref/reward_model/state_action_reward_model.pt"

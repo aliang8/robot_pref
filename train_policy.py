@@ -23,9 +23,10 @@ from d3rlpy.models.encoders import VectorEncoderFactory
 from trajectory_utils import load_tensordict, RANDOM_SEED
 from utils.env_utils import MetaWorldEnvCreator
 from utils.callbacks import WandbCallback, CompositeCallback
-from utils.wandb_utils import log_to_wandb
+from utils.wandb_utils import log_to_wandb, reset_global_step
 from utils.eval_utils import evaluate_policy_manual, custom_evaluate_on_environment
 from utils.data_utils import AttrDict
+from utils.viz import create_video_grid
 from train_reward_model import SegmentRewardModel
 
 # Set seed for reproducibility
@@ -70,7 +71,8 @@ def get_d3rlpy_experiment_path(base_logdir, experiment_name, with_timestamp=True
     
     return None
 
-def load_dataset(data, reward_model=None, device=None, use_ground_truth=False, max_segments=None, reward_batch_size=32):
+def load_dataset(data, reward_model=None, device=None, use_ground_truth=False, max_segments=None, reward_batch_size=32, 
+               scale_rewards=False, reward_min=None, reward_max=None):
     """Load and process dataset for either IQL or BC training.
     
     Args:
@@ -80,10 +82,19 @@ def load_dataset(data, reward_model=None, device=None, use_ground_truth=False, m
         use_ground_truth: If True, use ground truth rewards for IQL instead of reward model predictions
         max_segments: Maximum number of segments to process (optional)
         reward_batch_size: Batch size for reward computation (for IQL)
+        scale_rewards: If True, scales rewards to specified min/max range
+        reward_min: Minimum value for scaled rewards (default: -1)
+        reward_max: Maximum value for scaled rewards (default: 1)
         
     Returns:
         d3rlpy MDPDataset with observations, actions, rewards, and terminals
     """
+    # Set default scaling values if not provided
+    if scale_rewards:
+        reward_min = reward_min if reward_min is not None else -1.0
+        reward_max = reward_max if reward_max is not None else 1.0
+        print(f"Scaling rewards to range [{reward_min}, {reward_max}]")
+    
     # Extract necessary data
     observations = data["obs"] if "obs" in data else data["state"]
     actions = data["action"]
@@ -155,6 +166,23 @@ def load_dataset(data, reward_model=None, device=None, use_ground_truth=False, m
         # BC or IQL with ground truth - use the extracted rewards
         rewards_np = valid_rewards
     
+    # Scale rewards if requested
+    if scale_rewards:
+        original_min = np.min(rewards_np)
+        original_max = np.max(rewards_np)
+        
+        # Avoid division by zero
+        if original_max - original_min > 1e-8:
+            # Scale to [0, 1] first, then to target range
+            rewards_np = (rewards_np - original_min) / (original_max - original_min)
+            rewards_np = rewards_np * (reward_max - reward_min) + reward_min
+            print(f"Scaled rewards from [{original_min:.4f}, {original_max:.4f}] to [{reward_min:.4f}, {reward_max:.4f}]")
+        else:
+            # If all rewards are the same, set to the middle of the target range
+            middle_value = (reward_max + reward_min) / 2
+            rewards_np = np.ones_like(rewards_np) * middle_value
+            print(f"All rewards have the same value ({original_min:.4f}), setting to {middle_value:.4f}")
+    
     # Create terminals array (True at the end of each episode)
     episode_ends = torch.cat([
         valid_episodes[1:] != valid_episodes[:-1],
@@ -223,6 +251,10 @@ def main(cfg: DictConfig):
             tags=cfg.wandb.tags if hasattr(cfg.wandb, 'tags') else [algorithm_name],
             notes=cfg.wandb.notes
         )
+        
+        # Reset global step counter to ensure clean start
+        reset_global_step(0)
+        
         print(f"Wandb initialized: {wandb.run.name}")
     
     # Create output directory
@@ -264,6 +296,13 @@ def main(cfg: DictConfig):
         if use_ground_truth:
             print("Using ground truth rewards instead of reward model predictions.")
         
+        # Get reward scaling options
+        scale_rewards = cfg.data.get('scale_rewards', False)
+        reward_min = cfg.data.get('reward_min', -1.0)
+        reward_max = cfg.data.get('reward_max', 1.0)
+        if scale_rewards:
+            print(f"Will scale rewards to range [{reward_min}, {reward_max}]")
+        
         # Create MDP dataset
         print("Creating MDP dataset with rewards...")
         dataset = load_dataset(
@@ -272,12 +311,28 @@ def main(cfg: DictConfig):
             device=device, 
             use_ground_truth=use_ground_truth,
             max_segments=cfg.data.max_segments,
-            reward_batch_size=cfg.data.reward_batch_size
+            reward_batch_size=cfg.data.reward_batch_size,
+            scale_rewards=scale_rewards,
+            reward_min=reward_min,
+            reward_max=reward_max
         )
     else:  # BC or other algorithms that don't need a reward model
         # For BC, we can directly use the demonstrations
         print("Creating MDP dataset from demonstrations...")
-        dataset = load_dataset(data)
+        
+        # Get reward scaling options (also apply to BC for consistency)
+        scale_rewards = cfg.data.get('scale_rewards', False)
+        reward_min = cfg.data.get('reward_min', -1.0)
+        reward_max = cfg.data.get('reward_max', 1.0)
+        if scale_rewards:
+            print(f"Will scale rewards to range [{reward_min}, {reward_max}]")
+            
+        dataset = load_dataset(
+            data,
+            scale_rewards=scale_rewards,
+            reward_min=reward_min,
+            reward_max=reward_max
+        )
     
     # Create environment for evaluation
     env = None
@@ -415,12 +470,39 @@ def main(cfg: DictConfig):
                 # Try to find and upload videos
                 try:
                     video_files = glob.glob(f"{video_path}*.mp4")
+                    print(f"Found {len(video_files)} video files: {video_files}")
+                    
                     if video_files:
-                        # Only log a few videos to save space
-                        video_data = [wandb.Video(video_file, fps=cfg.evaluation.video_fps, format="mp4") 
-                                    for video_file in video_files[:3]]
-                        # Use log_to_wandb with the same epoch to ensure consistent step
-                        log_to_wandb({f"videos_epoch_{epoch}": video_data}, epoch=epoch, prefix="eval")
+                        # Log individual videos (maximum 3)
+                        for i, video_file in enumerate(video_files[:3]):
+                            wandb_callback.log_video(
+                                video_file,
+                                name=f"videos_epoch_{epoch}_{i+1}",
+                                fps=cfg.evaluation.video_fps,
+                                prefix="eval"
+                            )
+                            
+                        # Create a grid of videos if we have multiple
+                        if len(video_files) > 1:
+                            print("Creating video grid from evaluation videos...")
+                            grid_path = f"{os.path.dirname(video_path)}/eval_grid_epoch_{epoch}.mp4"
+                            try:
+                                grid_video = create_video_grid(
+                                    video_files, 
+                                    grid_path, 
+                                    max_videos=6, 
+                                    fps=cfg.evaluation.video_fps
+                                )
+                                if grid_video:
+                                    # Log the grid video
+                                    wandb_callback.log_video(
+                                        grid_video,
+                                        name=f"video_grid_epoch_{epoch}",
+                                        fps=cfg.evaluation.video_fps,
+                                        prefix="eval"
+                                    )
+                            except Exception as e:
+                                print(f"Error creating video grid: {e}")
                 except Exception as e:
                     print(f"Error logging videos to wandb: {e}")
 
@@ -534,7 +616,32 @@ def main(cfg: DictConfig):
     model_path = f"{cfg.output.output_dir}/{algorithm_name.lower()}_{Path(cfg.data.data_path).stem}.pt"
     algo.save_model(model_path)
     print(f"Model saved to {model_path}")
-    
+
+    # Log model as wandb artifact if enabled
+    if cfg.wandb.use_wandb and wandb.run:
+        try:
+            # Create metadata about the model
+            model_metadata = {
+                "algorithm": algorithm_name,
+                "dataset": Path(cfg.data.data_path).stem,
+                "epochs": n_epochs,
+                "observation_dim": state_dim,
+                "action_dim": action_dim
+            }
+            
+            # Add best metrics if available
+            if wandb_callback.best_eval_metrics:
+                for k, v in wandb_callback.best_eval_metrics.items():
+                    if isinstance(v, (int, float, np.int64, np.float32, np.float64, np.number)):
+                        model_metadata[f"best_{k}"] = v
+            
+            # Log the artifact with metadata
+            artifact = wandb_callback.log_model_artifact(model_path, metadata=model_metadata)
+            if artifact:
+                print(f"Model logged to wandb as artifact: {artifact.name}")
+        except Exception as e:
+            print(f"Warning: Could not log model as wandb artifact: {e}")
+
     # Run final comprehensive evaluation
     print("\nRunning final comprehensive evaluation...")
     if env is not None:
@@ -574,12 +681,39 @@ def main(cfg: DictConfig):
             if video_recording and video_path and wandb.run:
                 try:
                     video_files = glob.glob(f"{video_path}*.mp4")
+                    print(f"Found {len(video_files)} final evaluation video files")
+                    
                     if video_files:
-                        # Upload up to 3 videos to save space
-                        video_data = [wandb.Video(video_file, fps=cfg.evaluation.video_fps, format="mp4") 
-                                     for video_file in video_files[:3]]
-                        # Use log_to_wandb for consistent step handling
-                        log_to_wandb({"videos": video_data}, prefix="final_eval")
+                        # Upload up to 3 videos
+                        for i, video_file in enumerate(video_files[:3]):
+                            wandb_callback.log_video(
+                                video_file,
+                                name=f"video_{i+1}",
+                                fps=cfg.evaluation.video_fps,
+                                prefix="final_eval"
+                            )
+                            
+                        # Create a grid of videos if we have multiple
+                        if len(video_files) > 1:
+                            print("Creating video grid from final evaluation videos...")
+                            grid_path = f"{os.path.dirname(video_path)}/final_eval_grid.mp4"
+                            try:
+                                grid_video = create_video_grid(
+                                    video_files, 
+                                    grid_path, 
+                                    max_videos=6, 
+                                    fps=cfg.evaluation.video_fps
+                                )
+                                if grid_video:
+                                    # Log the grid video
+                                    wandb_callback.log_video(
+                                        grid_video,
+                                        name="video_grid",
+                                        fps=cfg.evaluation.video_fps,
+                                        prefix="final_eval"
+                                    )
+                            except Exception as e:
+                                print(f"Error creating final video grid: {e}")
                 except Exception as e:
                     print(f"Error logging final videos to wandb: {e}")
     
