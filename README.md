@@ -67,13 +67,13 @@ IQL is the default algorithm. You can run it directly with:
 
 ```bash
 # Basic IQL policy training
-python train_policy.py data.data_path="/path/to/dataset.pt" data.reward_model_path="reward_model/state_action_reward_model.pt"
+python train_policy.py --config-name=iql data.data_path="/path/to/dataset.pt" data.reward_model_path="reward_model/state_action_reward_model.pt"
 
 # With video recording
-python train_policy.py data.data_path="/path/to/dataset.pt" evaluation.record_video=true
+python train_policy.py --config-name=iql data.data_path="/path/to/dataset.pt" evaluation.record_video=true
 
 # With custom parameters
-python train_policy.py data.data_path="/path/to/dataset.pt" training.n_epochs=200 model.actor_learning_rate=1e-4
+python train_policy.py --config-name=iql data.data_path="/path/to/dataset.pt" training.n_epochs=200 model.actor_learning_rate=3e-4
 ```
 
 ### BC (Behavior Cloning)
@@ -86,4 +86,18 @@ python train_policy.py --config-name=bc data.data_path="/path/to/dataset.pt"
 
 # With custom parameters
 python train_policy.py --config-name=bc data.data_path="/path/to/dataset.pt" model.learning_rate=1e-4 training.n_epochs=200 evaluation.record_video=true
-``` 
+```
+
+## Parallel Evaluation
+
+The codebase supports parallel evaluation of policies for faster performance:
+
+```bash
+# Enable parallel evaluation with 4 processes
+python train_policy.py --config-name=iql data.data_path="/path/to/dataset.pt" evaluation.parallel_eval=true evaluation.eval_workers=4
+
+# Adjust frequency of evaluations
+python train_policy.py --config-name=iql data.data_path="/path/to/dataset.pt" evaluation.parallel_eval=true training.eval_interval=10
+```
+
+Note: The parallel evaluation uses a pickle-safe environment creation mechanism to avoid serialization issues when using multiprocessing. 

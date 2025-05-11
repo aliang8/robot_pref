@@ -15,6 +15,7 @@ import hydra
 from omegaconf import DictConfig, OmegaConf
 import wandb
 import matplotlib.pyplot as plt
+import glob
 
 # Import utility functions
 from trajectory_utils import (
@@ -31,29 +32,28 @@ from utils.eval_utils import (
     custom_evaluate_on_environment
 )
 
-from env.robomimic_lowdim import RobomimicLowdimWrapper
-import robomimic.utils.file_utils as FileUtils
-import robomimic.utils.obs_utils as ObsUtils
-import robomimic.utils.env_utils as EnvUtils
+# Import environment utilities
+from utils.env_utils import (
+    MetaWorldEnvCreator,
+    RobomimicEnvCreator
+)
+
+# Import visualization utilities
+from utils.viz import create_video_grid
+
+# Import data utilities
+from utils.data_utils import AttrDict
+
+# Import callback utilities
+from utils.callbacks import WandbCallback, CompositeCallback
+
+# Import wandb utilities
+from utils.wandb_utils import log_to_wandb
 
 # Set seed for reproducibility
 torch.manual_seed(RANDOM_SEED)
 np.random.seed(RANDOM_SEED)
 random.seed(RANDOM_SEED)
-
-# Define a simple AttrDict class that provides dot access to dictionaries
-class AttrDict(dict):
-    def __init__(self, *args, **kwargs):
-        super(AttrDict, self).__init__(*args, **kwargs)
-        self.__dict__ = self
-
-    @staticmethod
-    def from_nested_dict(data):
-        """Create nested AttrDict from nested dict."""
-        if not isinstance(data, dict):
-            return data
-        else:
-            return AttrDict({key: AttrDict.from_nested_dict(data[key]) for key in data})
 
 def create_mdp_dataset_with_sa_reward(data, reward_model, device, max_segments=1000, batch_size=32):
     """Create MDPDataset from tensordict data using a state-action reward model.
@@ -204,467 +204,101 @@ def create_mdp_dataset_with_sa_reward(data, reward_model, device, max_segments=1
             
         # Compute rewards for all segments in batch at once
         with torch.no_grad():
+            # Process each segment separately
             for i in range(len(batch_observations)):
-                obs = batch_observations[i].to(device)
-                act = batch_actions[i].to(device)
+                segment_obs = batch_observations[i].to(device)
+                segment_actions = batch_actions[i].to(device)
                 
-                # Process each observation-action pair for this segment
+                # Get reward predictions from reward model
                 segment_rewards = []
                 
-                # Process in mini-batches if segment is very long
-                obs_actions = torch.cat([obs, act], dim=1)
-                mini_batch_size = 64  # Adjust based on your GPU memory
+                # Process in smaller sub-batches if the segment is very large
+                sub_batch_size = 1024  # Memory efficient sub-batch size
+
+                for j in range(0, len(segment_obs), sub_batch_size):
+                    sub_obs = segment_obs[j:j+sub_batch_size]
+                    sub_actions = segment_actions[j:j+sub_batch_size]
+
+                    # sub_rewards = reward_model(sub_obs, sub_actions).cpu().numpy() # TODO: 
+                    sub_rewards = reward_model.reward_model(sub_obs, sub_actions).cpu().numpy()
+                    segment_rewards.append(sub_rewards)
                 
-                for j in range(0, len(obs_actions), mini_batch_size):
-                    mini_batch = obs_actions[j:j+mini_batch_size]
-                    rewards_chunk = reward_model.reward_model.model(mini_batch).cpu().numpy().flatten()
-                    segment_rewards.extend(rewards_chunk)
-                
-                batch_learned_rewards.append(np.array(segment_rewards))
+                segment_rewards = np.concatenate(segment_rewards)
+                batch_learned_rewards.append(segment_rewards)
         
-        # Add processed segments to overall dataset
+        # Add batch data to dataset
         for i in range(len(batch_observations)):
-            # Convert all to numpy for consistency
-            all_observations.append(batch_observations[i].numpy())
-            all_actions.append(batch_actions[i].numpy())
+            all_observations.append(batch_observations[i].cpu().numpy())
+            all_actions.append(batch_actions[i].cpu().numpy())
             all_rewards.append(batch_learned_rewards[i])
             all_terminals.append(batch_terminals[i])
-        
-        processed_segments += len(batch_observations)
     
-    # Check if we have any valid data
-    if len(all_observations) == 0:
-        raise ValueError("No valid segments found after NaN filtering. Check your data.")
-        
-    # Concatenate data
-    observations = np.concatenate(all_observations)
-    actions = np.concatenate(all_actions)
-    rewards = np.concatenate(all_rewards)
-    terminals = np.concatenate(all_terminals)
+    # Check if we have any valid segments after filtering
+    if not all_observations:
+        raise ValueError("No valid segments found after processing.")
     
-    # Perform final NaN check
-    if np.isnan(observations).any() or np.isnan(actions).any() or np.isnan(rewards).any():
-        print("WARNING: NaN values still present after filtering!")
-        # Replace remaining NaNs with zeros
-        observations = np.nan_to_num(observations, nan=0.0)
-        actions = np.nan_to_num(actions, nan=0.0)
-        rewards = np.nan_to_num(rewards, nan=0.0)
+    # Concatenate all data
+    all_observations = np.concatenate(all_observations)
+    all_actions = np.concatenate(all_actions)
+    all_rewards = np.concatenate(all_rewards)
+    all_terminals = np.concatenate(all_terminals)
     
-    print(f"Final dataset: {observations.shape[0]} transitions from {len(all_observations)} valid segments")
-    
-    # Create MDPDataset
+    # Create the D3RL dataset with the learned rewards
     dataset = MDPDataset(
-        observations=observations,
-        actions=actions,
-        rewards=rewards,
-        terminals=terminals
+        observations=all_observations,
+        actions=all_actions,
+        rewards=all_rewards,
+        terminals=all_terminals
     )
+    
+    # Print final dataset statistics
+    print(f"Final dataset size: {dataset.size()} transitions with {dataset.size() - np.sum(all_terminals)} non-terminal transitions")
+    reward_stats = {
+        'mean': np.mean(all_rewards),
+        'std': np.std(all_rewards),
+        'min': np.min(all_rewards),
+        'max': np.max(all_rewards)
+    }
+    print(f"Reward statistics: mean={reward_stats['mean']:.4f}, std={reward_stats['std']:.4f}, min={reward_stats['min']:.4f}, max={reward_stats['max']:.4f}")
     
     return dataset
 
-def get_metaworld_env(task_name, seed=42):
-    """Create a MetaWorld environment for the given task.
-    
-    Args:
-        task_name: Name of the MetaWorld task to create
-        seed: Random seed for the environment
-    
-    Returns:
-        MetaWorld environment instance
-    """
-    
-    # Clean up task name from file path or other formats
-    original_task_name = task_name
-    
-    if '/' in task_name:
-        task_name = task_name.split('/')[-1]
-    
-    # Remove prefixes/suffixes often found in filenames
-    prefixes = ['buffer_', 'data_']
-    for prefix in prefixes:
-        if task_name.startswith(prefix):
-            task_name = task_name[len(prefix):]
-    
-    # Remove file extensions
-    if task_name.endswith('.pt') or task_name.endswith('.pkl'):
-        task_name = task_name.rsplit('.', 1)[0]
-    
-    # Method 1: Direct access to environment constructors (preferred method)
-    from metaworld.envs import (ALL_V2_ENVIRONMENTS_GOAL_OBSERVABLE,
-                              ALL_V2_ENVIRONMENTS_GOAL_HIDDEN)
-    
-    # Prepare task name formats to try
-    task_name_base = task_name
-    if task_name.endswith('-v2') or task_name.endswith('-v1'):
-        task_name_base = task_name[:-3]
-    
-    # Try different variations of the environment name
-    env_variations = [
-        f"{task_name}-goal-observable",                # If already has version suffix
-        f"{task_name}-v2-goal-observable",             # Add v2 if not there
-        f"{task_name_base}-v2-goal-observable",        # Clean base name with v2
-        f"{task_name}-goal-hidden",                    # Hidden goal versions
-        f"{task_name}-v2-goal-hidden",
-        f"{task_name_base}-v2-goal-hidden",
-    ]
-    
-    # Try to find and use the environment constructor
-    env_constructor = None
-    found_env_name = None
-    
-    for env_name in env_variations:
-        if env_name in ALL_V2_ENVIRONMENTS_GOAL_OBSERVABLE:
-            env_constructor = ALL_V2_ENVIRONMENTS_GOAL_OBSERVABLE[env_name]
-            found_env_name = env_name
-            break
-        elif env_name in ALL_V2_ENVIRONMENTS_GOAL_HIDDEN:
-            env_constructor = ALL_V2_ENVIRONMENTS_GOAL_HIDDEN[env_name]
-            found_env_name = env_name
-            break
-    
-    # If we found a constructor directly, use it
-    if env_constructor is not None:
-        env = env_constructor(seed=seed)  # Use provided seed
-        return env
-        
-    # If no direct match, list available environments for debugging
-    print("\nCould not find exact environment match. Available MetaWorld environments:")
-    print("Goal Observable environments (first 5):")
-    for name in sorted(list(ALL_V2_ENVIRONMENTS_GOAL_OBSERVABLE.keys()))[:5]:
-        print(f"  - {name}")
-    print("Goal Hidden environments (first 5):")
-    for name in sorted(list(ALL_V2_ENVIRONMENTS_GOAL_HIDDEN.keys()))[:5]:
-        print(f"  - {name}")
-        
-    # Try to find a similar environment name
-    best_match = None
-    best_score = 0
-    
-    # Check for partial matches in environment names
-    for env_dict in [ALL_V2_ENVIRONMENTS_GOAL_OBSERVABLE, ALL_V2_ENVIRONMENTS_GOAL_HIDDEN]:
-        for env_name in env_dict.keys():
-            # Simple string similarity - check if task name is in env name
-            if task_name_base in env_name:
-                score = len(task_name_base)
-                if score > best_score:
-                    best_score = score
-                    best_match = (env_name, env_dict[env_name])
-    
-    if best_match:
-        env_name, constructor = best_match
-        print(f"Found closest matching environment: {env_name}")
-        env = constructor(seed=seed)  # Use provided seed
-        return env
-    
-    # If we can't find any matching environment
-    raise ValueError(f"Could not create environment for task: {original_task_name}")
-
-def get_robomimic_env(
-    data_path,
-    render=True,
-    render_offscreen=True,
-    use_image_obs=True,
-    base_path="/scr/matthewh6/robomimic/robomimic/datasets",
-    seed=42,
-):
-    dataset_name = Path(data_path).stem
-    type, hdf5_type = dataset_name.split("_", 1)
-    task = Path(data_path).parent.stem
-
-    dataset_path = f"{base_path}/{task}/{type}/{hdf5_type}_v15.hdf5"
-    env_meta = FileUtils.get_env_metadata_from_dataset(dataset_path)
-
-    obs_modality_dict = {
-        "low_dim": [
-            "robot0_eef_pos",
-            "robot0_eef_quat",
-            "robot0_gripper_qpos",
-            "robot0_joint_pos",
-            "robot0_joint_vel",
-            "object",
-        ],
-        "rgb": ["agentview_image"],
-    }
-
-    if render_offscreen or use_image_obs:
-        os.environ["MUJOCO_GL"] = "egl"
-
-    ObsUtils.initialize_obs_modality_mapping_from_dict(obs_modality_dict)
-    env = EnvUtils.create_env_from_metadata(
-        env_meta=env_meta,
-        render=render,
-        # only way to not show collision geometry is to enable render_offscreen, which uses a lot of RAM.
-        render_offscreen=render_offscreen,
-        use_image_obs=use_image_obs,
-    )
-
-    env.env.hard_reset = False
-
-    env = RobomimicLowdimWrapper(env)
-    env.seed(seed)
-
-    return env
-
-
 def get_d3rlpy_experiment_path(base_logdir, experiment_name, with_timestamp=True):
-    """Get the path to the d3rlpy experiment directory.
+    """Find the experiment directory in d3rlpy's logs.
     
     Args:
-        base_logdir: Base logging directory
+        base_logdir: Base directory for d3rlpy logs
         experiment_name: Name of the experiment
-        with_timestamp: Whether the directory has a timestamp
+        with_timestamp: Whether the experiment directories include timestamps
         
     Returns:
-        Path to the experiment directory (or None if not found)
+        Path: Path to the experiment directory, or None if not found
     """
-    # If timestamp is used, the format is {experiment_name}_{timestamp}
-    # If no timestamp, just use the experiment name
-    
-    experiment_dir = Path(base_logdir)
-    if not experiment_dir.exists():
+    base_path = Path(base_logdir)
+    if not base_path.exists():
         return None
+    
+    # Try to find the experiment directory
+    experiment_dirs = []
+    
+    if with_timestamp:
+        # Match with timestamp format: {experiment_name}_{timestamp}
+        for item in base_path.glob(f"{experiment_name}_*"):
+            if item.is_dir():
+                experiment_dirs.append(item)
         
-    # If with_timestamp is False, just use the experiment name directly
-    if not with_timestamp:
-        return experiment_dir / experiment_name
+        # If multiple matches, take the most recent one
+        if experiment_dirs:
+            # Sort by timestamp in directory name (assuming format is name_YYYYMMDD_HHMMSS)
+            experiment_dirs.sort(key=lambda x: str(x), reverse=True)
+            return experiment_dirs[0]
+    else:
+        # Look for exact match without timestamp
+        experiment_dir = base_path / experiment_name
+        if experiment_dir.exists() and experiment_dir.is_dir():
+            return experiment_dir
     
-    # Look for directories that start with the experiment name
-    matching_dirs = list(experiment_dir.glob(f"{experiment_name}_*"))
-    
-    # Sort by creation time (most recent first)
-    matching_dirs.sort(key=lambda p: p.stat().st_ctime, reverse=True)
-    
-    # Return the most recent one if any exists
-    if matching_dirs:
-        return matching_dirs[0]
-        
     return None
-
-def log_to_wandb(metrics, epoch=None, prefix="", step=None):
-    """Log any metrics to wandb with proper prefixing.
-    
-    Args:
-        metrics: Dict of metrics or list of (epoch, metrics_dict) tuples from d3rlpy
-        epoch: Current epoch (optional)
-        prefix: Prefix to add to metric names (e.g., "train", "eval")
-        step: Step to use for wandb logging (defaults to epoch if provided)
-    
-    Returns:
-        bool: True if metrics were logged, False otherwise
-    """
-    if not wandb.run:
-        return False
-    
-    # Use epoch as step if step not specified
-    if step is None and epoch is not None:
-        step = epoch
-        
-    # Ensure prefix ends with / if it's not empty
-    if prefix and not prefix.endswith("/"):
-        prefix = f"{prefix}/"
-    
-    # Handle d3rlpy training_metrics format (list of tuples)
-    if isinstance(metrics, list) and len(metrics) > 0 and isinstance(metrics[0], tuple) and len(metrics[0]) == 2:
-        # Log each epoch's metrics separately
-        for epoch, epoch_metrics in metrics:
-            # Create metrics dict with prefix
-            log_dict = {f"{prefix}{k}": v for k, v in epoch_metrics.items() 
-                       if isinstance(v, (int, float, np.int64, np.float32, np.float64, np.number))}
-            
-            # Add epoch
-            log_dict["epoch"] = epoch
-            
-            # Log to wandb
-            if log_dict:
-                wandb.log(log_dict, step=epoch)
-        
-        print(f"Logged {len(metrics)} epochs of {prefix.rstrip('/')} metrics to wandb")
-        return True
-    
-    # Handle single metrics dict
-    elif isinstance(metrics, dict):
-        log_dict = {}
-        
-        # Add epoch if provided
-        if epoch is not None:
-            log_dict[f"{prefix}epoch"] = epoch
-        
-        # Add all numerical metrics with prefix
-        for key, value in metrics.items():
-            if isinstance(value, (int, float, np.int64, np.float32, np.float64, np.number)):
-                log_dict[f"{prefix}{key}"] = value
-        
-        # Log histogram for returns if available
-        if "returns" in metrics and isinstance(metrics["returns"], (list, np.ndarray)):
-            wandb.log({f"{prefix}returns_histogram": wandb.Histogram(metrics["returns"])}, step=step)
-        
-        # Log to wandb
-        if log_dict:
-            wandb.log(log_dict, step=step)
-            return True
-    
-    return False
-
-# Keep these functions for backward compatibility but implement them using the unified function
-def log_evaluation_to_wandb(metrics, epoch=None, prefix=""):
-    """Log evaluation metrics to wandb."""
-    return log_to_wandb(metrics, epoch=epoch, prefix=prefix)
-
-def log_training_metrics_to_wandb(training_metrics, prefix="train"):
-    """Log d3rlpy training metrics to wandb."""
-    return log_to_wandb(training_metrics, prefix=prefix)
-
-class MetaWorldEnvCreator:
-    """A picklable environment creator for MetaWorld environments."""
-    
-    def __init__(self, dataset_name):
-        """Initialize the creator with the dataset name."""
-        self.dataset_name = dataset_name
-    
-    def __call__(self):
-        """Create a new environment with a random seed."""
-        # Generate a unique seed each time this function is called
-        unique_seed = int(time.time() * 1000) % 100000 + random.randint(0, 10000)
-        return get_metaworld_env(self.dataset_name, seed=unique_seed)
-    
-class RobomimicEnvCreator:
-    """A picklable environment creator for Robomimic environments."""
-    
-    def __init__(self, data_path):
-        """Initialize the creator with the dataset name."""
-        self.data_path = data_path
-
-    def __call__(self):
-        """Create a new environment with a random seed."""
-        # Generate a unique seed each time this function is called
-        unique_seed = int(time.time() * 1000) % 100000 + random.randint(0, 10000)
-        return get_robomimic_env(self.data_path, seed=unique_seed)
-
-
-class WandbCallback:
-    """Callback for d3rlpy to log metrics to wandb.
-    
-    This callback is designed to capture training metrics that d3rlpy logs
-    during training, including loss values and evaluation scores.
-    """
-    
-    def __init__(self, use_wandb=True, prefix="train"):
-        self.use_wandb = use_wandb
-        self.prefix = prefix
-        self.epoch = 0
-        self.best_eval_metrics = None
-        self.best_eval_epoch = -1
-        # Track metrics across epochs
-        self.training_losses = {}
-        self.current_epoch_metrics = {}
-        self.evaluation_scores = []
-        
-    def __call__(self, algo, epoch, total_step):
-        """Called by d3rlpy at the end of each epoch or update step."""
-        self.epoch = epoch
-        
-        # Basic metrics to track
-        metrics = {
-            "epoch": epoch,
-            "total_step": total_step
-        }
-
-        # Handle both old and new d3rlpy versions
-        logger = getattr(algo, '_active_logger', None)
-        if logger is None and hasattr(algo, '_impl'):
-            logger = getattr(algo._impl, '_active_logger', None)
-        if logger is None:
-            return metrics  # Return early if no logger found
-        
-        # Get metrics from the metrics_buffer
-        if hasattr(logger, '_metrics_buffer'):
-            for name, buffer in logger._metrics_buffer.items():
-                if buffer:  # Check if there are values
-                    # Calculate the mean of accumulated values
-                    mean_value = np.mean(buffer)
-                    metrics[name] = mean_value
-                    
-                    # Store loss metrics separately for tracking over time
-                    if name.endswith('_loss') or name.startswith('loss'):
-                        self.training_losses[name] = self.training_losses.get(name, []) + [mean_value]
-            
-            # Store evaluation scores if present
-            if 'evaluation' in logger._metrics_buffer and logger._metrics_buffer['evaluation']:
-                eval_score = np.mean(logger._metrics_buffer['evaluation'])
-                self.evaluation_scores.append((epoch, eval_score))
-                metrics['evaluation_score'] = eval_score
-                    
-            # Store metrics for this epoch
-            self.current_epoch_metrics = metrics.copy()
-
-        # Log to wandb if enabled
-        if self.use_wandb and wandb.run:
-            log_to_wandb(metrics, epoch=epoch, prefix=self.prefix)
-        
-        return metrics
-    
-    def update_eval_metrics(self, eval_metrics, epoch):
-        """Track the best evaluation metrics so far."""
-        # Check if these are the best metrics so far
-        is_best = False
-        if self.best_eval_metrics is None:
-            is_best = True
-        elif 'mean_return' in eval_metrics and 'mean_return' in self.best_eval_metrics:
-            if eval_metrics['mean_return'] > self.best_eval_metrics['mean_return']:
-                is_best = True
-        
-        # Update best metrics if applicable
-        if is_best:
-            self.best_eval_metrics = eval_metrics.copy()
-            self.best_eval_epoch = epoch
-            
-        # Add a flag for best metrics
-        eval_metrics_with_best = eval_metrics.copy()
-        eval_metrics_with_best['is_best'] = is_best
-        
-        return eval_metrics_with_best
-    
-    def get_training_summary(self):
-        """Get a summary of training losses and metrics."""
-        summary = {
-            "epoch": self.epoch,
-            "best_eval_epoch": self.best_eval_epoch,
-        }
-        
-        # Add latest values of each loss
-        for loss_name, values in self.training_losses.items():
-            if values:
-                summary[f"final_{loss_name}"] = values[-1]
-                summary[f"mean_{loss_name}"] = np.mean(values)
-        
-        # Add latest evaluation score if available
-        if self.evaluation_scores:
-            latest_eval = self.evaluation_scores[-1]
-            summary["final_evaluation_score"] = latest_eval[1]
-        
-        return summary
-
-class CompositeCallback:
-    """A callback that combines multiple callbacks into one."""
-    
-    def __init__(self, callbacks):
-        """Initialize with a list of callbacks.
-        
-        Args:
-            callbacks: List of callback functions/objects to call
-        """
-        self.callbacks = callbacks
-    
-    def __call__(self, algo, epoch, total_step):
-        """Call all callbacks in order."""
-        results = []
-        for callback in self.callbacks:
-            try:
-                result = callback(algo, epoch, total_step)
-                results.append(result)
-            except Exception as e:
-                print(f"Error in callback {callback}: {e}")
-        return results
 
 @hydra.main(config_path="config", config_name="iql")
 def main(cfg: DictConfig):
@@ -797,27 +431,38 @@ def main(cfg: DictConfig):
     # Create environment for evaluation
     env = None
     if not cfg.evaluation.skip_env_creation:
-        dataset_name = Path(cfg.data.data_path).stem
-        print(f"Creating environment for evaluation using dataset: {dataset_name}")
+        # Use the environment name specified in the config
+        if hasattr(cfg.data, 'env_name') and cfg.data.env_name:
+            env_name = cfg.data.env_name
+            print(f"Creating environment: {env_name}")
+        else:
+            # Fallback to a default environment name if not specified
+            env_name = "assembly-v2-goal-observable"
+            print(f"No environment name specified in config. Using default: {env_name}")
         
         if "metaworld" in cfg.data.data_path:
             # Create an environment creator that will generate different seeds for each call
             env_creator = MetaWorldEnvCreator(dataset_name)
-        elif "robomimic" in cfg.data.data_path:
+        # elif "robomimic" in cfg.data.data_path:
+        else:
             # Create an environment creator that will generate different seeds for each call
             env_creator = RobomimicEnvCreator(cfg.data.data_path)
-        else:
-            raise ValueError(f"No environment creator found for dataset: {cfg.data.data_path}")
+        # else:
+        #     raise ValueError(f"No environment creator found for dataset: {cfg.data.data_path}")
         
         # Create one environment to verify it works
-        test_env = env_creator()
-        
-        if test_env is not None:
-            # Print environment information once
+        try:
+            test_env = env_creator()
+            
+            # Print environment information
             print(f"Successfully created environment with observation space: {test_env.observation_space.shape}, action space: {test_env.action_space.shape}")
-        
-        # Use the environment creator for evaluation
-        env = env_creator
+            
+            # Use the environment creator for evaluation
+            env = env_creator
+        except Exception as e:
+            print(f"Error creating environment: {e}")
+            print("Evaluation will be skipped.")
+            env = None
 
     # Initialize algorithm based on the algorithm_name
     print(f"Initializing {algorithm_name.upper()} algorithm...")
@@ -952,15 +597,15 @@ def main(cfg: DictConfig):
             if video_recording and video_path and wandb.run:
                 # Try to find and upload videos
                 try:
-                    import glob
-                    video_files = glob.glob(f"{video_path}_episode_*.mp4")
+                    video_files = glob.glob(f"{video_path}*.mp4")
                     if video_files:
-                        video_artifacts = [wandb.Video(video_file, fps=cfg.evaluation.video_fps, format="mp4") 
-                                           for video_file in video_files[:3]]  # Upload up to 3 videos
-                        
-                        wandb.log({f"media/videos/eval_epoch_{epoch}": video_artifacts}, step=epoch)
+                        # Only log a few videos to save space
+                        video_data = [wandb.Video(video_file, fps=cfg.evaluation.video_fps, format="mp4") 
+                                    for video_file in video_files[:3]]
+                        wandb.log({f"eval/videos_epoch_{epoch}": video_data})
+                        print(f"Logged {len(video_data)} videos to wandb")
                 except Exception as e:
-                    print(f"Warning: Could not upload videos to wandb: {e}")
+                    print(f"Error logging videos to wandb: {e}")
 
     # Create a combined callback that handles both wandb logging and evaluation
     composite_callback = CompositeCallback([
@@ -1113,64 +758,23 @@ def main(cfg: DictConfig):
               f"Success rate = {evaluation_metrics['success_rate']:.2f}, " +
               f"Episodes = {evaluation_metrics['num_episodes']}")
         
-        # Log final evaluation to wandb
+        # Log final results to wandb
         if cfg.wandb.use_wandb:
-            log_to_wandb(evaluation_metrics, prefix="final")
+            log_to_wandb(evaluation_metrics, prefix="final_eval")
             
-            # Upload final evaluation videos if available
+            # Log videos if available
             if video_recording and video_path and wandb.run:
                 try:
-                    import glob
-                    video_files = glob.glob(f"{video_path}_episode_*.mp4")
+                    video_files = glob.glob(f"{video_path}*.mp4")
                     if video_files:
-                        video_artifacts = [wandb.Video(video_file, fps=cfg.evaluation.video_fps, format="mp4") 
-                                           for video_file in video_files[:3]]  # Upload up to 3 videos
-                        
-                        wandb.log({f"media/videos/final_eval": video_artifacts})
+                        # Upload up to 3 videos to save space
+                        video_data = [wandb.Video(video_file, fps=cfg.evaluation.video_fps, format="mp4") 
+                                     for video_file in video_files[:3]]
+                        wandb.log({"final_eval/videos": video_data})
                 except Exception as e:
-                    print(f"Warning: Could not upload final videos to wandb: {e}")
-    else:
-        print("\nSkipping evaluation (no environment available)")
-        evaluation_metrics = {
-            'mean_return': 0.0,
-            'std_return': 0.0,
-            'success_rate': 0.0
-        }
+                    print(f"Error logging final videos to wandb: {e}")
     
-    # Save results
-    results = {
-        'config': cfg_dict,  # Use plain dict for serialization
-        'final_evaluation': evaluation_metrics,
-        'training_metrics': training_metrics,
-        'evaluation_during_training': evaluation_results,
-        'dataset_size': dataset.size(),
-        # Add best evaluation metrics
-        'best_eval': {
-            'epoch': wandb_callback.best_eval_epoch,
-            'metrics': wandb_callback.best_eval_metrics
-        },
-        # Add training summary metrics from callback
-        'training_summary': wandb_callback.get_training_summary(),
-        'training_losses': wandb_callback.training_losses
-    }
-    
-    results_path = f"{cfg.output.output_dir}/{algorithm_name.lower()}_results.pkl"
-    with open(results_path, 'wb') as f:
-        pickle.dump(results, f)
-    
-    print(f"Results saved to {results_path}")
     print("\nTraining complete!")
-    
-    # Finish wandb run
-    if cfg.wandb.use_wandb and wandb.run:
-        # Upload the model file if it exists
-        if os.path.exists(model_path):
-            artifact = wandb.Artifact(f"{algorithm_name.lower()}_model_{wandb.run.id}", type="model")
-            artifact.add_file(model_path)
-            wandb.log_artifact(artifact)
-            
-        # Close wandb run
-        wandb.finish()
 
 if __name__ == "__main__":
     main() 

@@ -12,6 +12,7 @@ data:
   reward_model_path: "reward_model/state_action_reward_model.pt"
   max_segments: 1000
   reward_batch_size: 32
+  env_name: "assembly-v2-goal-observable"  # Exact name of the MetaWorld environment
 
 # Model architecture
 model:

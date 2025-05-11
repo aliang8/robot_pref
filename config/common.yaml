@@ -1,15 +1,18 @@
 # Common settings shared across different algorithms
-
 debug: false
+# Data parameters
+data:
+  env_name: "assembly-v2-goal-observable"  # The exact MetaWorld environment name to use
+
 # Training parameters
 training:
   eval_interval: 10
-  eval_episodes: 10
+  eval_episodes: 30
 
 # Evaluation settings
 evaluation:
   skip_env_creation: false
-  record_video: false
+  record_video: true
   parallel_eval: true
   eval_workers: null  # null will use min(n_episodes, cpu_count)
   video_fps: 30
