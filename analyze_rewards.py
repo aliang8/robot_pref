@@ -128,88 +128,111 @@ def predict_rewards(model, episodes, device, batch_size=32):
     
     return episodes
 
-def plot_episode_rewards(episode, episode_idx, output_dir, ground_truth=True, smooth_window=5):
-    """Plot the rewards for a single episode.
+def plot_reward_grid(episodes, output_dir, grid_size=(3, 3), smooth_window=5):
+    """Plot a grid of reward curves for multiple episodes.
     
     Args:
-        episode: Episode dictionary with rewards
-        episode_idx: Index of the episode (for filename)
+        episodes: List of episode dictionaries with rewards
         output_dir: Directory to save the plot
-        ground_truth: Whether to plot ground truth rewards if available
+        grid_size: Tuple of (rows, cols) for the grid layout
         smooth_window: Window size for smoothing the rewards
     """
-    # Create figure
-    plt.figure(figsize=(12, 6))
+    rows, cols = grid_size
+    fig, axes = plt.subplots(rows, cols, figsize=(5*cols, 4*rows), squeeze=False)
     
-    # Get predicted rewards
-    steps = np.arange(len(episode["predicted_rewards"]))
-    rewards = episode["predicted_rewards"].cpu().numpy()
+    # Process each episode in the grid
+    for i in range(rows):
+        for j in range(cols):
+            idx = i * cols + j
+            
+            # Skip if we've run out of episodes
+            if idx >= len(episodes):
+                axes[i, j].set_visible(False)
+                continue
+                
+            episode = episodes[idx]
+            ax1 = axes[i, j]
+            
+            # Get predicted rewards
+            steps = np.arange(len(episode["predicted_rewards"]))
+            rewards = episode["predicted_rewards"].cpu().numpy()
+            
+            # Smooth rewards
+            if smooth_window > 1 and len(rewards) > smooth_window:
+                kernel = np.ones(smooth_window) / smooth_window
+                rewards_smooth = np.convolve(rewards, kernel, mode='valid')
+                steps_smooth = steps[smooth_window-1:]
+            else:
+                rewards_smooth = rewards
+                steps_smooth = steps
+            
+            # Plot predicted rewards (not normalized)
+            ax1.plot(steps, rewards, 'b-', alpha=0.3, label='Predicted')
+            ax1.plot(steps_smooth, rewards_smooth, 'b-', linewidth=2, label='Smoothed')
+            
+            # Plot ground truth rewards if available
+            if episode["reward"] is not None:
+                gt_rewards = episode["reward"].cpu().numpy()
+                
+                # Replace NaN values with zeros
+                gt_rewards = np.nan_to_num(gt_rewards, nan=0.0)
+                
+                # Make sure steps and gt_rewards have the same length
+                gt_steps = np.arange(len(gt_rewards))
+                
+                # Normalize ground truth rewards to [0, 1]
+                gt_min, gt_max = gt_rewards.min(), gt_rewards.max()
+                if gt_max > gt_min:  # Avoid division by zero
+                    normalized_gt = (gt_rewards - gt_min) / (gt_max - gt_min)
+                else:
+                    normalized_gt = np.zeros_like(gt_rewards)
+                
+                # Smooth ground truth rewards
+                if smooth_window > 1 and len(normalized_gt) > smooth_window:
+                    gt_rewards_smooth = np.convolve(normalized_gt, kernel, mode='valid')
+                    gt_steps_smooth = gt_steps[smooth_window-1:]
+                    
+                    # Create twin axis for ground truth rewards
+                    ax2 = ax1.twinx()
+                    ax2.plot(gt_steps, normalized_gt, 'g-', alpha=0.3, label='GT (Norm)')
+                    ax2.plot(gt_steps_smooth, gt_rewards_smooth, 'g-', linewidth=2, label='GT Smooth')
+                    ax2.set_ylabel('GT Reward [0,1]', color='g', fontsize=8)
+                    ax2.tick_params(axis='y', labelcolor='g', labelsize=8)
+                    ax2.set_ylim(0, 1.05)
+                else:
+                    # Create twin axis for ground truth rewards
+                    ax2 = ax1.twinx()
+                    ax2.plot(gt_steps, normalized_gt, 'g-', linewidth=2, label='GT (Norm)')
+                    ax2.set_ylabel('GT Reward [0,1]', color='g', fontsize=8)
+                    ax2.tick_params(axis='y', labelcolor='g', labelsize=8)
+                    ax2.set_ylim(0, 1.05)
+                
+                # Add original range information to the title
+                ax1.set_title(f'Episode {episode["id"]} (L: {episode["length"]})\nGT: [{gt_min:.2f}, {gt_max:.2f}]', fontsize=10)
+            else:
+                ax1.set_title(f'Episode {episode["id"]} (L: {episode["length"]})', fontsize=10)
+            
+            # Set labels and grid
+            ax1.set_xlabel('Step', fontsize=9)
+            ax1.set_ylabel('Predicted Reward', fontsize=9)
+            ax1.tick_params(axis='both', labelsize=8)
+            ax1.grid(True, alpha=0.3)
+            
+            # Add legend with smaller font
+            if idx == 0:  # Only add legend to the first plot
+                ax1.legend(loc='upper left', fontsize=8)
+                if episode["reward"] is not None:
+                    ax2.legend(loc='upper right', fontsize=8)
     
-    # Smooth rewards
-    if smooth_window > 1 and len(rewards) > smooth_window:
-        kernel = np.ones(smooth_window) / smooth_window
-        rewards_smooth = np.convolve(rewards, kernel, mode='valid')
-        steps_smooth = steps[smooth_window-1:]
-    else:
-        rewards_smooth = rewards
-        steps_smooth = steps
-    
-    # Plot predicted rewards (not normalized)
-    plt.plot(steps, rewards, 'b-', alpha=0.3, label='Predicted Reward')
-    plt.plot(steps_smooth, rewards_smooth, 'b-', linewidth=2, label='Smoothed Predicted Reward')
-    
-    # Plot ground truth rewards if available
-    if ground_truth and episode["reward"] is not None:
-        gt_rewards = episode["reward"].cpu().numpy()
-        
-        # Replace NaN values with zeros
-        gt_rewards = np.nan_to_num(gt_rewards, nan=0.0)
-        
-        # Make sure steps and gt_rewards have the same length
-        gt_steps = np.arange(len(gt_rewards))
-        
-        # Normalize ground truth rewards to [0, 1]
-        gt_min, gt_max = gt_rewards.min(), gt_rewards.max()
-        if gt_max > gt_min:  # Avoid division by zero
-            normalized_gt = (gt_rewards - gt_min) / (gt_max - gt_min)
-        else:
-            normalized_gt = np.zeros_like(gt_rewards)
-        
-        # Smooth ground truth rewards
-        if smooth_window > 1 and len(normalized_gt) > smooth_window:
-            gt_rewards_smooth = np.convolve(normalized_gt, kernel, mode='valid')
-            gt_steps_smooth = gt_steps[smooth_window-1:]
-            plt.plot(gt_steps, normalized_gt, 'g-', alpha=0.3, label='Ground Truth Reward (Normalized)')
-            plt.plot(gt_steps_smooth, gt_rewards_smooth, 'g-', linewidth=2, label='Smoothed Ground Truth Reward')
-        else:
-            plt.plot(gt_steps, normalized_gt, 'g-', linewidth=2, label='Ground Truth Reward (Normalized)')
-        
-        # Add original range information to the title
-        plt.title(f'Episode {episode["id"]} Rewards (Length: {episode["length"]})\n'
-                 f'GT Range: [{gt_min:.3f}, {gt_max:.3f}]')
-    else:
-        plt.title(f'Episode {episode["id"]} Rewards (Length: {episode["length"]})')
-    
-    # Create twin axis for predicted rewards
-    ax1 = plt.gca()
-    ax1.set_ylabel('Predicted Reward')
-    
-    if ground_truth and episode["reward"] is not None:
-        ax2 = ax1.twinx()
-        ax2.set_ylabel('Normalized Ground Truth Reward [0, 1]', color='g')
-        ax2.tick_params(axis='y', labelcolor='g')
-    
-    # Add labels
-    plt.xlabel('Step')
-    plt.legend()
-    plt.grid(True, alpha=0.3)
+    # Adjust layout
+    plt.tight_layout()
     
     # Save the figure
     os.makedirs(output_dir, exist_ok=True)
-    plt.savefig(f"{output_dir}/episode_{episode_idx}_rewards.png", dpi=300, bbox_inches='tight')
+    plt.savefig(f"{output_dir}/reward_grid.png", dpi=300, bbox_inches='tight')
     plt.close()
 
-def analyze_rewards(data_path, model_path, output_dir, num_episodes=5, device=None):
+def analyze_rewards(data_path, model_path, output_dir, num_episodes=9, device=None):
     """Analyze rewards for episodes in the dataset.
     
     Args:
@@ -261,10 +284,9 @@ def analyze_rewards(data_path, model_path, output_dir, num_episodes=5, device=No
     # Create output directory
     os.makedirs(output_dir, exist_ok=True)
     
-    # Plot rewards for each episode
-    print("Plotting reward curves")
-    for i, episode in enumerate(sampled_episodes):
-        plot_episode_rewards(episode, i, output_dir)
+    # Plot rewards in a grid
+    print("Creating reward grid plot")
+    plot_reward_grid(sampled_episodes, output_dir, grid_size=(3, 3))
     
     print(f"Analysis complete. Results saved to {output_dir}")
 
@@ -273,7 +295,7 @@ def main():
     parser.add_argument("--data_path", type=str, default=DEFAULT_DATA_PATHS[0], help="Path to the dataset")
     parser.add_argument("--model_path", type=str, default="/scr/aliang80/robot_pref/reward_model/state_action_reward_model.pt", help="Path to the trained reward model")
     parser.add_argument("--output_dir", type=str, default="reward_analysis", help="Directory to save the plots")
-    parser.add_argument("--num_episodes", type=int, default=5, help="Number of episodes to analyze")
+    parser.add_argument("--num_episodes", type=int, default=9, help="Number of episodes to analyze (default: 9 for a 3x3 grid)")
     parser.add_argument("--use_cpu", action="store_true", help="Use CPU instead of CUDA")
     args = parser.parse_args()
     
