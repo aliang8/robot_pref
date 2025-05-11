@@ -12,6 +12,10 @@ data:
   reward_model_path: "reward_model/state_action_reward_model.pt"
   max_segments: 1000
   reward_batch_size: 32
+  use_ground_truth: false  # Set to true to use ground truth rewards instead of reward model
+  scale_rewards: false     # Set to true to scale rewards to min/max range
+  reward_min: -1.0         # Minimum value for scaled rewards
+  reward_max: 1.0          # Maximum value for scaled rewards
   env_name: "assembly-v2-goal-observable"  # Exact name of the MetaWorld environment
 
 # Model architecture

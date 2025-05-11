@@ -22,6 +22,7 @@ from trajectory_utils import (
     create_segments,
     sample_segment_pairs,
 )
+from utils.wandb_utils import log_to_wandb, log_artifact, reset_global_step
 
 # Set seed for reproducibility
 torch.manual_seed(RANDOM_SEED)
@@ -433,8 +434,14 @@ def log_wandb_metrics(train_loss, val_loss, epoch, lr=None):
 
     if lr is not None:
         metrics["learning_rate"] = lr
+<<<<<<< HEAD
 
     wandb.log(metrics)
+=======
+    
+    # Use our improved log_to_wandb function
+    log_to_wandb(metrics, epoch=epoch, prefix="train")
+>>>>>>> origin/anthony
 
 
 def train_reward_model(model, train_loader, val_loader, device, num_epochs=50, lr=1e-4):
@@ -575,8 +582,8 @@ def train_reward_model(model, train_loader, val_loader, device, num_epochs=50, l
 
         # Log the plot to wandb
         if wandb.run:
-            wandb.log({"training_curve": wandb.Image("reward_model_training.png")})
-
+            log_to_wandb({"training_curve": wandb.Image('reward_model_training.png')})
+            
         plt.close()
 
     return model, train_losses, val_losses
@@ -724,6 +731,10 @@ def main(cfg: DictConfig):
             tags=cfg.wandb.tags,
             notes=cfg.wandb.notes,
         )
+        
+        # Reset global step counter to ensure clean start
+        reset_global_step(0)
+        
         print(f"Wandb initialized: {wandb.run.name}")
 
     # Create output directory
@@ -913,19 +924,45 @@ def main(cfg: DictConfig):
     
     # Log final test results to wandb
     if cfg.wandb.use_wandb:
-        wandb.log(test_metrics)
+        log_to_wandb(test_metrics, prefix="test")
     
-    # Save model
-    model_path = f"{cfg.output.output_dir}/reward_model_{cfg.data.num_pairs}.pt"
+    # Create a descriptive model filename
+    dataset_name = Path(cfg.data.data_path).stem
+    hidden_dims_str = "_".join(map(str, cfg.model.hidden_dims))
+    model_filename = f"reward_model_{dataset_name}_seg{cfg.data.segment_length}_pairs{cfg.data.num_pairs}_hidden{hidden_dims_str}_epochs{cfg.training.num_epochs}.pt"
+    
+    # Save model with descriptive filename
+    model_path = f"{cfg.output.output_dir}/{model_filename}"
     torch.save(model.state_dict(), model_path)
     print(f"Model saved to {model_path}")
 
     # Log as wandb artifact
     if cfg.wandb.use_wandb:
-        artifact = wandb.Artifact(f"reward_model_{wandb.run.id}", type="model")
-        artifact.add_file(model_path)
-        wandb.log_artifact(artifact)
-
+        try:
+            # Create metadata about the model
+            metadata = {
+                "observation_dim": state_dim,
+                "action_dim": action_dim,
+                "hidden_dims": cfg.model.hidden_dims,
+                "test_accuracy": test_metrics["test_accuracy"],
+                "test_loss": test_metrics["test_loss"],
+                "num_segments": len(segments) if segments is not None else 0,
+                "num_pairs": len(segment_pairs) if segment_pairs is not None else 0,
+                "segment_length": cfg.data.segment_length
+            }
+            
+            # Create and log artifact
+            artifact = log_artifact(
+                model_path, 
+                artifact_type="reward_model", 
+                name=f"reward_model_{dataset_name}_seg{cfg.data.segment_length}_pairs{cfg.data.num_pairs}_epochs{cfg.training.num_epochs}", 
+                metadata=metadata
+            )
+            if artifact:
+                print(f"Model logged to wandb as artifact: {artifact.name}")
+        except Exception as e:
+            print(f"Warning: Could not log model as wandb artifact: {e}")
+    
     # Save segment info
     segment_info = {
         "segment_length": cfg.data.segment_length,
@@ -938,12 +975,15 @@ def main(cfg: DictConfig):
         "test_metrics": test_metrics,
         "config": OmegaConf.to_container(cfg, resolve=True)
     }
-
-    with open(f"{cfg.output.output_dir}/reward_model_info_{cfg.data.num_pairs}.pkl", "wb") as f:
+    
+    # Save segment info with descriptive filename
+    info_filename = f"reward_model_info_{dataset_name}_seg{cfg.data.segment_length}_pairs{cfg.data.num_pairs}_hidden{hidden_dims_str}_epochs{cfg.training.num_epochs}.pkl"
+    info_path = f"{cfg.output.output_dir}/{info_filename}"
+    with open(info_path, "wb") as f:
         pickle.dump(segment_info, f)
-
-    print(f"Model information saved to {cfg.output.output_dir}/reward_model_info_{cfg.data.num_pairs}.pkl")
-
+    
+    print(f"Model information saved to {info_path}")
+    
     # Finish wandb run
     if cfg.wandb.use_wandb and wandb.run:
         wandb.finish()

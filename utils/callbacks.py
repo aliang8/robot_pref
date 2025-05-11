@@ -1,5 +1,7 @@
 import numpy as np
 import wandb
+from utils.wandb_utils import log_to_wandb, log_artifact, debug_media_file
+import os
 
 class WandbCallback:
     """Callback for d3rlpy to log metrics to wandb.
@@ -57,12 +59,24 @@ class WandbCallback:
         
         # Log to wandb if enabled
         if self.use_wandb and wandb.run:
-            self._log_to_wandb(metrics, epoch=epoch, prefix=self.prefix)
+            try:
+                # Use our improved log_to_wandb function
+                log_to_wandb(metrics, epoch=epoch, prefix=self.prefix)
+            except Exception as e:
+                print(f"Warning: Failed to log metrics to wandb: {e}")
         
         return metrics
     
     def update_eval_metrics(self, eval_metrics, epoch):
-        """Track the best evaluation metrics so far."""
+        """Track the best evaluation metrics so far.
+        
+        Args:
+            eval_metrics: Dictionary of evaluation metrics
+            epoch: Current epoch
+            
+        Returns:
+            Dictionary with evaluation metrics and is_best flag
+        """
         # Check if these are the best metrics so far
         is_best = False
         if self.best_eval_metrics is None:
@@ -101,71 +115,61 @@ class WandbCallback:
             summary["final_evaluation_score"] = latest_eval[1]
         
         return summary
-        
-    def _log_to_wandb(self, metrics, epoch=None, prefix="", step=None):
-        """Log any metrics to wandb with proper prefixing.
+    
+    def log_model_artifact(self, model_path, metadata=None):
+        """Log model as a wandb artifact.
         
         Args:
-            metrics: Dict of metrics or list of (epoch, metrics_dict) tuples from d3rlpy
-            epoch: Current epoch (optional)
-            prefix: Prefix to add to metric names (e.g., "train", "eval")
-            step: Step to use for wandb logging (defaults to epoch if provided)
-        
+            model_path: Path to the saved model
+            metadata: Optional metadata to add to the artifact
+            
         Returns:
-            bool: True if metrics were logged, False otherwise
+            wandb.Artifact or None if logging failed
         """
-        if not wandb.run:
-            return False
-        
-        # Use epoch as step if step not specified
-        if step is None and epoch is not None:
-            step = epoch
+        if not self.use_wandb or not wandb.run:
+            return None
             
-        # Ensure prefix ends with / if it's not empty
-        if prefix and not prefix.endswith("/"):
-            prefix = f"{prefix}/"
+        try:
+            return log_artifact(model_path, artifact_type="model", metadata=metadata)
+        except Exception as e:
+            print(f"Error logging model artifact: {e}")
+            return None
+    
+    def log_video(self, video_path, name=None, fps=30, prefix=None):
+        """Log a video file to wandb.
         
-        # Handle d3rlpy training_metrics format (list of tuples)
-        if isinstance(metrics, list) and len(metrics) > 0 and isinstance(metrics[0], tuple) and len(metrics[0]) == 2:
-            # Log each epoch's metrics separately
-            for epoch, epoch_metrics in metrics:
-                # Create metrics dict with prefix
-                log_dict = {f"{prefix}{k}": v for k, v in epoch_metrics.items() 
-                        if isinstance(v, (int, float, np.int64, np.float32, np.float64, np.number))}
+        Args:
+            video_path: Path to the video file
+            name: Name to use for the video (default: derived from path)
+            fps: Frames per second for the video
+            prefix: Prefix to use (defaults to self.prefix if None)
+        """
+        if not self.use_wandb or not wandb.run:
+            return
+            
+        # Verify the video file is valid
+        print(f"Checking video file: {video_path}")
+        if not debug_media_file(video_path):
+            print(f"Skipping invalid video file: {video_path}")
+            return
+            
+        try:
+            # Default name from path if not specified
+            if name is None:
+                name = f"video_{self.epoch}"
                 
-                # Add epoch
-                log_dict["epoch"] = epoch
+            # Use provided prefix or default to self.prefix
+            actual_prefix = prefix if prefix is not None else self.prefix
                 
-                # Log to wandb
-                if log_dict:
-                    wandb.log(log_dict, step=epoch)
-            
-            print(f"Logged {len(metrics)} epochs of {prefix.rstrip('/')} metrics to wandb")
-            return True
-        
-        # Handle single metrics dict
-        elif isinstance(metrics, dict):
-            log_dict = {}
-            
-            # Add epoch if provided
-            if epoch is not None:
-                log_dict[f"{prefix}epoch"] = epoch
-            
-            # Add all numerical metrics with prefix
-            for key, value in metrics.items():
-                if isinstance(value, (int, float, np.int64, np.float32, np.float64, np.number)):
-                    log_dict[f"{prefix}{key}"] = value
-            
-            # Log histogram for returns if available
-            if "returns" in metrics and isinstance(metrics["returns"], (list, np.ndarray)):
-                wandb.log({f"{prefix}returns_histogram": wandb.Histogram(metrics["returns"])}, step=step)
-            
-            # Log to wandb
-            if log_dict:
-                wandb.log(log_dict, step=step)
-                return True
-        
-        return False
+            print(f"Logging video to wandb: {video_path} with name '{name}' under prefix '{actual_prefix}'")
+            # Log using our improved function
+            log_to_wandb({name: wandb.Video(video_path, fps=fps, format="mp4")}, 
+                        prefix=actual_prefix)
+            print(f"Successfully logged video: {video_path}")
+        except Exception as e:
+            print(f"Error logging video: {e}")
+            import traceback
+            traceback.print_exc()
 
 
 class CompositeCallback:

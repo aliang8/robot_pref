@@ -12,13 +12,13 @@ Create a balanced dataset with equal numbers of random/medium/expert trajectorie
 
 ```bash
 # List available datasets and use the first one
-python filter_dataset.py
+python create_mixed_expertise_dataset.py
 
 # Specify a particular dataset by index
-python filter_dataset.py --dataset_idx 1
+python create_mixed_expertise_dataset.py --dataset_idx 1
 
 # Specify a custom dataset path and output directory
-python filter_dataset.py --data_path "/path/to/dataset.pt" --output_dir "my_balanced_datasets"
+python create_mixed_expertise_dataset.py --data_path "/path/to/dataset.pt" --output_dir "my_balanced_datasets"
 ```
 
 ## End-Effector Clustering
@@ -101,3 +101,6 @@ python train_policy.py --config-name=iql data.data_path="/path/to/dataset.pt" ev
 ```
 
 Note: The parallel evaluation uses a pickle-safe environment creation mechanism to avoid serialization issues when using multiprocessing. 
+
+
+python train_policy.py --config-name=iql data.use_ground_truth=true data.scale_rewards=True wandb.use_wandb=True data.reward_model_path="/scr/aliang80/robot_pref/reward_model/state_action_reward_model.pt"

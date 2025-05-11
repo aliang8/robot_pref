@@ -1,13 +1,17 @@
 import os
+import time
+import json
 import torch
 import numpy as np
+from pathlib import Path
 import random
 from tqdm import tqdm
 import pickle
 import metaworld
 import d3rlpy
-from d3rlpy.algos import IQL, BC, IQLConfig, BCConfig
+from d3rlpy.algos import IQL, BC
 from d3rlpy.datasets import MDPDataset
+from d3rlpy.metrics.scorer import evaluate_on_environment
 from d3rlpy.models.encoders import VectorEncoderFactory
 from pathlib import Path
 import time
@@ -16,14 +20,22 @@ from omegaconf import DictConfig, OmegaConf
 import wandb
 import matplotlib.pyplot as plt
 import glob
+from sklearn.preprocessing import StandardScaler
+
+# Import d3rlpy components
+from d3rlpy.dataset import MDPDataset
+from d3rlpy.algos import IQL, DiscreteBC, BC
+from d3rlpy.metrics.scorer import evaluate_on_environment
+from d3rlpy.models.encoders import VectorEncoderFactory
 
 # Import utility functions
-from trajectory_utils import (
-    RANDOM_SEED,
-    load_tensordict
-)
-
-# Import reward models
+from trajectory_utils import load_tensordict, RANDOM_SEED
+from utils.env_utils import MetaWorldEnvCreator
+from utils.callbacks import WandbCallback, CompositeCallback
+from utils.wandb_utils import log_to_wandb, reset_global_step
+from utils.eval_utils import evaluate_policy_manual, custom_evaluate_on_environment
+from utils.data_utils import AttrDict
+from utils.viz import create_video_grid
 from train_reward_model import SegmentRewardModel
 
 # Import evaluation and rendering utilities
@@ -34,8 +46,8 @@ from utils.eval_utils import (
 
 # Import environment utilities
 from utils.env_utils import (
-    MetaWorldEnvCreator,
-    RobomimicEnvCreator
+    get_metaworld_env,
+    MetaWorldEnvCreator
 )
 
 # Import visualization utilities
@@ -214,13 +226,12 @@ def create_mdp_dataset_with_sa_reward(data, reward_model, device, max_segments=1
                 
                 # Process in smaller sub-batches if the segment is very large
                 sub_batch_size = 1024  # Memory efficient sub-batch size
-
+                
                 for j in range(0, len(segment_obs), sub_batch_size):
                     sub_obs = segment_obs[j:j+sub_batch_size]
                     sub_actions = segment_actions[j:j+sub_batch_size]
-
-                    # sub_rewards = reward_model(sub_obs, sub_actions).cpu().numpy() # TODO: 
-                    sub_rewards = reward_model.reward_model(sub_obs, sub_actions).cpu().numpy()
+                    
+                    sub_rewards = reward_model(sub_obs, sub_actions).cpu().numpy()
                     segment_rewards.append(sub_rewards)
                 
                 segment_rewards = np.concatenate(segment_rewards)
@@ -300,6 +311,149 @@ def get_d3rlpy_experiment_path(base_logdir, experiment_name, with_timestamp=True
     
     return None
 
+def load_dataset(data, reward_model=None, device=None, use_ground_truth=False, max_segments=None, reward_batch_size=32, 
+               scale_rewards=False, reward_min=None, reward_max=None):
+    """Load and process dataset for either IQL or BC training.
+    
+    Args:
+        data: TensorDict with observations, actions, rewards, and episode IDs
+        reward_model: Trained reward model (required for IQL, None for BC)
+        device: Device to run the reward model on (required for IQL)
+        use_ground_truth: If True, use ground truth rewards for IQL instead of reward model predictions
+        max_segments: Maximum number of segments to process (optional)
+        reward_batch_size: Batch size for reward computation (for IQL)
+        scale_rewards: If True, scales rewards to specified min/max range
+        reward_min: Minimum value for scaled rewards (default: -1)
+        reward_max: Maximum value for scaled rewards (default: 1)
+        
+    Returns:
+        d3rlpy MDPDataset with observations, actions, rewards, and terminals
+    """
+    # Set default scaling values if not provided
+    if scale_rewards:
+        reward_min = reward_min if reward_min is not None else -1.0
+        reward_max = reward_max if reward_max is not None else 1.0
+        print(f"Scaling rewards to range [{reward_min}, {reward_max}]")
+    
+    # Extract necessary data
+    observations = data["obs"] if "obs" in data else data["state"]
+    actions = data["action"]
+    episode_ids = data["episode"]
+    
+    # For BC or ground truth rewards, extract original rewards
+    if reward_model is None or use_ground_truth:
+        if "reward" not in data:
+            raise ValueError("Ground truth rewards requested but 'reward' not found in data.")
+        rewards = data["reward"].cpu()
+        if use_ground_truth:
+            print("Using ground truth rewards from data instead of reward model predictions.")
+    
+    # Make sure data is on CPU for preprocessing
+    observations = observations.cpu()
+    actions = actions.cpu()
+    episode_ids = episode_ids.cpu()
+    
+    # Filter out observations with NaN values
+    valid_mask = ~torch.isnan(observations).any(dim=1) & ~torch.isnan(actions).any(dim=1)
+    if reward_model is None or use_ground_truth:
+        valid_mask = valid_mask & ~torch.isnan(rewards)
+    
+    if not valid_mask.any():
+        raise ValueError("No valid observations found in the dataset.")
+    
+    # Extract valid data
+    valid_obs = observations[valid_mask]
+    valid_actions = actions[valid_mask]
+    valid_episodes = episode_ids[valid_mask]
+    
+    if reward_model is None or use_ground_truth:
+        valid_rewards = rewards[valid_mask].numpy()
+    
+    print(f"Using {valid_obs.shape[0]} valid observations out of {observations.shape[0]} total")
+    
+    # Process rewards based on algorithm and options
+    if reward_model is not None and not use_ground_truth:
+        # IQL with reward model - Process in manageable batches
+        process_batch_size = reward_batch_size or 1024
+        all_rewards = []
+        
+        # Compute rewards using the trained reward model
+        reward_model.eval()  # Ensure model is in evaluation mode
+        
+        with torch.no_grad():
+            for start_idx in tqdm(range(0, len(valid_obs), process_batch_size), desc="Computing rewards"):
+                end_idx = min(start_idx + process_batch_size, len(valid_obs))
+                
+                # Move batch to device
+                batch_obs = valid_obs[start_idx:end_idx].to(device)
+                batch_actions = valid_actions[start_idx:end_idx].to(device)
+                
+                # Compute rewards, need the per step reward not the summed reward
+                batch_rewards = reward_model.reward_model(batch_obs, batch_actions).cpu().numpy()
+                
+                # Ensure proper shape for concatenation
+                if np.isscalar(batch_rewards) or (hasattr(batch_rewards, 'shape') and batch_rewards.shape == ()):
+                    batch_rewards = np.array([batch_rewards])
+                    
+                all_rewards.append(batch_rewards)
+        
+        # Combine all rewards
+        if len(all_rewards) == 1:
+            rewards_np = all_rewards[0]
+        else:
+            rewards_np = np.concatenate(all_rewards)
+    else:
+        # BC or IQL with ground truth - use the extracted rewards
+        rewards_np = valid_rewards
+    
+    # Scale rewards if requested
+    if scale_rewards:
+        original_min = np.min(rewards_np)
+        original_max = np.max(rewards_np)
+        
+        # Avoid division by zero
+        if original_max - original_min > 1e-8:
+            # Scale to [0, 1] first, then to target range
+            rewards_np = (rewards_np - original_min) / (original_max - original_min)
+            rewards_np = rewards_np * (reward_max - reward_min) + reward_min
+            print(f"Scaled rewards from [{original_min:.4f}, {original_max:.4f}] to [{reward_min:.4f}, {reward_max:.4f}]")
+        else:
+            # If all rewards are the same, set to the middle of the target range
+            middle_value = (reward_max + reward_min) / 2
+            rewards_np = np.ones_like(rewards_np) * middle_value
+            print(f"All rewards have the same value ({original_min:.4f}), setting to {middle_value:.4f}")
+    
+    # Create terminals array (True at the end of each episode)
+    episode_ends = torch.cat([
+        valid_episodes[1:] != valid_episodes[:-1],
+        torch.tensor([True])  # Last observation is always an episode end
+    ])
+    terminals_np = episode_ends.numpy()
+    
+    # Convert to numpy for d3rlpy
+    observations_np = valid_obs.numpy()
+    actions_np = valid_actions.numpy()
+    
+    # Create MDPDataset with the rewards
+    dataset = MDPDataset(
+        observations=observations_np,
+        actions=actions_np,
+        rewards=rewards_np,
+        terminals=terminals_np
+    )
+    
+    # Print final dataset statistics
+    print(f"Final dataset size: {dataset.size()} transitions with {dataset.size() - np.sum(terminals_np)} non-terminal transitions")
+    reward_stats = {
+        'mean': np.mean(rewards_np),
+        'std': np.std(rewards_np),
+        'min': np.min(rewards_np),
+        'max': np.max(rewards_np)
+    }
+    print(f"Reward statistics: mean={reward_stats['mean']:.4f}, std={reward_stats['std']:.4f}, min={reward_stats['min']:.4f}, max={reward_stats['max']:.4f}")
+    
+    return dataset
+
 @hydra.main(config_path="config", config_name="iql")
 def main(cfg: DictConfig):
     """Train a policy using specified algorithm with Hydra config."""
@@ -341,6 +495,10 @@ def main(cfg: DictConfig):
             tags=cfg.wandb.tags if hasattr(cfg.wandb, 'tags') else [algorithm_name],
             notes=cfg.wandb.notes
         )
+        
+        # Reset global step counter to ensure clean start
+        reset_global_step(0)
+        
         print(f"Wandb initialized: {wandb.run.name}")
     
     # Create output directory
@@ -377,56 +535,48 @@ def main(cfg: DictConfig):
         reward_model.eval()
         print(f"Loaded reward model from {cfg.data.reward_model_path}")
         
-        # Create MDP dataset with learned rewards
-        print("Creating MDP dataset with learned rewards...")
-        dataset = create_mdp_dataset_with_sa_reward(
+        # Check if we should use ground truth rewards
+        use_ground_truth = cfg.data.get('use_ground_truth', False)
+        if use_ground_truth:
+            print("Using ground truth rewards instead of reward model predictions.")
+        
+        # Get reward scaling options
+        scale_rewards = cfg.data.get('scale_rewards', False)
+        reward_min = cfg.data.get('reward_min', -1.0)
+        reward_max = cfg.data.get('reward_max', 1.0)
+        if scale_rewards:
+            print(f"Will scale rewards to range [{reward_min}, {reward_max}]")
+        
+        # Create MDP dataset
+        print("Creating MDP dataset with rewards...")
+        dataset = load_dataset(
             data, 
-            reward_model, 
-            device, 
+            reward_model=reward_model, 
+            device=device, 
+            use_ground_truth=use_ground_truth,
             max_segments=cfg.data.max_segments,
-            batch_size=cfg.data.reward_batch_size
+            reward_batch_size=cfg.data.reward_batch_size,
+            scale_rewards=scale_rewards,
+            reward_min=reward_min,
+            reward_max=reward_max
         )
     else:  # BC or other algorithms that don't need a reward model
-        # For BC, we can directly use the demonstrations without modifying rewards
+        # For BC, we can directly use the demonstrations
         print("Creating MDP dataset from demonstrations...")
-        # Extract data ensuring no NaN values
-        observations = data["obs"] if "obs" in data else data["state"]
-        actions = data["action"]
-        rewards = data["reward"] if "reward" in data else torch.zeros_like(actions[:, 0])
-        episode_ids = data["episode"] if "episode" in data else torch.zeros_like(rewards, dtype=torch.long)
         
-        # Convert to numpy and handle NaN values
-        observations = observations.cpu().numpy()
-        actions = actions.cpu().numpy()
-        rewards = rewards.cpu().numpy()
-        
-        # Use episode_ids to create terminals
-        episode_ids = episode_ids.cpu().numpy()
-        
-        # Create terminals array (1 at the end of each episode)
-        terminals = np.zeros_like(rewards)
-        episode_ends = np.where(np.diff(episode_ids, prepend=-1) != 0)[0]
-        if len(episode_ends) > 0:
-            terminals[episode_ends - 1] = 1
-        
-        # Filter out NaN values
-        valid_mask = (~np.isnan(observations).any(axis=1)) & (~np.isnan(actions).any(axis=1)) & (~np.isnan(rewards))
-        if not np.all(valid_mask):
-            print(f"Filtering out {np.sum(~valid_mask)} transitions with NaN values")
-            observations = observations[valid_mask]
-            actions = actions[valid_mask]
-            rewards = rewards[valid_mask]
-            terminals = terminals[valid_mask]
-        
-        # Create the dataset
-        dataset = MDPDataset(
-            observations=observations,
-            actions=actions,
-            rewards=rewards,
-            terminals=terminals
+        # Get reward scaling options (also apply to BC for consistency)
+        scale_rewards = cfg.data.get('scale_rewards', False)
+        reward_min = cfg.data.get('reward_min', -1.0)
+        reward_max = cfg.data.get('reward_max', 1.0)
+        if scale_rewards:
+            print(f"Will scale rewards to range [{reward_min}, {reward_max}]")
+            
+        dataset = load_dataset(
+            data,
+            scale_rewards=scale_rewards,
+            reward_min=reward_min,
+            reward_max=reward_max
         )
-    
-    print(f"Created dataset with {dataset.size()} transitions")
     
     # Create environment for evaluation
     env = None
@@ -466,24 +616,21 @@ def main(cfg: DictConfig):
 
     # Initialize algorithm based on the algorithm_name
     print(f"Initializing {algorithm_name.upper()} algorithm...")
-    algo = None
+    
     if algorithm_name.lower() == "iql":
         # Initialize IQL algorithm
-        # TODO: This doesn't work because of version mismatch I think (using d3rlpy 2.8.1)
-        # algo = IQL(
-        #     actor_learning_rate=cfg.model.actor_learning_rate,
-        #     critic_learning_rate=cfg.model.critic_learning_rate,
-        #     batch_size=cfg.model.batch_size,
-        #     gamma=cfg.model.gamma,
-        #     tau=cfg.model.tau,
-        #     n_critics=cfg.model.n_critics,
-        #     expectile=cfg.model.expectile,
-        #     weight_temp=cfg.model.weight_temp,
-        #     encoder_factory=VectorEncoderFactory(cfg.model.encoder_dims),
-        #     use_gpu=torch.cuda.is_available()
-        # )
-        iql_config = IQLConfig(**cfg.iql)
-        algo = iql_config.create()
+        algo = IQL(
+            actor_learning_rate=cfg.model.actor_learning_rate,
+            critic_learning_rate=cfg.model.critic_learning_rate,
+            batch_size=cfg.model.batch_size,
+            gamma=cfg.model.gamma,
+            tau=cfg.model.tau,
+            n_critics=cfg.model.n_critics,
+            expectile=cfg.model.expectile,
+            weight_temp=cfg.model.weight_temp,
+            encoder_factory=VectorEncoderFactory(cfg.model.encoder_dims),
+            use_gpu=torch.cuda.is_available()
+        )
         
     elif algorithm_name.lower() == "bc":
         # Initialize BC algorithm
@@ -598,12 +745,39 @@ def main(cfg: DictConfig):
                 # Try to find and upload videos
                 try:
                     video_files = glob.glob(f"{video_path}*.mp4")
+                    print(f"Found {len(video_files)} video files: {video_files}")
+                    
                     if video_files:
-                        # Only log a few videos to save space
-                        video_data = [wandb.Video(video_file, fps=cfg.evaluation.video_fps, format="mp4") 
-                                    for video_file in video_files[:3]]
-                        wandb.log({f"eval/videos_epoch_{epoch}": video_data})
-                        print(f"Logged {len(video_data)} videos to wandb")
+                        # Log individual videos (maximum 3)
+                        for i, video_file in enumerate(video_files[:3]):
+                            wandb_callback.log_video(
+                                video_file,
+                                name=f"videos_epoch_{epoch}_{i+1}",
+                                fps=cfg.evaluation.video_fps,
+                                prefix="eval_rollout"
+                            )
+                            
+                        # Create a grid of videos if we have multiple
+                        if len(video_files) > 1:
+                            print("Creating video grid from evaluation videos...")
+                            grid_path = f"{os.path.dirname(video_path)}/eval_grid_epoch_{epoch}.mp4"
+                            try:
+                                grid_video = create_video_grid(
+                                    video_files, 
+                                    grid_path, 
+                                    max_videos=6, 
+                                    fps=cfg.evaluation.video_fps
+                                )
+                                if grid_video:
+                                    # Log the grid video
+                                    wandb_callback.log_video(
+                                        grid_video,
+                                        name=f"video_grid_epoch_{epoch}",
+                                        fps=cfg.evaluation.video_fps,
+                                        prefix="eval_rollout"
+                                    )
+                            except Exception as e:
+                                print(f"Error creating video grid: {e}")
                 except Exception as e:
                     print(f"Error logging videos to wandb: {e}")
 
@@ -717,7 +891,7 @@ def main(cfg: DictConfig):
                 plt.tight_layout()
                 
                 # Log to wandb
-                wandb.log({"media/plots/training_losses": wandb.Image(plt)})
+                log_to_wandb({"media/plots/training_losses": wandb.Image(plt)})
                 plt.close()
             except Exception as e:
                 print(f"Warning: Could not create training loss plot: {e}")
@@ -726,7 +900,32 @@ def main(cfg: DictConfig):
     model_path = f"{cfg.output.output_dir}/{algorithm_name.lower()}_{Path(cfg.data.data_path).stem}.pt"
     algo.save_model(model_path)
     print(f"Model saved to {model_path}")
-    
+
+    # Log model as wandb artifact if enabled
+    if cfg.wandb.use_wandb and wandb.run:
+        try:
+            # Create metadata about the model
+            model_metadata = {
+                "algorithm": algorithm_name,
+                "dataset": Path(cfg.data.data_path).stem,
+                "epochs": n_epochs,
+                "observation_dim": state_dim,
+                "action_dim": action_dim
+            }
+            
+            # Add best metrics if available
+            if wandb_callback.best_eval_metrics:
+                for k, v in wandb_callback.best_eval_metrics.items():
+                    if isinstance(v, (int, float, np.int64, np.float32, np.float64, np.number)):
+                        model_metadata[f"best_{k}"] = v
+            
+            # Log the artifact with metadata
+            artifact = wandb_callback.log_model_artifact(model_path, metadata=model_metadata)
+            if artifact:
+                print(f"Model logged to wandb as artifact: {artifact.name}")
+        except Exception as e:
+            print(f"Warning: Could not log model as wandb artifact: {e}")
+
     # Run final comprehensive evaluation
     print("\nRunning final comprehensive evaluation...")
     if env is not None:
@@ -766,11 +965,39 @@ def main(cfg: DictConfig):
             if video_recording and video_path and wandb.run:
                 try:
                     video_files = glob.glob(f"{video_path}*.mp4")
+                    print(f"Found {len(video_files)} final evaluation video files")
+                    
                     if video_files:
-                        # Upload up to 3 videos to save space
-                        video_data = [wandb.Video(video_file, fps=cfg.evaluation.video_fps, format="mp4") 
-                                     for video_file in video_files[:3]]
-                        wandb.log({"final_eval/videos": video_data})
+                        # Upload up to 3 videos
+                        for i, video_file in enumerate(video_files[:3]):
+                            wandb_callback.log_video(
+                                video_file,
+                                name=f"video_{i+1}",
+                                fps=cfg.evaluation.video_fps,
+                                prefix="final_rollout"
+                            )
+                            
+                        # Create a grid of videos if we have multiple
+                        if len(video_files) > 1:
+                            print("Creating video grid from final evaluation videos...")
+                            grid_path = f"{os.path.dirname(video_path)}/final_eval_grid.mp4"
+                            try:
+                                grid_video = create_video_grid(
+                                    video_files, 
+                                    grid_path, 
+                                    max_videos=6, 
+                                    fps=cfg.evaluation.video_fps
+                                )
+                                if grid_video:
+                                    # Log the grid video
+                                    wandb_callback.log_video(
+                                        grid_video,
+                                        name="video_grid",
+                                        fps=cfg.evaluation.video_fps,
+                                        prefix="final_rollout"
+                                    )
+                            except Exception as e:
+                                print(f"Error creating final video grid: {e}")
                 except Exception as e:
                     print(f"Error logging final videos to wandb: {e}")
     
