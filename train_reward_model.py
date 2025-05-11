@@ -883,8 +883,13 @@ def main(cfg: DictConfig):
     if cfg.wandb.use_wandb:
         log_to_wandb(test_metrics, prefix="test")
     
-    # Save model
-    model_path = f"{cfg.output.output_dir}/state_action_reward_model.pt"
+    # Create a descriptive model filename
+    dataset_name = Path(cfg.data.data_path).stem
+    hidden_dims_str = "_".join(map(str, cfg.model.hidden_dims))
+    model_filename = f"reward_model_{dataset_name}_seg{cfg.data.segment_length}_pairs{cfg.data.num_pairs}_hidden{hidden_dims_str}_epochs{cfg.training.num_epochs}.pt"
+    
+    # Save model with descriptive filename
+    model_path = f"{cfg.output.output_dir}/{model_filename}"
     torch.save(model.state_dict(), model_path)
     print(f"Model saved to {model_path}")
     
@@ -907,7 +912,7 @@ def main(cfg: DictConfig):
             artifact = log_artifact(
                 model_path, 
                 artifact_type="reward_model", 
-                name=f"reward_model_{Path(cfg.data.data_path).stem}", 
+                name=f"reward_model_{dataset_name}_seg{cfg.data.segment_length}_pairs{cfg.data.num_pairs}_epochs{cfg.training.num_epochs}", 
                 metadata=metadata
             )
             if artifact:
@@ -928,10 +933,13 @@ def main(cfg: DictConfig):
         "config": OmegaConf.to_container(cfg, resolve=True)
     }
     
-    with open(f"{cfg.output.output_dir}/reward_model_info.pkl", "wb") as f:
+    # Save segment info with descriptive filename
+    info_filename = f"reward_model_info_{dataset_name}_seg{cfg.data.segment_length}_pairs{cfg.data.num_pairs}_hidden{hidden_dims_str}_epochs{cfg.training.num_epochs}.pkl"
+    info_path = f"{cfg.output.output_dir}/{info_filename}"
+    with open(info_path, "wb") as f:
         pickle.dump(segment_info, f)
     
-    print(f"Model information saved to {cfg.output.output_dir}/reward_model_info.pkl")
+    print(f"Model information saved to {info_path}")
     
     # Finish wandb run
     if cfg.wandb.use_wandb and wandb.run:
