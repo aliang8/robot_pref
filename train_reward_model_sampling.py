@@ -97,6 +97,9 @@ def compute_uncertainty_scores(model, segment_pairs, segment_indices, data, devi
     obs_key = "obs" if "obs" in data else "state"
     action_key = "action"
     
+    # Ensure data is on CPU for indexing operations
+    data_cpu = {k: v.cpu() if isinstance(v, torch.Tensor) else v for k, v in data.items()}
+    
     uncertainty_scores = []
     
     # Process in batches to avoid memory issues
@@ -116,11 +119,11 @@ def compute_uncertainty_scores(model, segment_pairs, segment_indices, data, devi
                 start1, end1 = segment_indices[seg_idx1]
                 start2, end2 = segment_indices[seg_idx2]
                 
-                # Extract observations and actions
-                obs1 = data[obs_key][start1:end1].to(device)
-                actions1 = data[action_key][start1:end1-1].to(device)
-                obs2 = data[obs_key][start2:end2].to(device)
-                actions2 = data[action_key][start2:end2-1].to(device)
+                # Extract observations and actions from CPU data
+                obs1 = data_cpu[obs_key][start1:end1].clone()
+                actions1 = data_cpu[action_key][start1:end1-1].clone()
+                obs2 = data_cpu[obs_key][start2:end2].clone()
+                actions2 = data_cpu[action_key][start2:end2-1].clone()
                 
                 # Ensure observations and actions have same length
                 min_len1 = min(obs1.shape[0]-1, actions1.shape[0])
@@ -130,6 +133,12 @@ def compute_uncertainty_scores(model, segment_pairs, segment_indices, data, devi
                 actions1 = actions1[:min_len1]
                 obs2 = obs2[:min_len2]
                 actions2 = actions2[:min_len2]
+                
+                # Move to device only after slicing
+                obs1 = obs1.to(device)
+                actions1 = actions1.to(device)
+                obs2 = obs2.to(device)
+                actions2 = actions2.to(device)
                 
                 if method == "random":
                     # Random sampling - just assign random score
@@ -191,6 +200,13 @@ def select_uncertain_pairs(uncertainty_scores, segment_pairs, k):
     # Convert to numpy for easier manipulation
     scores = np.array(uncertainty_scores)
     
+    # Ensure k is not larger than the number of available pairs
+    k = min(k, len(segment_pairs))
+    
+    if k == 0:
+        print("Warning: No pairs available to select")
+        return [], []
+    
     # Get indices of top-k highest uncertainty scores
     selected_indices = np.argsort(scores)[-k:]
     
@@ -212,14 +228,17 @@ def get_ground_truth_preferences(segment_pairs, segment_indices, rewards):
     """
     preferences = []
     
+    # Ensure rewards is on CPU for indexing
+    rewards_cpu = rewards.cpu() if isinstance(rewards, torch.Tensor) else rewards
+    
     for seg_idx1, seg_idx2 in segment_pairs:
         # Get segment indices
         start1, end1 = segment_indices[seg_idx1]
         start2, end2 = segment_indices[seg_idx2]
         
         # Calculate cumulative rewards for each segment
-        reward1 = rewards[start1:end1].sum().item()
-        reward2 = rewards[start2:end2].sum().item()
+        reward1 = rewards_cpu[start1:end1].sum().item()
+        reward2 = rewards_cpu[start2:end2].sum().item()
         
         # Determine preference (1 = first segment preferred, 2 = second segment preferred)
         if reward1 > reward2:
@@ -245,6 +264,13 @@ def create_initial_dataset(segment_pairs, segment_indices, preferences, data, in
         unlabeled_pairs: List of remaining unlabeled segment pairs
         unlabeled_indices: Indices of unlabeled pairs in the original list
     """
+    # Ensure initial_size is not larger than the number of available pairs
+    initial_size = min(initial_size, len(segment_pairs))
+    
+    if initial_size == 0:
+        print("Warning: No pairs available for initial dataset")
+        return [], [], [], []
+    
     # Randomly select initial pairs
     all_indices = list(range(len(segment_pairs)))
     labeled_indices = random.sample(all_indices, initial_size)
@@ -269,7 +295,7 @@ def train_ensemble_model(state_dim, action_dim, labeled_pairs, segment_indices, 
         labeled_pairs: List of labeled segment pairs
         segment_indices: List of (start_idx, end_idx) tuples for each segment
         labeled_preferences: List of preferences for labeled pairs
-        data: Data dictionary containing observations and actions
+        data: Data dictionary containing observations and actions (should be on CPU)
         device: Device to run training on
         num_models: Number of models in the ensemble
         hidden_dims: Hidden dimensions for each model
@@ -278,39 +304,120 @@ def train_ensemble_model(state_dim, action_dim, labeled_pairs, segment_indices, 
     Returns:
         ensemble: Trained ensemble model
     """
+    # Ensure data is on CPU for dataset creation
+    if not isinstance(data, dict) or any(isinstance(v, torch.Tensor) and v.device.type != 'cpu' for v in data.values()):
+        print("Warning: Data should be on CPU for indexing in PreferenceDataset. Converting to CPU...")
+        data = {k: v.cpu() if isinstance(v, torch.Tensor) else v for k, v in data.items()}
+    
     # Create dataset from labeled pairs
     dataset = PreferenceDataset(data, labeled_pairs, segment_indices, labeled_preferences)
     
     # Create ensemble model
     ensemble = EnsembleRewardModel(state_dim, action_dim, hidden_dims, num_models)
     
-    # Train each model in the ensemble
-    for i in range(num_models):
-        print(f"\nTraining model {i+1}/{num_models} in ensemble")
+    # Move entire ensemble to device at once
+    ensemble = ensemble.to(device)
+    
+    # Create a combined optimizer for all models in the ensemble
+    combined_params = list(ensemble.parameters())
+    optimizer = optim.Adam(combined_params, lr=1e-4, weight_decay=1e-4)
+    
+    # Create train/val split for the dataset
+    train_size = int(0.8 * len(dataset))
+    val_size = len(dataset) - train_size
+    
+    train_dataset, val_dataset = random_split(
+        dataset, 
+        [train_size, val_size],
+        generator=torch.Generator().manual_seed(42)
+    )
+    
+    train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=64)
+    
+    print(f"Training ensemble of {num_models} models for {num_epochs} epochs")
+    
+    # Training loop
+    for epoch in range(num_epochs):
+        # Training phase
+        ensemble.train()
+        train_loss = 0.0
         
-        # Create data loaders for this model
-        # Use different random splits for each model to increase diversity
-        train_size = int(0.8 * len(dataset))
-        val_size = len(dataset) - train_size
+        for batch_idx, (obs1, actions1, obs2, actions2, pref) in enumerate(train_loader):
+            # Move data to device
+            obs1, actions1 = obs1.to(device), actions1.to(device)
+            obs2, actions2 = obs2.to(device), actions2.to(device)
+            pref = pref.to(device)
+            
+            optimizer.zero_grad(set_to_none=True)
+            
+            # Forward pass through all models
+            batch_loss = 0.0
+            for i in range(num_models):
+                model = ensemble.models[i]
+                
+                # Compute rewards
+                reward1 = model(obs1, actions1)
+                reward2 = model(obs2, actions2)
+                
+                # Compute loss
+                loss = bradley_terry_loss(reward1, reward2, pref)
+                batch_loss += loss
+            
+            # Average loss across models
+            batch_loss /= num_models
+            
+            # Backward pass
+            batch_loss.backward()
+            
+            # Clip gradients
+            torch.nn.utils.clip_grad_norm_(combined_params, max_norm=1.0)
+            
+            # Update parameters
+            optimizer.step()
+            
+            train_loss += batch_loss.item()
         
-        train_dataset, val_dataset = random_split(
-            dataset, 
-            [train_size, val_size],
-            generator=torch.Generator().manual_seed(42 + i)  # Different seed for each model
-        )
+        avg_train_loss = train_loss / len(train_loader)
         
-        train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True)
-        val_loader = DataLoader(val_dataset, batch_size=64)
+        # Validation phase
+        ensemble.eval()
+        val_loss = 0.0
         
-        # Train this model
-        train_reward_model(
-            ensemble.models[i],
-            train_loader,
-            val_loader,
-            device,
-            num_epochs=num_epochs,
-            lr=1e-4
-        )
+        with torch.no_grad():
+            for batch_idx, (obs1, actions1, obs2, actions2, pref) in enumerate(val_loader):
+                # Move data to device
+                obs1, actions1 = obs1.to(device), actions1.to(device)
+                obs2, actions2 = obs2.to(device), actions2.to(device)
+                pref = pref.to(device)
+                
+                # Forward pass through all models
+                batch_loss = 0.0
+                for i in range(num_models):
+                    model = ensemble.models[i]
+                    
+                    # Compute rewards
+                    reward1 = model(obs1, actions1)
+                    reward2 = model(obs2, actions2)
+                    
+                    # Compute loss
+                    loss = bradley_terry_loss(reward1, reward2, pref)
+                    batch_loss += loss
+                
+                # Average loss across models
+                batch_loss /= num_models
+                
+                val_loss += batch_loss.item()
+        
+        avg_val_loss = val_loss / len(val_loader)
+        
+        # Print progress
+        if (epoch + 1) % 5 == 0 or epoch == 0:
+            print(f"Epoch {epoch+1}/{num_epochs}: train_loss={avg_train_loss:.4f}, val_loss={avg_val_loss:.4f}")
+    
+    # Move ensemble back to CPU if using CUDA to save memory
+    if device.type == 'cuda':
+        ensemble = ensemble.cpu()
     
     return ensemble
 
@@ -372,10 +479,13 @@ def active_preference_learning(cfg):
     print(f"Loading data from {cfg.data.data_path}")
     data = load_tensordict(cfg.data.data_path)
     
+    # Keep a CPU version of the data for indexing operations
+    data_cpu = {k: v.cpu() if isinstance(v, torch.Tensor) else v for k, v in data.items()}
+    
     # Get observation and action dimensions
-    observations = data["obs"] if "obs" in data else data["state"]
-    actions = data["action"]
-    rewards = data["reward"]
+    observations = data_cpu["obs"] if "obs" in data_cpu else data_cpu["state"]
+    actions = data_cpu["action"]
+    rewards = data_cpu["reward"]
     
     state_dim = observations.shape[1]
     action_dim = actions.shape[1]
@@ -384,30 +494,74 @@ def active_preference_learning(cfg):
     
     # Create segments
     print(f"Creating segments of length {cfg.data.segment_length}...")
+    # Pass CPU data to create_segments to ensure proper indexing
     segments, segment_indices = create_segments(
-        data, 
+        data_cpu, 
         segment_length=cfg.data.segment_length,
         max_segments=cfg.data.num_segments
     )
     
     # Generate all possible segment pairs
     print(f"Generating {cfg.data.num_pairs} segment pairs...")
+    # Pass CPU rewards to sample_segment_pairs
     all_segment_pairs, gt_preferences = sample_segment_pairs(
         segments, 
         segment_indices, 
-        data["reward"], 
+        data_cpu["reward"], 
         n_pairs=cfg.data.num_pairs
     )
     
-    # Create initial labeled dataset
+    # Create test dataset from a separate set of pairs for consistent evaluation
+    # We use 20% of all pairs for testing
+    test_size = min(int(0.2 * len(all_segment_pairs)), len(all_segment_pairs))
+    
+    if test_size == 0:
+        print("Warning: Not enough pairs for testing. Using all pairs for training.")
+        test_indices = []
+        test_pairs = []
+        test_preferences = []
+    else:
+        test_indices = random.sample(range(len(all_segment_pairs)), test_size)
+        test_pairs = [all_segment_pairs[i] for i in test_indices]
+        test_preferences = [gt_preferences[i] for i in test_indices]
+    
+    # Create a set of test indices for faster lookup
+    test_indices_set = set(test_indices)
+    
+    # Make sure test pairs are not in labeled or unlabeled sets
+    # First create initial dataset excluding test pairs
+    remaining_indices = [i for i in range(len(all_segment_pairs)) if i not in test_indices_set]
+    remaining_pairs = [all_segment_pairs[i] for i in remaining_indices]
+    remaining_preferences = [gt_preferences[i] for i in remaining_indices]
+    
+    # Now create the labeled/unlabeled split from the remaining pairs
     print(f"Creating initial dataset with {cfg.active_learning.initial_size} labeled pairs...")
+    print(f"Using {len(remaining_pairs)} pairs after excluding test set")
+    
     labeled_pairs, labeled_preferences, unlabeled_pairs, unlabeled_indices = create_initial_dataset(
-        all_segment_pairs,
+        remaining_pairs,
         segment_indices,
-        gt_preferences,
-        data,
+        remaining_preferences,
+        data_cpu,  # Use CPU data for indexing
         cfg.active_learning.initial_size
     )
+    
+    # Map unlabeled_indices back to original indices
+    unlabeled_indices = [remaining_indices[i] for i in unlabeled_indices]
+    
+    # Create test dataset if we have test pairs
+    if test_size > 0:
+        test_dataset = PreferenceDataset(data_cpu, test_pairs, segment_indices, test_preferences)
+        test_loader = DataLoader(test_dataset, batch_size=64)
+        print(f"Created test dataset with {len(test_dataset)} pairs")
+    else:
+        # Create a small dummy test dataset from the labeled data if no separate test set
+        test_dataset = PreferenceDataset(data_cpu, labeled_pairs[:min(10, len(labeled_pairs))], 
+                                        segment_indices, labeled_preferences[:min(10, len(labeled_preferences))])
+        test_loader = DataLoader(test_dataset, batch_size=64)
+        print(f"Created dummy test dataset with {len(test_dataset)} pairs from labeled data")
+    
+    print(f"Starting with {len(labeled_pairs)} labeled and {len(unlabeled_pairs)} unlabeled pairs")
     
     # Initialize metrics tracking
     metrics = {
@@ -422,26 +576,6 @@ def active_preference_learning(cfg):
     total_labeled = len(labeled_pairs)
     max_queries = cfg.active_learning.max_queries
     
-    # Create test dataset from a separate set of pairs for consistent evaluation
-    # We use 20% of all pairs for testing
-    test_size = int(0.2 * len(all_segment_pairs))
-    test_indices = random.sample(range(len(all_segment_pairs)), test_size)
-    test_pairs = [all_segment_pairs[i] for i in test_indices]
-    test_preferences = [gt_preferences[i] for i in test_indices]
-    
-    # Make sure test pairs are not in labeled or unlabeled sets
-    labeled_pairs = [p for i, p in enumerate(labeled_pairs) if i not in test_indices]
-    labeled_preferences = [p for i, p in enumerate(labeled_preferences) if i not in test_indices]
-    unlabeled_pairs = [p for i, p in enumerate(unlabeled_pairs) if i not in test_indices]
-    unlabeled_indices = [i for i, idx in enumerate(unlabeled_indices) if idx not in test_indices]
-    
-    # Create test dataset
-    test_dataset = PreferenceDataset(data, test_pairs, segment_indices, test_preferences)
-    test_loader = DataLoader(test_dataset, batch_size=64)
-    
-    print(f"Created test dataset with {len(test_dataset)} pairs")
-    print(f"Starting with {len(labeled_pairs)} labeled and {len(unlabeled_pairs)} unlabeled pairs")
-    
     while total_labeled < max_queries and len(unlabeled_pairs) > 0:
         iteration += 1
         print(f"\n--- Active Learning Iteration {iteration} ---")
@@ -455,7 +589,7 @@ def active_preference_learning(cfg):
             labeled_pairs,
             segment_indices,
             labeled_preferences,
-            data,
+            data_cpu,  # Use CPU data for indexing
             device,
             num_models=cfg.active_learning.num_models,
             hidden_dims=cfg.model.hidden_dims,
@@ -496,7 +630,7 @@ def active_preference_learning(cfg):
             ensemble,
             unlabeled_pairs,
             segment_indices,
-            data,
+            data_cpu,  # Use CPU data for indexing
             device,
             method=cfg.active_learning.uncertainty_method
         )
@@ -508,6 +642,11 @@ def active_preference_learning(cfg):
             unlabeled_pairs,
             batch_size
         )
+        
+        # Check if we were able to select any pairs
+        if len(selected_pairs) == 0:
+            print("No pairs were selected. Ending active learning loop.")
+            break
         
         # Get ground truth preferences for selected pairs
         # In a real system, this would be where we query the human
@@ -532,7 +671,7 @@ def active_preference_learning(cfg):
     print(f"Training on all {len(labeled_pairs)} labeled pairs")
     
     # Create dataset from all labeled pairs
-    final_dataset = PreferenceDataset(data, labeled_pairs, segment_indices, labeled_preferences)
+    final_dataset = PreferenceDataset(data_cpu, labeled_pairs, segment_indices, labeled_preferences)
     
     # Create train/val/test split
     train_size = int(0.8 * len(final_dataset))

@@ -223,7 +223,8 @@ def collect_sequential_preferences(data, segments, segment_indices, n_queries=10
             similar_info = {
                 'original_preference': (i, j, pref),
                 'similar_to_i': [],
-                'similar_to_j': []
+                'similar_to_j': [],
+                'augmented_preferences': []  # Track which augmentations belong to this preference
             }
             
             # Augment preferences based on similarity
@@ -236,7 +237,9 @@ def collect_sequential_preferences(data, segments, segment_indices, n_queries=10
                     
                     # All segments similar to i are also preferred over j
                     for sim_idx in similar_to_i:
-                        augmented_preferences.append((sim_idx, j, 1))
+                        aug_pref = (sim_idx, j, 1)
+                        augmented_preferences.append(aug_pref)
+                        similar_info['augmented_preferences'].append(aug_pref)
                     
                     # Find segments similar to segment j
                     similar_to_j = find_similar_segments(segments, j, k=k_augment, distance_matrix=distance_matrix)
@@ -244,7 +247,9 @@ def collect_sequential_preferences(data, segments, segment_indices, n_queries=10
                     
                     # Segment i is preferred over all segments similar to j
                     for sim_idx in similar_to_j:
-                        augmented_preferences.append((i, sim_idx, 1))
+                        aug_pref = (i, sim_idx, 1)
+                        augmented_preferences.append(aug_pref)
+                        similar_info['augmented_preferences'].append(aug_pref)
                 
                 # If segment j is preferred
                 elif pref == 2:
@@ -254,7 +259,9 @@ def collect_sequential_preferences(data, segments, segment_indices, n_queries=10
                     
                     # All segments similar to j are also preferred over i
                     for sim_idx in similar_to_j:
-                        augmented_preferences.append((i, sim_idx, 2))
+                        aug_pref = (i, sim_idx, 2)
+                        augmented_preferences.append(aug_pref)
+                        similar_info['augmented_preferences'].append(aug_pref)
                     
                     # Find segments similar to segment i
                     similar_to_i = find_similar_segments(segments, i, k=k_augment, distance_matrix=distance_matrix)
@@ -262,7 +269,9 @@ def collect_sequential_preferences(data, segments, segment_indices, n_queries=10
                     
                     # Segment j is preferred over all segments similar to i
                     for sim_idx in similar_to_i:
-                        augmented_preferences.append((sim_idx, j, 2))
+                        aug_pref = (sim_idx, j, 2)
+                        augmented_preferences.append(aug_pref)
+                        similar_info['augmented_preferences'].append(aug_pref)
             
             # Store similar segments info
             similar_segments_info.append(similar_info)
@@ -675,7 +684,7 @@ def create_augmented_grid_video(images, original_pair, augmented_pairs, segment_
     print(f"Created grid video: {video_path}")
     return video_path
 
-def visualize_all_augmentations(data, segments, segment_indices, direct_preferences, augmented_preferences, output_dir, distance_matrix=None, max_visualizations=3, max_augmentations=10):
+def visualize_all_augmentations(data, segments, segment_indices, direct_preferences, augmented_preferences, output_dir, similar_segments_info=None, distance_matrix=None, max_visualizations=3, max_augmentations=10):
     """Create visualizations showing original preference pairs and their augmentations.
     
     Args:
@@ -685,6 +694,7 @@ def visualize_all_augmentations(data, segments, segment_indices, direct_preferen
         direct_preferences: List of (i, j, pref) tuples for direct preferences
         augmented_preferences: List of (i, j, pref) tuples for augmented preferences
         output_dir: Directory to save the visualizations
+        similar_segments_info: List of dictionaries with info about similar segments for each preference
         distance_matrix: Optional distance matrix for showing distances in titles
         max_visualizations: Maximum number of preference pairs to visualize
         max_augmentations: Maximum number of augmentations to show per preference pair
@@ -704,31 +714,54 @@ def visualize_all_augmentations(data, segments, segment_indices, direct_preferen
     vis_dir = os.path.join(output_dir, "augmentation_visualizations")
     os.makedirs(vis_dir, exist_ok=True)
     
-    # Group augmented preferences by original preference pair
-    augmentation_groups = {}
-    
-    # First, identify which segments are used in direct preferences
-    segments_in_direct = set()
-    for i, j, _ in direct_preferences:
-        segments_in_direct.add(i)
-        segments_in_direct.add(j)
-    
-    # Group augmented preferences by which direct preference they came from
-    for aug_i, aug_j, aug_pref in augmented_preferences:
-        # Try to find which direct preference this augmentation belongs to
-        for dir_idx, (dir_i, dir_j, _) in enumerate(direct_preferences):
-            # Check if this augmentation involves one of the segments from the direct preference
-            if aug_i == dir_i or aug_j == dir_j or aug_i in segments_in_direct or aug_j in segments_in_direct:
-                if dir_idx not in augmentation_groups:
-                    augmentation_groups[dir_idx] = []
-                augmentation_groups[dir_idx].append((aug_i, aug_j, aug_pref))
-                break
-    
-    # Choose random preference pairs to visualize
-    if len(augmentation_groups) > max_visualizations:
-        selected_indices = random.sample(list(augmentation_groups.keys()), max_visualizations)
+    # Select preference pairs to visualize
+    if similar_segments_info:
+        print(f"\nUsing similar_segments_info to group augmented preferences")
+        # Use the similar_segments_info to get the grouping
+        if len(similar_segments_info) > max_visualizations:
+            # Randomly select some preference pairs
+            selected_indices = random.sample(range(len(similar_segments_info)), max_visualizations)
+        else:
+            selected_indices = list(range(len(similar_segments_info)))
     else:
-        selected_indices = list(augmentation_groups.keys())
+        print("\nWARNING: No similar_segments_info provided, falling back to heuristic grouping")
+        # Group augmented preferences by original preference pair
+        augmentation_groups = {}
+        
+        # First, identify which segments are used in direct preferences
+        segments_in_direct = set()
+        for i, j, _ in direct_preferences:
+            segments_in_direct.add(i)
+            segments_in_direct.add(j)
+        
+        print(f"DEBUG: Found {len(segments_in_direct)} segments in direct preferences")
+        print(f"DEBUG: Total augmented preferences: {len(augmented_preferences)}")
+        
+        # Group augmented preferences by which direct preference they came from
+        for aug_idx, (aug_i, aug_j, aug_pref) in enumerate(augmented_preferences):
+            found_match = False
+            # Try to find which direct preference this augmentation belongs to
+            for dir_idx, (dir_i, dir_j, _) in enumerate(direct_preferences):
+                # Check if this augmentation involves one of the segments from the direct preference
+                if aug_i == dir_i or aug_j == dir_j:
+                    if dir_idx not in augmentation_groups:
+                        augmentation_groups[dir_idx] = []
+                    augmentation_groups[dir_idx].append((aug_i, aug_j, aug_pref))
+                    found_match = True
+                    break
+            
+            if not found_match:
+                print(f"DEBUG: Augmentation {aug_idx} ({aug_i}, {aug_j}) not matched to any direct preference")
+        
+        print(f"DEBUG: Created {len(augmentation_groups)} augmentation groups")
+        for group_idx, augs in augmentation_groups.items():
+            print(f"DEBUG: Group {group_idx} has {len(augs)} augmentations")
+        
+        # Choose random preference pairs to visualize
+        if len(augmentation_groups) > max_visualizations:
+            selected_indices = random.sample(list(augmentation_groups.keys()), max_visualizations)
+        else:
+            selected_indices = list(augmentation_groups.keys())
     
     print(f"Creating visualizations for {len(selected_indices)} randomly selected preference pairs")
     
@@ -736,13 +769,20 @@ def visualize_all_augmentations(data, segments, segment_indices, direct_preferen
     visualization_paths = []
     
     for idx in selected_indices:
-        # Get original preference pair
-        original_pair = direct_preferences[idx]
-        
-        # Get augmented preferences for this pair
-        augmented_pairs = augmentation_groups.get(idx, [])
+        if similar_segments_info:
+            # Get info from similar_segments_info
+            similar_info = similar_segments_info[idx]
+            original_pair = similar_info['original_preference']
+            augmented_pairs = similar_info.get('augmented_preferences', [])
+        else:
+            # Get original preference pair
+            original_pair = direct_preferences[idx]
+            
+            # Get augmented preferences for this pair
+            augmented_pairs = augmentation_groups.get(idx, [])
         
         if not augmented_pairs:
+            print(f"DEBUG: No augmented pairs found for preference {idx}, skipping")
             continue
             
         # Create output file path
@@ -751,6 +791,8 @@ def visualize_all_augmentations(data, segments, segment_indices, direct_preferen
         # Create title
         i, j, pref = original_pair
         title = f"Preference {idx+1}: {'Seg ' + str(i) + ' > ' + str(j) if pref == 1 else 'Seg ' + str(j) + ' > ' + str(i)}"
+        
+        print(f"DEBUG: Creating visualization for preference {idx} with {len(augmented_pairs)} augmentations")
         
         # Create grid visualization
         video_path = create_augmented_grid_video(
@@ -944,6 +986,7 @@ def main(cfg: DictConfig):
             direct_preferences, 
             augmented_preferences, 
             output_dir,
+            similar_segments_info=similar_segments_info,
             distance_matrix=distance_matrix,
             max_visualizations=max_visualizations,
             max_augmentations=max_augmentations

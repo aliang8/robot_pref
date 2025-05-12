@@ -101,6 +101,13 @@ python train_reward_model.py data.data_path="/path/to/dataset.pt" model.hidden_d
 python train_reward_model.py --multirun
 ```
 
+## Train Reward Model with Active Learning
+
+```bash
+# Train reward model with active learning using disagreement-based uncertainty sampling
+python train_reward_model_sampling.py active_learning.uncertainty_method="disagreement" active_learning.num_models=5
+```
+
 ## Train Policy
 
 ### IQL (Implicit Q-Learning)

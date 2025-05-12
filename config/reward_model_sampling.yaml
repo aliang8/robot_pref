@@ -46,13 +46,13 @@ hardware:
 
 # Output parameters
 output:
-  output_dir: /scr/aliang80/robot_pref/active_reward_model
+  output_dir: /scr/aliang80/robot_pref/results/active_reward_model
   
 # Wandb configuration
 wandb:
-  use_wandb: true
+  use_wandb: false
   project: "robot_pref"
-  entity: "robot-learning"
+  entity: "clvr"
   name: null  # Will be auto-generated
   tags: ["reward_model", "preference_learning", "active_learning"]
   notes: "Active preference learning with uncertainty sampling" 
