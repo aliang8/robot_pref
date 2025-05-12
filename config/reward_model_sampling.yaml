@@ -1,0 +1,58 @@
+# Hydra config for reward model training with active learning
+
+# Include common settings
+defaults:
+  - reward_model
+  - _self_  # Allow this config to override common settings
+
+# Active learning parameters
+active_learning:
+  # Initial number of labeled pairs
+  initial_size: 50
+  # Maximum number of queries (labels) to collect
+  max_queries: 500
+  # Number of pairs to select in each iteration
+  batch_size: 50
+  # Uncertainty estimation method: "entropy", "disagreement", or "random"
+  uncertainty_method: "entropy"
+  # Number of models in the ensemble (for disagreement method)
+  num_models: 5
+  # Number of epochs to train ensemble models
+  train_epochs: 20
+
+# Override data parameters
+data:
+  data_path: "/scr/shared/clam/datasets/metaworld/assembly-v2/buffer_assembly-v2.pt"
+  segment_length: 32
+  num_segments: 2000
+  num_pairs: 1000
+
+# Model architecture
+model:
+  hidden_dims: [256, 256]
+  lr: 1e-4
+
+# Training parameters
+training:
+  batch_size: 128
+  num_epochs: 50
+  num_workers: 4
+  pin_memory: true
+
+# Hardware settings
+hardware:
+  gpu: 0
+  use_cpu: false
+
+# Output parameters
+output:
+  output_dir: /scr/aliang80/robot_pref/active_reward_model
+  
+# Wandb configuration
+wandb:
+  use_wandb: true
+  project: "robot_pref"
+  entity: "robot-learning"
+  name: null  # Will be auto-generated
+  tags: ["reward_model", "preference_learning", "active_learning"]
+  notes: "Active preference learning with uncertainty sampling" 

@@ -83,6 +83,9 @@ python collect_sequential_pref.py data.segment_length=20 data.max_segments=1000
 
 # Configure DTW distance options
 python collect_sequential_pref.py preferences.use_dtw_distance=true preferences.max_dtw_segments=500
+
+# Control visualization generation
+python collect_sequential_pref.py preferences.visualize_augmentations=true preferences.n_visualizations=5
 ```
 
 ## Train Reward Model
