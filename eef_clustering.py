@@ -9,21 +9,19 @@ from matplotlib import animation
 import matplotlib.gridspec as gridspec
 from scipy.cluster.hierarchy import dendrogram, linkage, fcluster
 import pickle
-import argparse
-import dtw
+import hydra
+from omegaconf import DictConfig, OmegaConf
+import utils.dtw as dtw
 
 # Import utility functions
 from trajectory_utils import (
     DEFAULT_DATA_PATHS,
-    RANDOM_SEED,
     load_tensordict,
-    compute_dtw_distance_matrix
+    compute_dtw_distance_matrix,
+    compute_eef_position_ranges
 )
 
-# Set random seed for reproducibility
-random.seed(RANDOM_SEED)
-np.random.seed(RANDOM_SEED)
-torch.manual_seed(RANDOM_SEED)
+# Note: We'll set random seeds inside the main function using the config value
 
 def extract_eef_trajectories(data, segment_length=20, max_segments=None, use_relative_differences=False):
     """Extract end-effector trajectories or trajectory differences from the observation data.
@@ -218,7 +216,8 @@ def compute_dtw_distance(query_segment, reference_segment):
     # Check if the cost is finite
     if not np.isfinite(cost):
         # Fall back to a simpler distance metric
-        cost = np.mean((query.mean(0) - reference.mean(0))**2)
+        # cost = np.mean((query.mean(0) - reference.mean(0))**2)
+        cost = 0
     
     return cost
 
@@ -291,50 +290,6 @@ def plot_clustering(Z, n_clusters=5, output_file="eef_clustering_dendrogram.png"
     plt.savefig(output_file, dpi=300, bbox_inches='tight')
     plt.close()
     print(f"Saved dendrogram to {output_file}")
-
-def compute_eef_position_ranges(data_path):
-    """Compute the global min and max ranges for EEF positions.
-    
-    Args:
-        data_path: Path to dataset file
-        
-    Returns:
-        tuple: (x_min, x_max, y_min, y_max, z_min, z_max) for consistent visualization
-    """
-    print("Computing global EEF position ranges for consistent visualization...")
-    
-    # Load data
-    data = load_tensordict(data_path)
-    
-    # Extract EEF positions
-    observations = data["obs"] if "obs" in data else data["state"]
-    observations_cpu = observations.cpu()
-    eef_positions = observations_cpu[:, :3].numpy()
-    
-    # Remove NaN values
-    eef_positions = eef_positions[~np.isnan(eef_positions).any(axis=1)]
-    
-    # Compute min and max
-    global_min = np.min(eef_positions, axis=0)
-    global_max = np.max(eef_positions, axis=0)
-    
-    # Add padding for better visualization
-    padding = 0.1
-    range_vals = global_max - global_min
-    
-    # Add padding
-    global_min -= padding * range_vals
-    global_max += padding * range_vals
-    
-    x_min, y_min, z_min = global_min
-    x_max, y_max, z_max = global_max
-    
-    print(f"Global EEF position ranges:")
-    print(f"  X range: [{x_min:.4f}, {x_max:.4f}]")
-    print(f"  Y range: [{y_min:.4f}, {y_max:.4f}]")
-    print(f"  Z range: [{z_min:.4f}, {z_max:.4f}]")
-    
-    return x_min, x_max, y_min, y_max, z_min, z_max
 
 def plot_representative_trajectories(segments, clusters, n_per_cluster=3, output_dir="eef_plots", global_ranges=None):
     """Plot representative trajectories for each cluster.
@@ -643,67 +598,69 @@ def create_combined_grid_video(data, segments, original_segments, segment_indice
     print(f"Saved combined visualization to {output_file}")
     return output_file
 
-def main():
-    """Main function."""
-    parser = argparse.ArgumentParser(description="Cluster robot trajectories based on end-effector positions")
-    parser.add_argument("--data_path", type=str, default=DEFAULT_DATA_PATHS[0],
-                       help="Path to the PT file containing trajectory data")
-    parser.add_argument('--segment_length', type=int, default=64,
-                        help='Length of trajectory segments')
-    parser.add_argument('--n_clusters', type=int, default=5,
-                        help='Number of clusters to extract')
-    parser.add_argument('--max_segments', type=int, default=1000,
-                        help='Maximum number of segments to extract (default: all)')
-    parser.add_argument('--max_dtw_segments', type=int, default=None,
-                        help='Maximum number of segments for DTW computation (default: all)')
-    parser.add_argument('--output_dir', type=str, default='eef_clustering',
-                        help='Directory to save results')
-    parser.add_argument('--use_relative_differences', action='store_true',
-                        help='Use relative differences instead of absolute positions')
-    parser.add_argument('--linkage_method', type=str, default='average', 
-                        choices=['average', 'complete', 'single', 'ward'],
-                        help='Linkage method for hierarchical clustering (default: average)')
-    parser.add_argument("--use_shared_ranges", action="store_true",
-                        help="Use shared ranges across all visualizations")
-    parser.add_argument("--segments_per_cluster", type=int, default=5,
-                        help="Number of representative segments to show per cluster in the grid video")
-    parser.add_argument("--skip_videos", action="store_true",
-                        help="Skip generating videos to speed up execution")
-    parser.add_argument("--preprocessed_data", type=str, default=None,
-                        help="Path to preprocessed data file (skips extraction if provided)")
-    args = parser.parse_args()
-
-    # Create output directory
-    os.makedirs(args.output_dir, exist_ok=True)
-    
+@hydra.main(config_path="config", config_name="eef_clustering", version_base=None)
+def main(cfg: DictConfig):
+    """Run end-effector trajectory clustering with Hydra configuration."""
     print("\n" + "="*50)
-    print(f"Clustering robot trajectories based on end-effector {'relative differences' if args.use_relative_differences else 'positions'}")
-    print(f"Data path: {args.data_path if args.preprocessed_data is None else args.preprocessed_data}")
-    print(f"Segment length: {args.segment_length}")
-    print(f"Number of clusters: {args.n_clusters}")
-    print(f"Linkage method: {args.linkage_method}")
-    print(f"Use shared ranges: {args.use_shared_ranges}")
-    print(f"Skip videos: {args.skip_videos}")
-    print(f"Using preprocessed data: {args.preprocessed_data is not None}")
-    print("="*50 + "\n")
+    print("Clustering robot trajectories based on end-effector trajectories")
+    print("="*50)
+    
+    # Print config for visibility
+    print("\nConfiguration:")
+    print(OmegaConf.to_yaml(cfg))
+    
+    # Set random seed for reproducibility
+    random_seed = cfg.random_seed
+    random.seed(random_seed)
+    np.random.seed(random_seed)
+    torch.manual_seed(random_seed)
+    print(f"Using random seed: {random_seed}")
+    
+    # Create output directory
+    os.makedirs(cfg.output.output_dir, exist_ok=True)
+    
+    # Extract parameters from config
+    data_path = cfg.data.data_path
+    segment_length = cfg.data.segment_length
+    max_segments = cfg.data.max_segments
+    max_dtw_segments = cfg.data.max_dtw_segments
+    use_relative_differences = cfg.data.use_relative_differences
+    preprocessed_data = cfg.data.preprocessed_data
+    
+    n_clusters = cfg.clustering.n_clusters
+    linkage_method = cfg.clustering.linkage_method
+    segments_per_cluster = cfg.clustering.segments_per_cluster
+    
+    use_shared_ranges = cfg.visualization.use_shared_ranges
+    skip_videos = cfg.visualization.skip_videos
+    
+    output_dir = cfg.output.output_dir
+    
+    print(f"Data path: {data_path if preprocessed_data is None else preprocessed_data}")
+    print(f"Segment length: {segment_length}")
+    print(f"Number of clusters: {n_clusters}")
+    print(f"Linkage method: {linkage_method}")
+    print(f"Use shared ranges: {use_shared_ranges}")
+    print(f"Skip videos: {skip_videos}")
+    print(f"Using preprocessed data: {preprocessed_data is not None}")
     
     # Compute global EEF position ranges if needed
     global_ranges = None
-    if args.use_shared_ranges:
-        global_ranges = compute_eef_position_ranges(args.data_path)
+    if use_shared_ranges:
+        global_ranges = compute_eef_position_ranges([data_path])
     
     # Load data and extract segments
-    segment_type = "relative" if args.use_relative_differences else "absolute"
+    segment_type = "relative" if use_relative_differences else "absolute"
     
-    if args.preprocessed_data is not None:
+    if preprocessed_data is not None:
         # Load preprocessed data
         from trajectory_utils import load_preprocessed_segments
-        preproc_data = load_preprocessed_segments(args.preprocessed_data)
+        preproc_data = load_preprocessed_segments(preprocessed_data)
         
         # Check if the preprocessed data has the expected format and settings
-        if 'use_relative_differences' in preproc_data and preproc_data['use_relative_differences'] != args.use_relative_differences:
+        if 'use_relative_differences' in preproc_data and preproc_data['use_relative_differences'] != use_relative_differences:
             print(f"WARNING: Preprocessed data was created with use_relative_differences={preproc_data['use_relative_differences']}")
-            print(f"Current setting is use_relative_differences={args.use_relative_differences}")
+            print(f"Current setting is use_relative_differences={use_relative_differences}")
             proceed = input("Proceed anyway? (y/n): ").strip().lower()
             if proceed != 'y':
                 print("Aborting.")
@@ -716,7 +673,7 @@ def main():
         
         # Load the original data if needed for visualization
         data = None
-        if not args.skip_videos:
+        if not skip_videos:
             # Try to use observation data from the preprocessed file first
             data = {}
             
@@ -733,48 +690,36 @@ def main():
             # If preprocessed data doesn't have the essential fields, try to load from original file
             if not has_essential_data:
                 print(f"Preprocessed data doesn't contain necessary observation data for visualization.")
-                print(f"Loading original data from {args.data_path}")
-                data = load_tensordict(args.data_path)
+                print(f"Loading original data from {data_path}")
+                data = load_tensordict(data_path)
             else:
                 print("Using observation data from preprocessed file for visualization")
     else:
         # Load original data and extract segments
-        print(f"Loading data from {args.data_path}")
-        data = load_tensordict(args.data_path)
+        print(f"Loading data from {data_path}")
+        data = load_tensordict(data_path)
 
         # Extract EEF trajectories
         print("\nExtracting end-effector trajectories...")
         segments, segment_indices, original_segments = extract_eef_trajectories(
             data, 
-            segment_length=args.segment_length, 
-            max_segments=args.max_segments,
-            use_relative_differences=args.use_relative_differences
+            segment_length=segment_length, 
+            max_segments=max_segments,
+            use_relative_differences=use_relative_differences
         )
         
         print(f"Extracted {len(segments)} segments.")
-    
-    # Save segment visualization if not skipping videos
-    if not args.skip_videos:
-        output_file = os.path.join(args.output_dir, f"eef_{segment_type}_segments_3d.mp4")
-        create_combined_grid_video(
-            data,
-            segments,
-            original_segments,
-            segment_indices,
-            np.zeros(len(segments), dtype=int),
-            n_per_cluster=args.segments_per_cluster,
-            output_file=output_file,
-            global_ranges=global_ranges
-        )
-    else:
-        print("\nSkipping initial segment visualization (--skip_videos is set)")
-    
+
     # Compute DTW distance matrix
     print("\nComputing DTW distance matrix...")
-    distance_matrix, idx_mapping = compute_dtw_distance_matrix(segments, max_segments=args.max_dtw_segments)
+    distance_matrix, idx_mapping = compute_dtw_distance_matrix(
+        segments, 
+        max_segments=max_dtw_segments,
+        random_seed=random_seed
+    )
     
     # If using a subset of segments for DTW, map back to original indices
-    if args.max_dtw_segments is not None and args.max_dtw_segments < len(segments):
+    if max_dtw_segments is not None and max_dtw_segments < len(segments):
         segments_for_clustering = [segments[idx_mapping[i]] for i in range(len(idx_mapping))]
         original_segments_for_clustering = [original_segments[idx_mapping[i]] for i in range(len(idx_mapping))]
         indices_for_clustering = [segment_indices[idx_mapping[i]] for i in range(len(idx_mapping))]
@@ -790,32 +735,23 @@ def main():
     plt.title('DTW Distance Matrix')
     plt.xlabel('Segment Index')
     plt.ylabel('Segment Index')
-    output_file = os.path.join(args.output_dir, f"eef_{segment_type}_dtw_distance_matrix.png")
+    output_file = os.path.join(output_dir, f"eef_{segment_type}_dtw_distance_matrix.png")
     plt.savefig(output_file, dpi=300, bbox_inches='tight')
     plt.close()
     print(f"Saved distance matrix visualization to {output_file}")
     
     # Perform hierarchical clustering
-    Z = perform_hierarchical_clustering(distance_matrix, n_clusters=args.n_clusters, method=args.linkage_method)
+    Z = perform_hierarchical_clustering(distance_matrix, n_clusters=n_clusters, method=linkage_method)
     
     # Plot dendrogram
-    plot_clustering(Z, n_clusters=args.n_clusters, 
-                   output_file=os.path.join(args.output_dir, f"eef_{segment_type}_clustering_dendrogram.png"))
+    plot_clustering(Z, n_clusters=n_clusters, 
+                   output_file=os.path.join(output_dir, f"eef_{segment_type}_clustering_dendrogram.png"))
     
     # Get cluster assignments
-    clusters = get_clusters(Z, n_clusters=args.n_clusters)
+    clusters = get_clusters(Z, n_clusters=n_clusters)
     
     # Plot representative trajectories (using original segments for visualization) if not skipping videos
-    if not args.skip_videos:
-        print("\nPlotting representative trajectories...")
-        plot_representative_trajectories(
-            original_segments_for_clustering, 
-            clusters, 
-            n_per_cluster=3,
-            output_dir=args.output_dir,
-            global_ranges=global_ranges
-        )
-        
+    if not skip_videos:
         # Create combined grid video with EEF trajectories and camera observations
         print("\nCreating combined grid video...")
         create_combined_grid_video(
@@ -824,32 +760,32 @@ def main():
             original_segments_for_clustering,
             indices_for_clustering,
             clusters,
-            n_per_cluster=args.segments_per_cluster,
-            output_file=f"{args.output_dir}/combined_grid_video.mp4",
+            n_per_cluster=segments_per_cluster,
+            output_file=f"{output_dir}/combined_grid_video.mp4",
             global_ranges=global_ranges
         )
     else:
-        print("\nSkipping all video generation (--skip_videos is set)")
+        print("\nSkipping all video generation (skip_videos is set)")
     
     # Save results
     print("\nSaving clustering results...")
     results = {
-        'args': vars(args),
+        'cfg': OmegaConf.to_container(cfg, resolve=True),
         'segment_indices': segment_indices,
         'distance_matrix': distance_matrix,
         'linkage_matrix': Z,
         'clusters': clusters,
         'idx_mapping': idx_mapping,
         'global_ranges': global_ranges,
-        'use_relative_differences': args.use_relative_differences,
-        'linkage_method': args.linkage_method
+        'use_relative_differences': use_relative_differences,
+        'linkage_method': linkage_method
     }
     
-    with open(f"{args.output_dir}/clustering_results.pkl", 'wb') as f:
+    with open(f"{output_dir}/clustering_results.pkl", 'wb') as f:
         pickle.dump(results, f)
     
-    print(f"Results saved to {args.output_dir}/clustering_results.pkl")
-    print(f"\nEEF trajectory {'relative difference' if args.use_relative_differences else 'position'} clustering complete!")
+    print(f"Results saved to {output_dir}/clustering_results.pkl")
+    print(f"\nEEF trajectory {'relative difference' if use_relative_differences else 'position'} clustering complete!")
     
     return clusters
 

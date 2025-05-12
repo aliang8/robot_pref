@@ -23,15 +23,72 @@ python create_mixed_expertise_dataset.py --data_path "/path/to/dataset.pt" --out
 
 ## End-Effector Clustering
 
-Cluster robot trajectories based on end-effector movements:
+Cluster robot trajectories based on end-effector movements using Hydra for configuration:
 
 ```bash
 # Basic clustering using default parameters
-python eef_clustering.py --data_path "/scr/shared/clam/datasets/metaworld/assembly-v2/buffer_assembly-v2.pt"
+python eef_clustering.py
 
-# More advanced options
-python eef_clustering.py --data_path "path/to/dataset.pt" --n_clusters 5 --segment_length 64 --max_segments 1000 --linkage_method average
+# Customize data parameters
+python eef_clustering.py data.data_path="/path/to/dataset.pt" data.segment_length=128
+
+# Customize clustering parameters
+python eef_clustering.py clustering.n_clusters=7 clustering.linkage_method=complete
+
+# Change random seed for reproducibility
+python eef_clustering.py random_seed=100
+
+# Turn on/off visualization features
+python eef_clustering.py visualization.skip_videos=true visualization.use_shared_ranges=false
+
+# Specify output directory
+python eef_clustering.py output.output_dir="./my_clustering_results"
+
+# Use preprocessed data (skips extraction step)
+python eef_clustering.py data.preprocessed_data="/path/to/preprocessed.pkl"
 ```
+
+The script uses a configuration file at `config/eef_clustering.yaml` that defines all available parameters, organized into these sections:
+
+- `random_seed`: Controls reproducibility (default: 42)
+- `data`: Dataset path, segment length, etc.
+- `clustering`: Number of clusters, linkage method
+- `visualization`: Video generation and display options
+- `output`: Output directory for results
+- `wandb`: Weights & Biases logging configuration
+
+## End-Effector Segment Matching
+
+Find similar end-effector trajectory segments across multiple datasets using DTW distance. This script uses Hydra configuration and shares code with the clustering script for trajectory extraction and DTW calculations.
+
+```bash
+# Basic segment matching using default parameters
+python eef_segment_matching.py
+
+# Customize data parameters
+python eef_segment_matching.py data.data_paths='["/path/to/dataset1.pt", "/path/to/dataset2.pt"]'
+python eef_segment_matching.py data.segment_length=32 data.samples_per_dataset=300
+
+# Customize matching parameters
+python eef_segment_matching.py matching.top_k=10
+python eef_segment_matching.py matching.query_index=5  # Use a specific segment as query
+
+# Visualization options
+python eef_segment_matching.py visualization.create_videos=false
+python eef_segment_matching.py visualization.use_shared_ranges=true
+
+# Change random seed and output directory
+python eef_segment_matching.py random_seed=123 output.output_dir="./segment_matching_results"
+```
+
+The script uses a configuration file at `config/eef_segment_matching.yaml` with the following sections:
+
+- `random_seed`: Controls reproducibility (default: 42)
+- `data`: Dataset paths, segment length, samples per dataset
+- `matching`: Top-k segments to find, query segment index
+- `visualization`: Video generation and display options
+- `output`: Output directory for results
+- `wandb`: Weights & Biases logging configuration
 
 ## Collect Preferences
 
@@ -89,7 +146,5 @@ python train_policy.py --config-name=bc data.data_path="/path/to/dataset.pt"
 python train_policy.py --config-name=bc data.data_path="/path/to/dataset.pt" model.learning_rate=1e-4 training.n_epochs=200 evaluation.record_video=true
 ```
 
-
-python train_policy.py --config-name=iql \
-    data.data_path="/scr/aliang80/robot_pref/labeled_datasets/buffer_assembly-v2_balanced.pt" \
-    data.reward_model_path="/scr/aliang80/robot_pref
+# With custom parameters
+python train_policy.py --config-name=bc data.data_path="/path/to/dataset.pt" model.learning_rate=1e-4 training.n_epochs=200 evaluation.record_video=true

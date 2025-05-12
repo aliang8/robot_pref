@@ -8,47 +8,24 @@ import matplotlib.pyplot as plt
 from matplotlib import animation
 import matplotlib.gridspec as gridspec
 import pickle
-import argparse
-import dtw
+import hydra
+from omegaconf import DictConfig, OmegaConf
 from IPython.display import HTML, display
 
 # Import utility functions
 from trajectory_utils import (
     DEFAULT_DATA_PATHS,
-    RANDOM_SEED,
     load_tensordict,
+    compute_eef_position_ranges,
 )
 
 # Import EEF clustering functions
-from eef_clustering import extract_eef_trajectories
+from eef_clustering import (
+    extract_eef_trajectories,
+    compute_dtw_distance,
+)
 
-# Set random seed for reproducibility
-random.seed(RANDOM_SEED)
-np.random.seed(RANDOM_SEED)
-torch.manual_seed(RANDOM_SEED)
-
-# Define compute_dtw_distance locally to avoid import issues
-def compute_dtw_distance(query_segment, reference_segment):
-    """Compute DTW distance between two segments."""
-    try:
-        # Convert to numpy for dtw
-        query = query_segment.cpu().numpy()
-        reference = reference_segment.cpu().numpy()
-        
-        # Use the custom DTW implementation
-        cost, _, _ = dtw.get_single_match(query, reference)
-        
-        # Check if the cost is finite
-        if not np.isfinite(cost):
-            # Fall back to a simpler distance metric
-            cost = np.mean((query.mean(0) - reference.mean(0))**2)
-    except Exception as e:
-        # Fall back to a simpler distance metric
-        query = query_segment.cpu().numpy()
-        reference = reference_segment.cpu().numpy()
-        cost = np.mean((query.mean(0) - reference.mean(0))**2)
-    
-    return cost
+# Note: We'll set random seeds inside the main function using the config value
 
 def find_top_matches(query_segment, all_segments, top_k=5, exclude_self=True):
     """Find top k segments with lowest DTW distance to the query segment."""
@@ -69,59 +46,6 @@ def find_top_matches(query_segment, all_segments, top_k=5, exclude_self=True):
     top_distances = distances[top_indices]
     
     return top_indices, top_distances
-
-def compute_eef_position_ranges(data_paths):
-    """Compute the global min and max ranges for EEF positions across all datasets.
-    
-    Args:
-        data_paths: List of paths to dataset files
-        
-    Returns:
-        tuple: (x_min, x_max, y_min, y_max, z_min, z_max) for consistent visualization
-    """
-    all_mins = []
-    all_maxs = []
-    
-    print("Computing global EEF position ranges for consistent visualization...")
-    
-    for data_path in data_paths:
-        # Load data
-        data = load_tensordict(data_path)
-        
-        # Extract EEF positions
-        eef_positions = data["obs"][:, :3].cpu().numpy()
-        
-        # Remove NaN values
-        eef_positions = eef_positions[~np.isnan(eef_positions).any(axis=1)]
-        
-        # Compute min and max
-        min_vals = np.min(eef_positions, axis=0)
-        max_vals = np.max(eef_positions, axis=0)
-        
-        all_mins.append(min_vals)
-        all_maxs.append(max_vals)
-    
-    # Get global min and max across all datasets
-    global_min = np.min(all_mins, axis=0)
-    global_max = np.max(all_maxs, axis=0)
-    
-    # Add padding for better visualization
-    padding = 0.1
-    range_vals = global_max - global_min
-    
-    # Add padding
-    global_min -= padding * range_vals
-    global_max += padding * range_vals
-    
-    x_min, y_min, z_min = global_min
-    x_max, y_max, z_max = global_max
-    
-    print(f"Global EEF position ranges:")
-    print(f"  X range: [{x_min:.4f}, {x_max:.4f}]")
-    print(f"  Y range: [{y_min:.4f}, {y_max:.4f}]")
-    print(f"  Z range: [{z_min:.4f}, {z_max:.4f}]")
-    
-    return x_min, x_max, y_min, y_max, z_min, z_max
 
 def create_eef_trajectory_animation(eef_positions, start_idx, end_idx, title=None, global_ranges=None):
     """Create a 3D animation of EEF trajectory for visualization.
@@ -461,45 +385,61 @@ def visualize_query_and_matches(eef_positions, query_indices, match_indices_list
         )
         print(f"Saved comparison video to {output_file}")
 
-def main():
-    parser = argparse.ArgumentParser(description="Find similar EEF trajectory segments using DTW")
-    parser.add_argument("--data_paths", nargs="+", default=DEFAULT_DATA_PATHS,
-                        help="Paths to the PT files containing trajectory data")
-    parser.add_argument("--segment_length", type=int, default=20,
-                        help="Length of segments (H)")
-    parser.add_argument("--samples_per_dataset", type=int, default=200,
-                        help="Number of segments to sample from each dataset")
-    parser.add_argument("--top_k", type=int, default=5,
-                        help="Number of top matches to find")
-    parser.add_argument("--output_dir", type=str, default="eef_segment_matches",
-                        help="Directory to save output files")
-    parser.add_argument("--query_index", type=int, default=None,
-                        help="Index of the segment to use as query (random if not specified)")
-    parser.add_argument("--use_shared_ranges", action="store_true",
-                        help="Use shared ranges across all visualizations")
-    args = parser.parse_args()
+@hydra.main(config_path="config", config_name="eef_segment_matching", version_base=None)
+def main(cfg: DictConfig):
+    """Run end-effector segment matching with Hydra configuration."""
+    print("\n" + "="*50)
+    print("Finding similar EEF trajectory segments")
+    print("="*50)
+    
+    # Print config for visibility
+    print("\nConfiguration:")
+    print(OmegaConf.to_yaml(cfg))
+    
+    # Set random seed for reproducibility
+    random_seed = cfg.random_seed
+    random.seed(random_seed)
+    np.random.seed(random_seed)
+    torch.manual_seed(random_seed)
+    print(f"Using random seed: {random_seed}")
     
     # Create output directory
-    os.makedirs(args.output_dir, exist_ok=True)
+    os.makedirs(cfg.output.output_dir, exist_ok=True)
     
-    # Parameters
-    H = args.segment_length
-    top_k = args.top_k
+    # Extract parameters from config
+    data_paths = cfg.data.data_paths
+    segment_length = cfg.data.segment_length
+    samples_per_dataset = cfg.data.samples_per_dataset
     
-    print("\n" + "="*50)
-    print(f"Finding similar EEF trajectory segments with parameters:")
-    print(f"  Data paths: {args.data_paths}")
-    print(f"  Segment size (H): {H}")
-    print(f"  Samples per dataset: {args.samples_per_dataset}")
+    top_k = cfg.matching.top_k
+    query_index = cfg.matching.query_index
+    query_indices = cfg.matching.query_indices if hasattr(cfg.matching, 'query_indices') else []
+    num_random_queries = cfg.matching.num_random_queries if hasattr(cfg.matching, 'num_random_queries') else 1
+    
+    use_shared_ranges = cfg.visualization.use_shared_ranges
+    create_videos = cfg.visualization.create_videos
+    
+    output_dir = cfg.output.output_dir
+    
+    print(f"\nFinding similar EEF trajectory segments with parameters:")
+    print(f"  Data paths: {data_paths}")
+    print(f"  Segment size (H): {segment_length}")
+    print(f"  Samples per dataset: {samples_per_dataset}")
     print(f"  Top-k matches: {top_k}")
-    print(f"  Random seed: {RANDOM_SEED}")
-    print(f"  Use shared ranges: {args.use_shared_ranges}")
+    print(f"  Random seed: {random_seed}")
+    print(f"  Use shared ranges: {use_shared_ranges}")
+    if query_indices:
+        print(f"  Processing {len(query_indices)} specified query indices")
+    elif query_index is not None:
+        print(f"  Processing single query index: {query_index}")
+    else:
+        print(f"  Generating {num_random_queries} random query indices")
     print("="*50 + "\n")
     
     # Compute global EEF position ranges if needed
     global_ranges = None
-    if args.use_shared_ranges:
-        global_ranges = compute_eef_position_ranges(args.data_paths)
+    if use_shared_ranges:
+        global_ranges = compute_eef_position_ranges(data_paths)
     
     # Lists to store data from all datasets
     all_eef_positions = []
@@ -508,9 +448,9 @@ def main():
     all_data = []  # Store loaded data for image visualization
     
     # Load and process each dataset
-    for dataset_idx, data_path in enumerate(args.data_paths):
+    for dataset_idx, data_path in enumerate(data_paths):
         dataset_name = Path(data_path).stem
-        print(f"\nProcessing dataset {dataset_idx+1}/{len(args.data_paths)}: {dataset_name}")
+        print(f"\nProcessing dataset {dataset_idx+1}/{len(data_paths)}: {dataset_name}")
         
         # Load data
         print("Loading tensordict data...")
@@ -524,10 +464,11 @@ def main():
         
         # Create segments
         print("\nCreating segments...")
-        segments, segment_indices = extract_eef_trajectories(
+        segments, segment_indices, _ = extract_eef_trajectories(
             data, 
-            segment_length=H,
-            max_segments=args.samples_per_dataset
+            segment_length=segment_length,
+            max_segments=samples_per_dataset,
+            use_relative_differences=False
         )
         
         # Append to combined data
@@ -539,15 +480,15 @@ def main():
         
         # Save dataset segments for later use
         print(f"\nSaving processed segments for {dataset_name}...")
-        os.makedirs(f"{args.output_dir}/segments", exist_ok=True)
-        with open(f"{args.output_dir}/segments/segments_{dataset_name}.pkl", 'wb') as f:
+        os.makedirs(f"{output_dir}/segments", exist_ok=True)
+        with open(f"{output_dir}/segments/segments_{dataset_name}.pkl", 'wb') as f:
             pickle.dump({
                 'segments': segments,
                 'segment_indices': segment_indices,
                 'dataset_name': dataset_name,
                 'dataset_idx': dataset_idx,
             }, f)
-        print(f"Saved {len(segments)} segments to {args.output_dir}/segments/segments_{dataset_name}.pkl")
+        print(f"Saved {len(segments)} segments to {output_dir}/segments/segments_{dataset_name}.pkl")
     
     # Combine data from all datasets
     eef_positions = torch.cat(all_eef_positions, dim=0)
@@ -562,7 +503,7 @@ def main():
         all_images = [data["image"] for data in all_data]
         combined_data["image"] = torch.cat(all_images, dim=0)
     
-    print(f"\nCombined data from {len(args.data_paths)} datasets:")
+    print(f"\nCombined data from {len(data_paths)} datasets:")
     print(f"  Total positions: {len(eef_positions)}")
     print(f"  Total unique episodes: {len(torch.unique(episode_ids))}")
     if "image" in combined_data:
@@ -572,7 +513,7 @@ def main():
     all_segments = []
     all_segment_indices = []
     
-    segment_files = list(Path(f"{args.output_dir}/segments").glob("segments_*.pkl"))
+    segment_files = list(Path(f"{output_dir}/segments").glob("segments_*.pkl"))
     print(f"\nLoading {len(segment_files)} segment files...")
     
     for segment_file in segment_files:
@@ -586,51 +527,85 @@ def main():
     
     print(f"\nTotal number of segments: {len(all_segments)}")
     
-    # Select query segment
-    if args.query_index is None:
-        query_idx = random.randint(0, len(all_segments) - 1)
+    # Determine query indices to process
+    query_idxs_to_process = []
+    if query_indices:
+        # Use the specified list of query indices
+        query_idxs_to_process = query_indices
+        print(f"\nUsing {len(query_idxs_to_process)} specified query indices: {query_idxs_to_process}")
+    elif query_index is not None:
+        # Use the single specified query index
+        query_idxs_to_process = [query_index]
+        print(f"\nUsing specified query index: {query_index}")
     else:
-        query_idx = args.query_index
+        # Generate random query indices
+        max_idx = len(all_segments) - 1
+        query_idxs_to_process = random.sample(range(max_idx + 1), min(num_random_queries, max_idx + 1))
+        print(f"\nGenerated {len(query_idxs_to_process)} random query indices: {query_idxs_to_process}")
     
-    print(f"\nUsing segment {query_idx} as query")
-    query_segment = all_segments[query_idx]
-    query_indices = all_segment_indices[query_idx]
+    # Process each query index
+    all_match_results = []
     
-    # Find top matches
-    print(f"\nFinding top {top_k} matches for query segment...")
-    top_indices, top_distances = find_top_matches(query_segment, all_segments, top_k=top_k)
+    for query_idx in query_idxs_to_process:
+        print(f"\n{'='*30}")
+        print(f"Processing query segment {query_idx}")
+        print(f"{'='*30}")
+        
+        # Ensure query index is valid
+        if query_idx < 0 or query_idx >= len(all_segments):
+            print(f"Warning: Query index {query_idx} is out of range. Skipping.")
+            continue
+            
+        # Get query segment and indices
+        query_segment = all_segments[query_idx]
+        query_indices = all_segment_indices[query_idx]
+        
+        # Find top matches
+        print(f"\nFinding top {top_k} matches for query segment {query_idx}...")
+        top_indices, top_distances = find_top_matches(query_segment, all_segments, top_k=top_k)
+        
+        # Get segment indices for top matches
+        top_match_indices = [all_segment_indices[i] for i in top_indices]
+        
+        # Visualize query and matches
+        print("\nVisualizing query segment and top matches...")
+        output_video = None
+        if create_videos:
+            output_video = f"{output_dir}/eef_segment_matches_query{query_idx}.mp4"
+        
+        visualize_query_and_matches(
+            eef_positions, query_indices, top_match_indices, top_distances, 
+            dataset_indicators, output_file=output_video, data=combined_data,
+            global_ranges=global_ranges
+        )
+        
+        # Save results
+        print("\nSaving match results...")
+        match_results = {
+            'cfg': OmegaConf.to_container(cfg, resolve=True),
+            'query_idx': query_idx,
+            'query_segment': query_segment.cpu(),
+            'query_indices': query_indices,
+            'top_indices': top_indices,
+            'top_distances': top_distances,
+            'top_match_indices': top_match_indices,
+            'dataset_indicators': dataset_indicators,
+            'global_ranges': global_ranges
+        }
+        with open(f"{output_dir}/eef_match_results_query{query_idx}.pkl", 'wb') as f:
+            pickle.dump(match_results, f)
+        
+        print(f"\nResults saved to {output_dir}/eef_match_results_query{query_idx}.pkl")
+        if output_video:
+            print(f"Video saved to {output_video}")
+        
+        # Add to list of all results
+        all_match_results.append(match_results)
     
-    # Get segment indices for top matches
-    top_match_indices = [all_segment_indices[i] for i in top_indices]
-    
-    # Visualize query and matches
-    print("\nVisualizing query segment and top matches...")
-    output_video = f"{args.output_dir}/eef_segment_matches_query{query_idx}.mp4"
-    visualize_query_and_matches(
-        eef_positions, query_indices, top_match_indices, top_distances, 
-        dataset_indicators, output_file=output_video, data=combined_data,
-        global_ranges=global_ranges
-    )
-    
-    # Save results
-    print("\nSaving match results...")
-    match_results = {
-        'query_idx': query_idx,
-        'query_segment': query_segment.cpu(),
-        'query_indices': query_indices,
-        'top_indices': top_indices,
-        'top_distances': top_distances,
-        'top_match_indices': top_match_indices,
-        'dataset_indicators': dataset_indicators,
-        'global_ranges': global_ranges
-    }
-    with open(f"{args.output_dir}/eef_match_results_query{query_idx}.pkl", 'wb') as f:
-        pickle.dump(match_results, f)
-    
-    print(f"\nResults saved to {args.output_dir}/eef_match_results_query{query_idx}.pkl")
-    print(f"Video saved to {output_video}")
     print("\nProcessing complete!")
-    print("="*50)
+    print(f"Processed {len(all_match_results)} query segments")
+    
+    return all_match_results
 
 if __name__ == "__main__":
     main() 

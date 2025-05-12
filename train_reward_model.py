@@ -633,7 +633,7 @@ def evaluate_model_on_test_set(model, test_loader, device):
         "num_test_samples": test_total
     }
 
-@hydra.main(config_path="config/train_reward_model", config_name="config", version_base=None)
+@hydra.main(config_path="config", config_name="reward_model", version_base=None)
 def main(cfg: DictConfig):
     """Train a state-action reward model using BT loss with Hydra config."""
     print("\n" + "=" * 50)

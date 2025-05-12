@@ -17,3 +17,4 @@ outputs/*
 wandb/*
 bc_model/*
 analysis/*
+results/*

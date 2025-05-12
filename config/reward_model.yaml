@@ -1,9 +1,9 @@
 # Hydra config for reward model training
 
+# Include common settings
 defaults:
-  - _self_
-  - override hydra: default
-  - override hydra/launcher: submitit_slurm
+  - common
+  - _self_  # Allow this config to override common settings
 
 # Data parameters
 data:
@@ -36,25 +36,5 @@ output:
   
 # Wandb configuration
 wandb:
-  use_wandb: true
-  project: "robot_preference_learning"
-  entity: "clvr"  # Set to your wandb entity or leave as null
-  name: "reward_model"  # Will be auto-generated if null
   tags: ["reward_model", "preference_learning"]
   notes: "Training reward model with Bradley-Terry preference learning"
-
-# Hydra configuration settings
-hydra:
-  job:
-    chdir: true
-  run:
-    dir: outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}
-  sweep:
-    dir: outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}
-    subdir: ${hydra.job.num}
-  job_logging:
-    root:
-      level: INFO
-      handlers: [file, console]
-    disable_existing_loggers: false
-  output_subdir: .hydra 

@@ -1,0 +1,39 @@
+# Hydra config for end-effector trajectory clustering
+
+# Include common settings
+defaults:
+  - common
+  - _self_  # Allow this config to override common settings
+
+# Random seed for reproducibility
+random_seed: 42
+
+# Data parameters
+data:
+  data_path: "/scr/shared/clam/datasets/metaworld/assembly-v2/buffer_assembly-v2.pt"
+  segment_length: 64
+  max_segments: 1000
+  max_dtw_segments: 500  # Limit segments for DTW calculation to save memory
+  use_relative_differences: false
+  preprocessed_data: null  # Path to preprocessed data file (skips extraction if provided)
+
+# Clustering parameters
+clustering:
+  n_clusters: 5
+  linkage_method: "average"  # Options: average, complete, single, ward
+  segments_per_cluster: 5  # Number of representative segments per cluster in visualizations
+
+# Visualization settings
+visualization:
+  use_shared_ranges: true  # Use shared ranges across all visualizations for consistency
+  skip_videos: false  # Skip generating videos to speed up execution
+
+# Output parameters
+output:
+  output_dir: "/scr/aliang80/robot_pref/results/eef_clustering"
+
+# Wandb configuration
+wandb:
+  use_wandb: false
+  tags: ["clustering", "end_effector", "trajectories"]
+  notes: "End-effector trajectory clustering for robot preference learning" 
