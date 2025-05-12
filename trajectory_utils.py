@@ -8,16 +8,13 @@ import matplotlib.pyplot as plt
 from matplotlib import animation
 from PIL import Image
 from torchvision.transforms import Compose, Resize, ToTensor, Normalize
-import dtw
+import utils.dtw as dtw
 
 # Set torch hub cache directory
 os.environ["TORCH_HOME"] = "/scr/aliang80/.cache"
 
 # Set random seed for reproducibility
 RANDOM_SEED = 42
-random.seed(RANDOM_SEED)
-np.random.seed(RANDOM_SEED)
-torch.manual_seed(RANDOM_SEED)
 
 # Default data paths for MetaWorld tasks
 DEFAULT_DATA_PATHS = [
@@ -342,18 +339,33 @@ def compute_dtw_distance(query_segment, reference_segment):
 
     return cost
 
-
-def compute_dtw_distance_matrix(segments, max_segments=None):
-    """Compute DTW distance matrix between segments using the custom DTW implementation."""
+def compute_dtw_distance_matrix(segments, max_segments=None, random_seed=42):
+    """Compute DTW distance matrix between segments using the custom DTW implementation.
+    
+    Args:
+        segments: List of segments to compute distances between
+        max_segments: Maximum number of segments to use (will sample if needed)
+        random_seed: Random seed for reproducible sampling
+        
+    Returns:
+        distance_matrix: Matrix of DTW distances
+        idx_mapping: Mapping from matrix indices to original segment indices
+    """
     n_segments = len(segments)
 
     # If max_segments is specified and less than n_segments, sample a subset
     if max_segments is not None and max_segments < n_segments:
-        print(
-            f"Sampling {max_segments} segments out of {n_segments} for DTW calculation (random seed: {RANDOM_SEED})"
-        )
-        # Use seeded random sampling
+        print(f"Sampling {max_segments} segments out of {n_segments} for DTW calculation (random seed: {random_seed})")
+        # Set seed for reproducible sampling
+        rng_state = random.getstate()
+        random.seed(random_seed)
+        
+        # Sample indices
         segment_indices = random.sample(range(n_segments), max_segments)
+        
+        # Restore random state
+        random.setstate(rng_state)
+        
         selected_segments = [segments[i] for i in segment_indices]
         # Create a mapping from new indices to original indices
         idx_mapping = {i: segment_indices[i] for i in range(max_segments)}
@@ -556,5 +568,70 @@ def load_preprocessed_segments(file_path):
         print(f"Number of segment indices: {len(data['segment_indices'])}")
     if "timestamp" in data:
         print(f"Data timestamp: {data['timestamp']}")
-
+    
     return data
+
+def compute_eef_position_ranges(data_paths):
+    """Compute the global min and max ranges for EEF positions across all datasets.
+    
+    Args:
+        data_paths: List of paths to dataset files
+        
+    Returns:
+        tuple: (x_min, x_max, y_min, y_max, z_min, z_max) for consistent visualization
+    """
+    all_mins = []
+    all_maxs = []
+    
+    print("Computing global EEF position ranges for consistent visualization...")
+    
+    for data_path in data_paths:
+        print(f"Processing dataset: {data_path}")
+        # Load data
+        data = load_tensordict(data_path)
+        
+        # Extract EEF positions
+        observations = data["obs"] if "obs" in data else data["state"]
+        observations_cpu = observations.cpu()
+        eef_positions = observations_cpu[:, :3].numpy()
+        
+        # Remove NaN values
+        eef_positions = eef_positions[~np.isnan(eef_positions).any(axis=1)]
+        
+        if len(eef_positions) == 0:
+            print(f"Warning: No valid EEF positions found in {data_path}")
+            continue
+            
+        # Compute min and max
+        min_vals = np.min(eef_positions, axis=0)
+        max_vals = np.max(eef_positions, axis=0)
+        
+        all_mins.append(min_vals)
+        all_maxs.append(max_vals)
+    
+    if not all_mins:
+        print("Warning: No valid ranges found across any datasets")
+        return None
+    
+    # Get global min and max across all datasets
+    global_min = np.min(all_mins, axis=0)
+    global_max = np.max(all_maxs, axis=0)
+    
+    # Add padding for better visualization
+    padding = 0.1
+    range_vals = global_max - global_min
+    
+    # Add padding
+    global_min -= padding * range_vals
+    global_max += padding * range_vals
+    
+    # Extract components
+    x_min, y_min, z_min = global_min
+    x_max, y_max, z_max = global_max
+    
+    print(f"Global EEF position ranges across all datasets:")
+    print(f"  X range: [{x_min:.4f}, {x_max:.4f}]")
+    print(f"  Y range: [{y_min:.4f}, {y_max:.4f}]")
+    print(f"  Z range: [{z_min:.4f}, {z_max:.4f}]")
+    
+    return x_min, x_max, y_min, y_max, z_min, z_max 

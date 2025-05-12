@@ -42,4 +42,4 @@ output:
 # Wandb configuration specific to IQL
 wandb:
   tags: ["iql", "preference_learning"]
-  notes: "IQL policy training with learned reward function" 
+  notes: "IQL policy training with learned reward function"

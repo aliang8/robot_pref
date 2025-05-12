@@ -17,37 +17,11 @@ import wandb
 
 # Import utility functions
 from trajectory_utils import (
-    RANDOM_SEED,
     load_tensordict,
     create_segments,
     sample_segment_pairs,
 )
-from utils.wandb_utils import log_to_wandb, log_artifact, reset_global_step
-
-# Set seed for reproducibility
-torch.manual_seed(RANDOM_SEED)
-np.random.seed(RANDOM_SEED)
-random.seed(RANDOM_SEED)
-
-# Set up CUDA memory management for better stability
-if torch.cuda.is_available():
-    torch.cuda.manual_seed(RANDOM_SEED)
-    torch.cuda.manual_seed_all(RANDOM_SEED)  # For multi-GPU
-    # Set deterministic behavior
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
-    
-    # Reduce memory fragmentation
-    torch.cuda.empty_cache()
-    # Use more aggressive memory caching if available (PyTorch 1.11+)
-    if hasattr(torch.cuda, "memory_stats"):
-        print("Enabling memory_stats for better CUDA memory management")
-        torch.cuda.memory_stats(device=None)
-    # Set memory allocation strategy to avoid fragmentation
-    if hasattr(torch.cuda, "set_per_process_memory_fraction"):
-        # Use 80% of available memory to leave room for system
-        torch.cuda.set_per_process_memory_fraction(0.8, 0)
-        print("Set CUDA memory fraction to 80%")
+from utils.wandb_utils import log_to_wandb, log_artifact
 
 
 class StateActionRewardModel(nn.Module):
@@ -345,7 +319,7 @@ def bradley_terry_loss(rewards1, rewards2, preferences):
     
     return loss
 
-def create_data_loaders(preference_dataset, train_ratio=0.8, val_ratio=0.1, batch_size=32, num_workers=4, pin_memory=True, seed=RANDOM_SEED):
+def create_data_loaders(preference_dataset, train_ratio=0.8, val_ratio=0.1, batch_size=32, num_workers=4, pin_memory=True, seed=42):
     """Create data loaders for training, validation, and testing.
     
     Args:
@@ -696,7 +670,7 @@ def evaluate_model_on_test_set(model, test_loader, device):
         "num_test_samples": test_total
     }
 
-@hydra.main(config_path="config/train_reward_model", config_name="config", version_base=None)
+@hydra.main(config_path="config", config_name="reward_model", version_base=None)
 def main(cfg: DictConfig):
     """Train a state-action reward model using BT loss with Hydra config."""
     print("\n" + "=" * 50)
@@ -706,7 +680,34 @@ def main(cfg: DictConfig):
     # Print config for visibility
     print("\nConfiguration:")
     print(OmegaConf.to_yaml(cfg))
-
+    
+    # Set random seed for reproducibility
+    random_seed = cfg.get('random_seed', 42)
+    torch.manual_seed(random_seed)
+    np.random.seed(random_seed)
+    random.seed(random_seed)
+    
+    # Also set CUDA seeds if available
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(random_seed)
+        torch.cuda.manual_seed_all(random_seed)  # For multi-GPU
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+        
+        # Reduce memory fragmentation
+        torch.cuda.empty_cache()
+        # Use more aggressive memory caching if available (PyTorch 1.11+)
+        if hasattr(torch.cuda, 'memory_stats'):
+            print("Enabling memory_stats for better CUDA memory management")
+            torch.cuda.memory_stats(device=None)
+        # Set memory allocation strategy to avoid fragmentation
+        if hasattr(torch.cuda, 'set_per_process_memory_fraction'):
+            # Use 80% of available memory to leave room for system
+            torch.cuda.set_per_process_memory_fraction(0.8, 0)
+            print("Set CUDA memory fraction to 80%")
+            
+    print(f"Using random seed: {random_seed}")
+    
     # Initialize wandb
     if cfg.wandb.use_wandb:
         # Generate experiment name based on data path
@@ -727,14 +728,17 @@ def main(cfg: DictConfig):
             notes=cfg.wandb.notes,
         )
         
-        # Reset global step counter to ensure clean start
-        reset_global_step(0)
-        
         print(f"Wandb initialized: {wandb.run.name}")
 
     # Create output directory
     os.makedirs(cfg.output.output_dir, exist_ok=True)
-
+    
+    # Get dataset name for the subdirectory
+    dataset_name = Path(cfg.data.data_path).stem
+    
+    os.makedirs(cfg.output.output_dir, exist_ok=True)
+    model_dir = cfg.output.output_dir
+    
     # Setup CUDA device
     if cfg.hardware.use_cpu:
         device = torch.device("cpu")
@@ -851,7 +855,7 @@ def main(cfg: DictConfig):
         batch_size=cfg.training.batch_size,
         num_workers=effective_num_workers,
         pin_memory=effective_pin_memory,
-        seed=RANDOM_SEED
+        seed=random_seed  # Use the same random seed
     )
     
     train_loader = dataloaders['train']
@@ -924,13 +928,15 @@ def main(cfg: DictConfig):
     # Create a descriptive model filename
     dataset_name = Path(cfg.data.data_path).stem
     hidden_dims_str = "_".join(map(str, cfg.model.hidden_dims))
-    model_filename = f"reward_model_{dataset_name}_seg{cfg.data.segment_length}_pairs{cfg.data.num_pairs}_hidden{hidden_dims_str}_epochs{cfg.training.num_epochs}.pt"
     
-    # Save model with descriptive filename
-    model_path = f"{cfg.output.output_dir}/{model_filename}"
+    # Also save a version with more detailed filename for versioning
+    sub_dir = f"{dataset_name}_model_seg{cfg.data.segment_length}_hidden{hidden_dims_str}_epochs{cfg.training.num_epochs}_pairs{cfg.data.num_pairs}"
+    
+    os.makedirs(os.path.join(model_dir, sub_dir), exist_ok=True)
+    model_path = os.path.join(model_dir, sub_dir, "model.pt")
     torch.save(model.state_dict(), model_path)
-    print(f"Model saved to {model_path}")
-
+    print(f"Model also saved with detailed name: {model_path}")
+    
     # Log as wandb artifact
     if cfg.wandb.use_wandb:
         try:
@@ -950,7 +956,7 @@ def main(cfg: DictConfig):
             artifact = log_artifact(
                 model_path, 
                 artifact_type="reward_model", 
-                name=f"reward_model_{dataset_name}_seg{cfg.data.segment_length}_pairs{cfg.data.num_pairs}_epochs{cfg.training.num_epochs}", 
+                name=f"{dataset_name}_seg{cfg.data.segment_length}_pairs{cfg.data.num_pairs}_epochs{cfg.training.num_epochs}", 
                 metadata=metadata
             )
             if artifact:
@@ -971,9 +977,8 @@ def main(cfg: DictConfig):
         "config": OmegaConf.to_container(cfg, resolve=True)
     }
     
-    # Save segment info with descriptive filename
-    info_filename = f"reward_model_info_{dataset_name}_seg{cfg.data.segment_length}_pairs{cfg.data.num_pairs}_hidden{hidden_dims_str}_epochs{cfg.training.num_epochs}.pkl"
-    info_path = f"{cfg.output.output_dir}/{info_filename}"
+    info_filename = f"info.pkl"
+    info_path = os.path.join(model_dir, sub_dir, info_filename)
     with open(info_path, "wb") as f:
         pickle.dump(segment_info, f)
     

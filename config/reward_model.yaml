@@ -1,5 +1,10 @@
 # Hydra config for reward model training
 
+# Include common settings
+defaults:
+  - common
+  - _self_  # Allow this config to override common settings
+
 # Data parameters
 data:
   data_path: "/scr/shared/clam/datasets/metaworld/assembly-v2/buffer_assembly-v2.pt"
@@ -27,13 +32,9 @@ hardware:
 
 # Output parameters
 output:
-  output_dir: /scr/matthewh6/robot_pref/reward_model
+  output_dir: /scr/aliang80/robot_pref/reward_model
   
 # Wandb configuration
 wandb:
-  use_wandb: false
-  project: "robot_pref"
-  entity: "clvr"  # Set to your wandb entity or leave as null
-  name: "reward_model"  # Will be auto-generated if null
   tags: ["reward_model", "preference_learning"]
-  notes: "Training reward model with Bradley-Terry preference learning" 
+  notes: "Training reward model with Bradley-Terry preference learning"

@@ -8,8 +8,6 @@ pip install wandb hydra-core d3rlpy
 
 ## Dataset Filtering
 
-Create a balanced dataset with equal numbers of random/medium/expert trajectories:
-
 ```bash
 # List available datasets and use the first one
 python create_mixed_expertise_dataset.py
@@ -23,26 +21,68 @@ python create_mixed_expertise_dataset.py --data_path "/path/to/dataset.pt" --out
 
 ## End-Effector Clustering
 
-Cluster robot trajectories based on end-effector movements:
+```bash
+python eef_clustering.py clustering.n_clusters=7 clustering.linkage_method=ward
+```
+
+## End-Effector Segment Matching
 
 ```bash
-# Basic clustering using default parameters
-python eef_clustering.py --data_path "/scr/shared/clam/datasets/metaworld/assembly-v2/buffer_assembly-v2.pt"
+# Basic segment matching using default parameters
+python eef_segment_matching.py
 
-# More advanced options
-python eef_clustering.py --data_path "path/to/dataset.pt" --n_clusters 5 --segment_length 64 --max_segments 1000 --linkage_method average
+# Customize data parameters
+python eef_segment_matching.py data.data_paths='["/path/to/dataset1.pt", "/path/to/dataset2.pt"]'
+python eef_segment_matching.py data.segment_length=32 data.samples_per_dataset=300
+
+# Customize matching parameters
+python eef_segment_matching.py matching.top_k=10
+python eef_segment_matching.py matching.query_indices=[5,10,15]  # Process multiple specific query segments
+
+# Visualization options
+python eef_segment_matching.py visualization.create_videos=false
+python eef_segment_matching.py visualization.use_shared_ranges=true
+
+# Change random seed and output directory
+python eef_segment_matching.py random_seed=123 output.output_dir="./segment_matching_results"
 ```
 
 ## Collect Preferences
 
-Generate preference pairs from trajectory segments:
+```bash
+# Basic preference collection using clustering results
+python collect_cluster_preferences.py data.clustering_results="/path/to/clustering_results.pkl"
+
+# Specify data path and output directory
+python collect_cluster_preferences.py data.data_path="/path/to/dataset.pt" output.output_dir="./preference_results"
+
+# Customize preference collection parameters
+python collect_cluster_preferences.py preferences.n_representatives=5 preferences.max_comparisons=20
+
+# Skip video generation for faster collection
+python collect_cluster_preferences.py preferences.skip_videos=true
+
+# Use automatic preferences based on ground truth rewards (no user input required)
+python collect_cluster_preferences.py preferences.use_automatic_preferences=true
+```
+
+## Collect Sequential Preferences with Similarity-Based Augmentation
 
 ```bash
-# Basic preference collection using returns as the criterion
-python collect_preferences.py --data_path "/path/to/dataset.pt" --num_pairs 1000
+# Basic sequential preference collection
+python collect_sequential_pref.py
 
-# Save to a specific output file
-python collect_preferences.py --data_path "/path/to/dataset.pt" --num_pairs 1000 --output_file "my_preferences.pkl"
+# Customize preference collection parameters
+python collect_sequential_pref.py preferences.n_queries=50 preferences.k_augment=10
+
+# Specify data path and output directory
+python collect_sequential_pref.py data.data_path="/path/to/dataset.pt" output.output_dir="./sequential_pref_results"
+
+# Adjust segment parameters
+python collect_sequential_pref.py data.segment_length=20 data.max_segments=1000
+
+# Configure DTW distance options
+python collect_sequential_pref.py preferences.use_dtw_distance=true preferences.max_dtw_segments=500
 ```
 
 ## Train Reward Model
@@ -55,15 +95,14 @@ python train_reward_model.py data.data_path="/scr2/shared/pref/datasets/robomimi
 
 # Custom parameters
 python train_reward_model.py data.data_path="/path/to/dataset.pt" model.hidden_dims=[256,256] training.num_epochs=50
+
+# Run with SLURM
+python train_reward_model.py --multirun
 ```
 
 ## Train Policy
 
-Train a policy using different algorithms:
-
 ### IQL (Implicit Q-Learning)
-
-IQL is the default algorithm. You can run it directly with:
 
 ```bash
 # Basic IQL policy training
@@ -78,29 +117,9 @@ python train_policy.py --config-name=iql data.data_path="/path/to/dataset.pt" tr
 
 ### BC (Behavior Cloning)
 
-To train with BC instead of IQL:
-
 ```bash
 # Basic BC policy training
 python train_policy.py --config-name=bc data.data_path="/path/to/dataset.pt"
 
 # With custom parameters
 python train_policy.py --config-name=bc data.data_path="/path/to/dataset.pt" model.learning_rate=1e-4 training.n_epochs=200 evaluation.record_video=true
-```
-
-## Parallel Evaluation
-
-The codebase supports parallel evaluation of policies for faster performance:
-
-```bash
-# Enable parallel evaluation with 4 processes
-python train_policy.py --config-name=iql data.data_path="/path/to/dataset.pt" evaluation.parallel_eval=true evaluation.eval_workers=4
-
-# Adjust frequency of evaluations
-python train_policy.py --config-name=iql data.data_path="/path/to/dataset.pt" evaluation.parallel_eval=true training.eval_interval=10
-```
-
-Note: The parallel evaluation uses a pickle-safe environment creation mechanism to avoid serialization issues when using multiprocessing. 
-
-
-python train_policy.py --config-name=iql data.use_ground_truth=true data.scale_rewards=True wandb.use_wandb=True data.reward_model_path="/scr/aliang80/robot_pref/reward_model/state_action_reward_model.pt"
