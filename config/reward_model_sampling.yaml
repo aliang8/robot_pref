@@ -8,17 +8,21 @@ defaults:
 # Active learning parameters
 active_learning:
   # Initial number of labeled pairs
-  initial_size: 50
+  initial_size: 5
   # Maximum number of queries (labels) to collect
-  max_queries: 500
+  max_queries: 100
   # Number of pairs to select in each iteration
-  batch_size: 50
+  batch_size: 5
   # Uncertainty estimation method: "entropy", "disagreement", or "random"
   uncertainty_method: "entropy"
   # Number of models in the ensemble (for disagreement method)
   num_models: 5
   # Number of epochs to train ensemble models
-  train_epochs: 20
+  train_epochs: 50
+  # Whether to fine-tune the model from the previous iteration or train from scratch
+  fine_tune: false
+  # If fine-tuning, the learning rate to use
+  fine_tune_lr: 5e-5
 
 # Override data parameters
 data:

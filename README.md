@@ -106,6 +106,9 @@ python train_reward_model.py --multirun
 ```bash
 # Train reward model with active learning using disagreement-based uncertainty sampling
 python train_reward_model_sampling.py active_learning.uncertainty_method="disagreement" active_learning.num_models=5
+
+# Enable fine-tuning between active learning iterations
+python train_reward_model_sampling.py active_learning.fine_tune=true active_learning.fine_tune_lr=5e-5
 ```
 
 ## Train Policy

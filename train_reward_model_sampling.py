@@ -286,7 +286,8 @@ def create_initial_dataset(segment_pairs, segment_indices, preferences, data, in
     return labeled_pairs, labeled_preferences, unlabeled_pairs, unlabeled_indices
 
 def train_ensemble_model(state_dim, action_dim, labeled_pairs, segment_indices, labeled_preferences, 
-                        data, device, num_models=5, hidden_dims=[256, 256], num_epochs=20):
+                        data, device, num_models=5, hidden_dims=[256, 256], num_epochs=20, 
+                        fine_tune=False, prev_ensemble=None, fine_tune_lr=5e-5):
     """Train an ensemble of reward models on the labeled data.
     
     Args:
@@ -300,6 +301,9 @@ def train_ensemble_model(state_dim, action_dim, labeled_pairs, segment_indices, 
         num_models: Number of models in the ensemble
         hidden_dims: Hidden dimensions for each model
         num_epochs: Number of epochs to train each model
+        fine_tune: Whether to fine-tune from previous model
+        prev_ensemble: Previous ensemble model to fine-tune from
+        fine_tune_lr: Learning rate for fine-tuning
         
     Returns:
         ensemble: Trained ensemble model
@@ -312,15 +316,26 @@ def train_ensemble_model(state_dim, action_dim, labeled_pairs, segment_indices, 
     # Create dataset from labeled pairs
     dataset = PreferenceDataset(data, labeled_pairs, segment_indices, labeled_preferences)
     
-    # Create ensemble model
-    ensemble = EnsembleRewardModel(state_dim, action_dim, hidden_dims, num_models)
+    # Create or reuse ensemble model
+    if fine_tune and prev_ensemble is not None:
+        print("Fine-tuning from previous ensemble model")
+        ensemble = prev_ensemble
+        # Ensure the ensemble has the right number of models
+        if len(ensemble.models) != num_models:
+            print(f"Warning: Previous ensemble has {len(ensemble.models)} models, but {num_models} requested. Creating new ensemble.")
+            ensemble = EnsembleRewardModel(state_dim, action_dim, hidden_dims, num_models)
+        lr = fine_tune_lr  # Use lower learning rate for fine-tuning
+    else:
+        print("Training new ensemble model from scratch")
+        ensemble = EnsembleRewardModel(state_dim, action_dim, hidden_dims, num_models)
+        lr = 1e-4  # Use standard learning rate for training from scratch
     
     # Move entire ensemble to device at once
     ensemble = ensemble.to(device)
     
     # Create a combined optimizer for all models in the ensemble
     combined_params = list(ensemble.parameters())
-    optimizer = optim.Adam(combined_params, lr=1e-4, weight_decay=1e-4)
+    optimizer = optim.Adam(combined_params, lr=lr, weight_decay=1e-4)
     
     # Create train/val split for the dataset
     train_size = int(0.8 * len(dataset))
@@ -335,7 +350,7 @@ def train_ensemble_model(state_dim, action_dim, labeled_pairs, segment_indices, 
     train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True)
     val_loader = DataLoader(val_dataset, batch_size=64)
     
-    print(f"Training ensemble of {num_models} models for {num_epochs} epochs")
+    print(f"Training ensemble of {num_models} models for {num_epochs} epochs (lr={lr})")
     
     # Training loop
     for epoch in range(num_epochs):
@@ -576,6 +591,9 @@ def active_preference_learning(cfg):
     total_labeled = len(labeled_pairs)
     max_queries = cfg.active_learning.max_queries
     
+    # Keep track of the previous ensemble for fine-tuning
+    prev_ensemble = None
+    
     while total_labeled < max_queries and len(unlabeled_pairs) > 0:
         iteration += 1
         print(f"\n--- Active Learning Iteration {iteration} ---")
@@ -593,8 +611,15 @@ def active_preference_learning(cfg):
             device,
             num_models=cfg.active_learning.num_models,
             hidden_dims=cfg.model.hidden_dims,
-            num_epochs=cfg.active_learning.train_epochs
+            num_epochs=cfg.active_learning.train_epochs,
+            fine_tune=cfg.active_learning.fine_tune,
+            prev_ensemble=prev_ensemble,
+            fine_tune_lr=cfg.active_learning.fine_tune_lr
         )
+        
+        # Store the current ensemble for potential fine-tuning in the next iteration
+        if cfg.active_learning.fine_tune:
+            prev_ensemble = deepcopy(ensemble)
         
         # Move ensemble to device
         ensemble = ensemble.to(device)
