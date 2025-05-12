@@ -11,7 +11,7 @@ import metaworld
 import d3rlpy
 from d3rlpy.algos import IQL, BC
 from d3rlpy.datasets import MDPDataset
-from d3rlpy.metrics.scorer import evaluate_on_environment
+# from d3rlpy.metrics.scorer import evaluate_on_environment
 from d3rlpy.models.encoders import VectorEncoderFactory
 from pathlib import Path
 import time
@@ -24,13 +24,13 @@ from sklearn.preprocessing import StandardScaler
 
 # Import d3rlpy components
 from d3rlpy.dataset import MDPDataset
-from d3rlpy.algos import IQL, DiscreteBC, BC
-from d3rlpy.metrics.scorer import evaluate_on_environment
+from d3rlpy.algos import IQL, DiscreteBC, BC, BCConfig
+# from d3rlpy.metrics.scorer import evaluate_on_environment
 from d3rlpy.models.encoders import VectorEncoderFactory
 
 # Import utility functions
 from trajectory_utils import load_tensordict, RANDOM_SEED
-from utils.env_utils import MetaWorldEnvCreator
+from utils.env_utils import MetaWorldEnvCreator, RobomimicEnvCreator
 from utils.callbacks import WandbCallback, CompositeCallback
 from utils.wandb_utils import log_to_wandb, reset_global_step
 from utils.eval_utils import evaluate_policy_manual, custom_evaluate_on_environment

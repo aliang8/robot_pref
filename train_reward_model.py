@@ -434,14 +434,9 @@ def log_wandb_metrics(train_loss, val_loss, epoch, lr=None):
 
     if lr is not None:
         metrics["learning_rate"] = lr
-<<<<<<< HEAD
-
-    wandb.log(metrics)
-=======
     
     # Use our improved log_to_wandb function
     log_to_wandb(metrics, epoch=epoch, prefix="train")
->>>>>>> origin/anthony
 
 
 def train_reward_model(model, train_loader, val_loader, device, num_epochs=50, lr=1e-4):
