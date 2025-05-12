@@ -15,6 +15,8 @@ from matplotlib import animation
 import matplotlib.gridspec as gridspec
 from IPython.display import HTML, display
 import time
+import hydra
+from omegaconf import DictConfig, OmegaConf
 
 # For running in interactive environments
 is_notebook = 'ipykernel' in sys.modules
@@ -425,8 +427,8 @@ def generate_augmented_preferences(data, clusters, segment_indices, cluster_rank
     stats = {
         'total_pairs': 0,
         'ground_truth_available': 0,
-        'matching_ground_truth': 0,
-        'accuracy': 0.0
+        'ground_truth_correct': 0,
+        'ground_truth_accuracy': 0.0
     }
     
     # Iterate through all possible segment pairs
@@ -500,7 +502,7 @@ def generate_augmented_preferences(data, clusters, segment_indices, cluster_rank
                     if gt_preference is not None and gt_preference != 0:
                         stats['ground_truth_available'] += 1
                         if augmented_preference == gt_preference:
-                            stats['matching_ground_truth'] += 1
+                            stats['ground_truth_correct'] += 1
                     
                     # Add to augmented preferences
                     augmented_preferences.append((idx1, idx2, augmented_preference))
@@ -508,10 +510,10 @@ def generate_augmented_preferences(data, clusters, segment_indices, cluster_rank
     
     # Calculate accuracy if possible
     if stats['ground_truth_available'] > 0:
-        stats['accuracy'] = stats['matching_ground_truth'] / stats['ground_truth_available']
+        stats['ground_truth_accuracy'] = stats['ground_truth_correct'] / stats['ground_truth_available']
     
     print(f"Generated {augmented_count} augmented preferences")
-    print(f"Augmented preference accuracy vs ground truth: {stats['accuracy']:.2%} ({stats['matching_ground_truth']}/{stats['ground_truth_available']} comparable pairs)")
+    print(f"Augmented preference accuracy vs ground truth: {stats['ground_truth_accuracy']:.2%} ({stats['ground_truth_correct']}/{stats['ground_truth_available']} comparable pairs)")
     
     return augmented_preferences, stats
 
@@ -834,35 +836,48 @@ def create_integrated_comparison_video(data, segment1, segment2, output_file="in
         
         return combined_path
 
-def main():
-    parser = argparse.ArgumentParser(description="Collect and augment preferences based on cluster representatives")
-    parser.add_argument("--data_path", type=str, default=DEFAULT_DATA_PATHS[0],
-                        help="Path to the PT file containing trajectory data")
-    parser.add_argument("--preprocessed_data", type=str, default=None,
-                        help="Path to preprocessed data file (used instead of data_path if provided)")
-    parser.add_argument("--clustering_results", type=str, required=True,
-                        help="Path to the pickle file with clustering results")
-    parser.add_argument("--output_dir", type=str, default="preference_data",
-                        help="Directory to save preference data and dataset")
-    parser.add_argument("--n_representatives", type=int, default=3,
-                        help="Number of representative segments per cluster")
-    parser.add_argument("--max_comparisons", type=int, default=None,
-                        help="Maximum number of pairwise comparisons to perform")
-    parser.add_argument("--skip_videos", action="store_true",
-                        help="Skip generating videos for preference collection to speed things up")
-    parser.add_argument("--no_auto_open", action="store_true",
-                        help="Don't automatically open visualization videos")
-    parser.add_argument("--use_gt_ranking", action="store_true",
-                        help="Use ground truth ranking for augmented preferences instead of user ranking")
-    args = parser.parse_args()
+@hydra.main(config_path="config", config_name="cluster_preferences", version_base=None)
+def main(cfg: DictConfig):
+    """Run cluster-based preference collection with Hydra configuration."""
+    print("\n" + "="*50)
+    print("Collecting preferences based on trajectory clusters")
+    print("="*50)
+    
+    # Print config for visibility
+    print("\nConfiguration:")
+    print(OmegaConf.to_yaml(cfg))
+    
+    # Set random seed for reproducibility
+    random_seed = cfg.random_seed
+    random.seed(random_seed)
+    np.random.seed(random_seed)
+    torch.manual_seed(random_seed)
+    print(f"Using random seed: {random_seed}")
     
     # Create output directory
-    os.makedirs(args.output_dir, exist_ok=True)
+    os.makedirs(cfg.output.output_dir, exist_ok=True)
+    
+    # Extract parameters from config
+    data_path = cfg.data.data_path
+    preprocessed_data = cfg.data.preprocessed_data
+    clustering_results_path = cfg.data.clustering_results
+    
+    # Check if clustering_results is provided
+    if clustering_results_path is None:
+        raise ValueError("Clustering results path must be provided in the configuration")
+    
+    n_representatives = cfg.preferences.n_representatives
+    max_comparisons = cfg.preferences.max_comparisons
+    skip_videos = cfg.preferences.skip_videos
+    no_auto_open = cfg.preferences.no_auto_open
+    use_gt_ranking = cfg.preferences.use_gt_ranking
+    
+    output_dir = cfg.output.output_dir
     
     # Load data
-    if args.preprocessed_data:
-        print(f"Loading preprocessed data from {args.preprocessed_data}")
-        preproc_data = load_preprocessed_segments(args.preprocessed_data)
+    if preprocessed_data:
+        print(f"Loading preprocessed data from {preprocessed_data}")
+        preproc_data = load_preprocessed_segments(preprocessed_data)
         
         # Create data structure expected by preference collection functions
         data = {}
@@ -880,8 +895,8 @@ def main():
         # Handle missing fields
         if 'obs' not in data and 'state' not in data:
             print(f"WARNING: Preprocessed data does not contain observation data (obs or state).")
-            print(f"Loading original data from {args.data_path} for observations.")
-            orig_data = load_tensordict(args.data_path)
+            print(f"Loading original data from {data_path} for observations.")
+            orig_data = load_tensordict(data_path)
             
             # Copy missing essential fields
             for field in missing_fields:
@@ -890,14 +905,14 @@ def main():
                     print(f"Loaded field '{field}' from original data")
         
         # Add source path for reference
-        data['_source_path'] = args.preprocessed_data
+        data['_source_path'] = preprocessed_data
     else:
-        print(f"Loading data from {args.data_path}")
-        data = load_tensordict(args.data_path)
-        data['_source_path'] = args.data_path
+        print(f"Loading data from {data_path}")
+        data = load_tensordict(data_path)
+        data['_source_path'] = data_path
     
     # Load clustering results
-    clustering_results = load_clustering_results(args.clustering_results)
+    clustering_results = load_clustering_results(clustering_results_path)
     clusters = clustering_results['clusters']
     segment_indices = clustering_results['segment_indices']
     
@@ -905,15 +920,15 @@ def main():
     
     # Get representative segments for each cluster
     cluster_representatives = get_representative_segments(
-        data, clusters, segment_indices, n_per_cluster=args.n_representatives
+        data, clusters, segment_indices, n_per_cluster=n_representatives
     )
     
     # Collect user preferences between clusters
     user_preferences = collect_cluster_preferences(
         data, cluster_representatives, 
-        num_comparisons=args.max_comparisons,
-        skip_videos=args.skip_videos,
-        no_auto_open=args.no_auto_open
+        num_comparisons=max_comparisons,
+        skip_videos=skip_videos,
+        no_auto_open=no_auto_open
     )
     
     # Calculate preference accuracy statistics
@@ -940,7 +955,7 @@ def main():
         preference_stats['user_vs_ground_truth']['accuracy'] = accuracy
     
     # Save raw preferences
-    preferences_file = os.path.join(args.output_dir, "raw_preferences.pkl")
+    preferences_file = os.path.join(output_dir, "raw_preferences.pkl")
     
     raw_data = {
         'user_preferences': user_preferences,  # Now includes ground truth
@@ -961,7 +976,7 @@ def main():
     }
     
     # Choose which ranking to use based on arguments
-    if args.use_gt_ranking and gt_ranking:
+    if use_gt_ranking and gt_ranking:
         print("\nUsing ground truth ranking for augmented preferences generation")
         selected_ranking = gt_ranking
     else:
@@ -977,7 +992,7 @@ def main():
     preference_stats['augmented_vs_ground_truth'] = augmented_stats
     
     # Create preference dataset
-    dataset_file = os.path.join(args.output_dir, "preference_dataset.pkl")
+    dataset_file = os.path.join(output_dir, "preference_dataset.pkl")
     preference_dataset = create_preference_dataset(
         data, segment_indices, augmented_preferences, dataset_file, 
         preference_stats=preference_stats  # Include stats in metadata
@@ -997,23 +1012,10 @@ def main():
     # Print augmented preference accuracy summary
     print("\nAugmented preference vs. ground truth summary:")
     print(f"  Total comparable preferences: {augmented_stats['ground_truth_available']}")
-    print(f"  Matching preferences: {augmented_stats['matching_ground_truth']}")
-    print(f"  Accuracy: {augmented_stats['accuracy']:.2%}")
+    print(f"  Matching ground truth: {augmented_stats['ground_truth_correct']}")
+    print(f"  Accuracy: {augmented_stats['ground_truth_accuracy']:.2%}")
     
-    # Print comparison between user and augmented preferences
-    if preference_stats['user_vs_ground_truth']['comparable_pairs'] > 0 and augmented_stats['ground_truth_available'] > 0:
-        user_acc = preference_stats['user_vs_ground_truth']['accuracy']
-        aug_acc = augmented_stats['accuracy']
-        
-        print("\nComparison:")
-        if abs(user_acc - aug_acc) < 0.05:  # Within 5%
-            print(f"  User and augmented preferences have similar accuracy (difference: {abs(user_acc - aug_acc):.2%})")
-        elif user_acc > aug_acc:
-            print(f"  User preferences are more accurate than augmented preferences by {user_acc - aug_acc:.2%}")
-        else:
-            print(f"  Augmented preferences are more accurate than user preferences by {aug_acc - user_acc:.2%}")
-    
-    print(f"\nResults saved to {args.output_dir}")
+    return preference_dataset
 
 if __name__ == "__main__":
     main() 
