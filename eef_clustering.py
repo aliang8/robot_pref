@@ -136,7 +136,7 @@ def extract_eef_trajectories(data, segment_length=20, max_segments=None, use_rel
         print(f"No max_segments specified, setting to {max_segments}")
     
     # Shuffle blocks once at the beginning for variety
-    random.shuffle(all_valid_blocks)
+    # random.shuffle(all_valid_blocks)
     
     with tqdm(total=max_segments, desc="Sampling segments") as pbar:
         block_idx = 0
@@ -155,10 +155,9 @@ def extract_eef_trajectories(data, segment_length=20, max_segments=None, use_rel
             possible_segments = block['length'] - effective_length + 1
             if possible_segments <= 0:
                 continue
-                
-            # Choose a position within this block (sequentially if multiple samples from same block)
-            # Use the total_attempts to ensure we pick different positions for the same block
-            segment_offset = total_attempts % possible_segments
+            
+            # Choose a random position within this block that will accommodate the effective_length
+            segment_offset = random.randint(0, possible_segments - 1)
             start_idx = start_block + segment_offset
             end_idx = start_idx + effective_length - 1
             
