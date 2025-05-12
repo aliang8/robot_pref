@@ -61,6 +61,28 @@ python collect_cluster_preferences.py preferences.n_representatives=5 preference
 
 # Skip video generation for faster collection
 python collect_cluster_preferences.py preferences.skip_videos=true
+
+# Use automatic preferences based on ground truth rewards (no user input required)
+python collect_cluster_preferences.py preferences.use_automatic_preferences=true
+```
+
+## Collect Sequential Preferences with Similarity-Based Augmentation
+
+```bash
+# Basic sequential preference collection
+python collect_sequential_pref.py
+
+# Customize preference collection parameters
+python collect_sequential_pref.py preferences.n_queries=50 preferences.k_augment=10
+
+# Specify data path and output directory
+python collect_sequential_pref.py data.data_path="/path/to/dataset.pt" output.output_dir="./sequential_pref_results"
+
+# Adjust segment parameters
+python collect_sequential_pref.py data.segment_length=20 data.max_segments=1000
+
+# Configure DTW distance options
+python collect_sequential_pref.py preferences.use_dtw_distance=true preferences.max_dtw_segments=500
 ```
 
 ## Train Reward Model

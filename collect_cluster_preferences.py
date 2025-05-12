@@ -836,6 +836,69 @@ def create_integrated_comparison_video(data, segment1, segment2, output_file="in
         
         return combined_path
 
+def collect_automatic_preferences(data, cluster_representatives, num_comparisons=None):
+    """Collect preferences between cluster representatives automatically using ground truth rewards.
+    
+    Args:
+        data: TensorDict with observations and rewards
+        cluster_representatives: Dict mapping cluster_id to representative segments
+        num_comparisons: Number of comparisons to conduct (default: all pairs)
+        
+    Returns:
+        list: Preferences in format [(cluster_id1, cluster_id2, preference, gt_preference), ...]
+              where preference is 1 if cluster_id1 is preferred, 2 if cluster_id2 is preferred
+    """
+    # Check if reward data is available
+    if "reward" not in data:
+        raise ValueError("Reward data not found in dataset. Cannot determine automatic preferences.")
+    
+    # Get all cluster IDs
+    cluster_ids = sorted(cluster_representatives.keys())
+    print(f"Collecting automatic preferences for {len(cluster_ids)} clusters using ground truth rewards")
+    
+    # Generate all possible pairs of cluster IDs
+    cluster_pairs = list(itertools.combinations(cluster_ids, 2))
+    
+    # Shuffle pairs for randomness
+    random.shuffle(cluster_pairs)
+    
+    # If num_comparisons is specified, limit the number of comparisons
+    if num_comparisons and num_comparisons < len(cluster_pairs):
+        print(f"Limiting to {num_comparisons} comparisons out of {len(cluster_pairs)} possible pairs")
+        cluster_pairs = cluster_pairs[:num_comparisons]
+    
+    # Collect preferences
+    preferences = []
+    
+    for i, (cluster_id1, cluster_id2) in enumerate(tqdm(cluster_pairs, desc="Comparing clusters")):
+        print(f"\nComparison {i+1}/{len(cluster_pairs)}: Cluster {cluster_id1} vs Cluster {cluster_id2}")
+        
+        # Select a random representative from each cluster
+        segment1 = random.choice(cluster_representatives[cluster_id1])
+        segment2 = random.choice(cluster_representatives[cluster_id2])
+        
+        # Get ground truth preference based on reward
+        gt_preference = get_reward_based_preference(data, segment1, segment2)
+        
+        if gt_preference is None:
+            print(f"Warning: Could not determine preference for comparison {i+1}. Skipping.")
+            continue
+        
+        if gt_preference == 0:
+            print(f"Equal rewards for clusters {cluster_id1} and {cluster_id2}. Skipping.")
+            continue
+            
+        # Use ground truth as the preference
+        preference = gt_preference
+        print(f"Automatic preference (based on reward): {preference}")
+        
+        # Record preference with ground truth
+        preferences.append((cluster_id1, cluster_id2, preference, gt_preference))
+    
+    print(f"\nCollected {len(preferences)} automatic preferences based on ground truth rewards")
+    
+    return preferences
+
 @hydra.main(config_path="config", config_name="cluster_preferences", version_base=None)
 def main(cfg: DictConfig):
     """Run cluster-based preference collection with Hydra configuration."""
@@ -871,6 +934,7 @@ def main(cfg: DictConfig):
     skip_videos = cfg.preferences.skip_videos
     no_auto_open = cfg.preferences.no_auto_open
     use_gt_ranking = cfg.preferences.use_gt_ranking
+    use_automatic_preferences = cfg.preferences.use_automatic_preferences
     
     output_dir = cfg.output.output_dir
     
@@ -923,13 +987,24 @@ def main(cfg: DictConfig):
         data, clusters, segment_indices, n_per_cluster=n_representatives
     )
     
-    # Collect user preferences between clusters
-    user_preferences = collect_cluster_preferences(
-        data, cluster_representatives, 
-        num_comparisons=max_comparisons,
-        skip_videos=skip_videos,
-        no_auto_open=no_auto_open
-    )
+    # Collect preferences between clusters - either automatic or user-based
+    if use_automatic_preferences:
+        print("\nUsing automatic preferences based on ground truth rewards")
+        if "reward" not in data:
+            raise ValueError("Automatic preferences requested but no reward data found in dataset")
+            
+        user_preferences = collect_automatic_preferences(
+            data, cluster_representatives, 
+            num_comparisons=max_comparisons
+        )
+    else:
+        print("\nCollecting user preferences")
+        user_preferences = collect_cluster_preferences(
+            data, cluster_representatives, 
+            num_comparisons=max_comparisons,
+            skip_videos=skip_videos,
+            no_auto_open=no_auto_open
+        )
     
     # Calculate preference accuracy statistics
     preference_stats = {
@@ -999,12 +1074,12 @@ def main(cfg: DictConfig):
     )
     
     print("\nProcess complete!")
-    print(f"Collected {len(user_preferences)} direct user preferences")
+    print(f"Collected {len(user_preferences)} direct preferences")
     print(f"Generated {len(augmented_preferences)} augmented preferences")
     
-    # Print user preference accuracy summary
+    # Print preference accuracy summary
     if preference_stats['user_vs_ground_truth']['comparable_pairs'] > 0:
-        print("\nUser preference vs. ground truth summary:")
+        print("\nPreference vs. ground truth summary:")
         print(f"  Total comparable preferences: {preference_stats['user_vs_ground_truth']['comparable_pairs']}")
         print(f"  Matching preferences: {preference_stats['user_vs_ground_truth']['matching_preferences']}")
         print(f"  Accuracy: {preference_stats['user_vs_ground_truth']['accuracy']:.2%}")

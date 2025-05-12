@@ -21,6 +21,7 @@ preferences:
   skip_videos: false          # Skip generating videos for preference collection to speed things up
   no_auto_open: false         # Don't automatically open visualization videos
   use_gt_ranking: false       # Use ground truth ranking for augmented preferences instead of user ranking
+  use_automatic_preferences: false  # Use ground truth rewards to automatically determine preferences instead of user input
 
 # Output parameters
 output:
