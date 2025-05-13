@@ -290,8 +290,8 @@ def evaluate_model_on_test_set(model, test_loader, device):
             test_acc += correct
             test_total += pref.size(0)
             
-            # Calculate log probability for each batch item (skip for ensemble)
-            if not is_ensemble and hasattr(model, 'logpdf'):
+            # Calculate log probability for each batch item
+            if hasattr(model, 'logpdf'):
                 batch_size = pref.size(0)
                 for i in range(batch_size):
                     # Select the correctly preferred segments for this batch item
@@ -299,15 +299,34 @@ def evaluate_model_on_test_set(model, test_loader, device):
                         # First segment is preferred
                         segment_obs = obs1[i:i+1]  # Keep batch dimension
                         segment_actions = actions1[i:i+1]
-                        segment_reward = reward1.squeeze(0)[i:i+1]
+                        segment_reward = reward1.squeeze(0)[i:i+1] if not is_ensemble else reward1.mean(dim=0)[i:i+1]
                     else:
                         # Second segment is preferred
                         segment_obs = obs2[i:i+1]  # Keep batch dimension
                         segment_actions = actions2[i:i+1]
-                        segment_reward = reward2.squeeze(0)[i:i+1]
+                        segment_reward = reward2.squeeze(0)[i:i+1] if not is_ensemble else reward2.mean(dim=0)[i:i+1]
                     
                     # Calculate logpdf
                     logp = model.logpdf(segment_obs, segment_actions, segment_reward)
+                    logpdf_values.append(logp.mean().item())
+            elif is_ensemble and hasattr(model.models[0], 'logpdf'):
+                # For ensembles, compute logpdf using first model if ensemble doesn't have a logpdf method
+                batch_size = pref.size(0)
+                for i in range(batch_size):
+                    # Select the correctly preferred segments for this batch item
+                    if pref[i] == 1:
+                        # First segment is preferred
+                        segment_obs = obs1[i:i+1]  # Keep batch dimension
+                        segment_actions = actions1[i:i+1]
+                        segment_reward = reward1.mean(dim=0)[i:i+1]  # Use mean reward across ensemble
+                    else:
+                        # Second segment is preferred
+                        segment_obs = obs2[i:i+1]  # Keep batch dimension
+                        segment_actions = actions2[i:i+1]
+                        segment_reward = reward2.mean(dim=0)[i:i+1]  # Use mean reward across ensemble
+                    
+                    # Calculate logpdf using first model
+                    logp = model.models[0].logpdf(segment_obs, segment_actions, segment_reward)
                     logpdf_values.append(logp.mean().item())
     
     avg_test_loss = test_loss / len(test_loader) if len(test_loader) > 0 else float('nan')

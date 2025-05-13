@@ -110,7 +110,7 @@ def train_final_reward_model(labeled_pairs, segment_indices, labeled_preferences
     )
     
     train_loader = data_loaders['train']
-    print(f"Created data loaders with {data_loaders['train_size']} train, {data_loaders['val_size']} val, and {data_loaders['test_size']} test samples")
+    print(f"Using all {data_loaders['train_size']} labeled samples for training the final model (no validation split)")
     
     # Train final model
     final_model = SegmentRewardModel(state_dim, action_dim, hidden_dims=cfg.model.hidden_dims)
@@ -302,6 +302,7 @@ def active_preference_learning(cfg):
         "num_labeled": [],
         "test_accuracy": [],
         "test_loss": [],
+        "avg_logpdf": [],
         "iterations": []
     }
     
@@ -329,21 +330,19 @@ def active_preference_learning(cfg):
         # Create dataset for training the ensemble
         ensemble_dataset = PreferenceDataset(data_cpu, labeled_pairs, segment_indices, labeled_preferences)
         
-        # Use utility function to create data loaders
+        # Use utility function to create data loaders with all data for training (no validation split)
         data_loaders = create_data_loaders(
             ensemble_dataset,
-            train_ratio=0.8,
-            val_ratio=0.2,
-            batch_size=min(64, len(ensemble_dataset)),
+            train_ratio=1.0,  # Use all data for training
+            val_ratio=0.0,    # No validation set
+            batch_size=min(cfg.training.batch_size, len(ensemble_dataset)),
             num_workers=cfg.training.get('num_workers', 4),
             pin_memory=cfg.training.get('pin_memory', True),
             seed=random_seed
         )
         
         train_loader = data_loaders['train']
-        val_loader = data_loaders['val']
-        
-        print(f"Created ensemble data loaders with {data_loaders['train_size']} train and {data_loaders['val_size']} val samples")
+        print(f"Using all {data_loaders['train_size']} labeled samples for training (no validation split)")
         
         if cfg.active_learning.fine_tune and prev_ensemble is not None:
             print("Fine-tuning from previous ensemble model")
@@ -363,11 +362,11 @@ def active_preference_learning(cfg):
         ensemble, _, _ = train_model(
             ensemble,
             train_loader,
-            val_loader,
+            None,           # No validation loader
             device,
             num_epochs=cfg.training.num_epochs,
             lr=lr,
-            wandb=None,  # Don't log ensemble training to wandb
+            wandb=None,     # Don't log ensemble training to wandb
             is_ensemble=True
         )
         
@@ -387,6 +386,7 @@ def active_preference_learning(cfg):
         metrics["num_labeled"].append(total_labeled)
         metrics["test_accuracy"].append(test_metrics["test_accuracy"])
         metrics["test_loss"].append(test_metrics["test_loss"])
+        metrics["avg_logpdf"].append(test_metrics["avg_logpdf"])
         metrics["iterations"].append(iteration)
         
         # Log to wandb
@@ -395,6 +395,7 @@ def active_preference_learning(cfg):
                 "num_labeled": total_labeled,
                 "test_accuracy": test_metrics["test_accuracy"],
                 "test_loss": test_metrics["test_loss"],
+                "avg_logpdf": test_metrics["avg_logpdf"],
                 "active_iteration": iteration
             })
         
@@ -507,17 +508,36 @@ def active_preference_learning(cfg):
     model_dir = os.path.join(cfg.output.output_dir, output_subdir)
     os.makedirs(model_dir, exist_ok=True)
     
-    # Plot learning curve
-    plt.figure(figsize=(10, 6))
-    plt.plot(metrics["num_labeled"], metrics["test_accuracy"], marker='o')
-    plt.xlabel("Number of Labeled Pairs")
-    plt.ylabel("Test Accuracy")
-    plt.title(f"Active Learning Curve ({cfg.active_learning.uncertainty_method})")
-    plt.grid(True)
+    # Plot learning curve with three subplots: accuracy, loss, and logpdf
+    fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(18, 6), constrained_layout=True)
+    
+    # Plot test accuracy
+    ax1.plot(metrics["num_labeled"], metrics["test_accuracy"], marker='o', color='blue')
+    ax1.set_xlabel("Number of Labeled Pairs")
+    ax1.set_ylabel("Test Accuracy")
+    ax1.set_title(f"Test Accuracy vs Labeled Pairs ({cfg.active_learning.uncertainty_method})")
+    ax1.grid(True)
+    
+    # Plot test loss (Bradley-Terry)
+    ax2.plot(metrics["num_labeled"], metrics["test_loss"], marker='o', color='red')
+    ax2.set_xlabel("Number of Labeled Pairs")
+    ax2.set_ylabel("Bradley-Terry Loss (BCE)")
+    ax2.set_title(f"Preference Learning Loss vs Labeled Pairs ({cfg.active_learning.uncertainty_method})")
+    ax2.grid(True)
+    
+    # Plot test logpdf (log probability density)
+    ax3.plot(metrics["num_labeled"], metrics["avg_logpdf"], marker='o', color='green')
+    ax3.set_xlabel("Number of Labeled Pairs") 
+    ax3.set_ylabel("Average Log Probability")
+    ax3.set_title(f"Avg Log Probability vs Labeled Pairs ({cfg.active_learning.uncertainty_method})")
+    ax3.grid(True)
+   
+    # Add a global title
+    fig.suptitle(f"Active Learning Performance Metrics", fontsize=16)
     
     # Save plot in the model directory
     learning_curve_path = os.path.join(model_dir, "learning_curve.png")
-    plt.savefig(learning_curve_path)
+    plt.savefig(learning_curve_path, dpi=300, bbox_inches='tight')
     
     if cfg.wandb.use_wandb:
         wandb.log({"learning_curve": wandb.Image(learning_curve_path)})

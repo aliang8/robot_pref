@@ -23,13 +23,6 @@ model:
   hidden_dims: [256, 256]
   lr: 1e-4
 
-# Training parameters
-training:
-  batch_size: 256
-  num_epochs: 50
-  num_workers: 4
-  pin_memory: true
-
 # Hardware settings
 hardware:
   gpu: 0
