@@ -49,7 +49,8 @@ from utils.training_utils import train_ensemble_model
 from utils.active_learning_utils import (
     compute_uncertainty_scores, 
     select_uncertain_pairs,
-    select_active_preference_query
+    select_active_preference_query,
+    select_uncertain_pairs_comprehensive
 )
 
 def get_reward_based_preference(data, segment1, segment2):
@@ -152,7 +153,8 @@ def find_similar_segments(segments, query_idx, k=5, distance_matrix=None):
 
 def train_reward_model_from_preferences(preferences, segment_indices, data, device, 
                                        state_dim, action_dim, hidden_dims=[256, 256],
-                                       num_epochs=20, use_ensemble=False, num_models=5):
+                                       num_epochs=20, use_ensemble=False, num_models=5,
+                                       cfg=None):
     """Train a reward model from collected preferences.
     
     Args:
@@ -221,15 +223,14 @@ def train_reward_model_from_preferences(preferences, segment_indices, data, devi
             val_loader, 
             device, 
             num_epochs=num_epochs, 
-            lr=1e-4
+            lr=1e-4 if cfg is None or not hasattr(cfg, 'model') else cfg.model.lr
         )
     
     return model
 
 def collect_sequential_preferences(data, segments, segment_indices, n_queries=100, k_augment=5, 
                                  use_ground_truth=True, distance_matrix=None, 
-                                 active_selection=False, uncertainty_method="entropy",
-                                 reward_model_path=None, device=None, retrain_interval=10):
+                                 device=None, cfg=None):
     """Collect sequential preferences with similarity-based augmentation.
     
     Args:
@@ -271,9 +272,21 @@ def collect_sequential_preferences(data, segments, segment_indices, n_queries=10
     else:
         print("Using provided distance matrix")
     
+    # Get active learning parameters from config
+    active_learning_enabled = False
+    uncertainty_method = "entropy"
+    reward_model_path = None
+    retrain_interval = 10
+    
+    if cfg and hasattr(cfg, 'active_learning'):
+        active_learning_enabled = getattr(cfg.active_learning, 'enabled', False)
+        uncertainty_method = getattr(cfg.active_learning, 'uncertainty_method', "entropy")
+        reward_model_path = getattr(cfg.active_learning, 'reward_model_path', None)
+        retrain_interval = getattr(cfg.active_learning, 'retrain_interval', 10)
+    
     # Initialize reward model for active selection if requested
     reward_model = None
-    if active_selection:
+    if active_learning_enabled:
         if device is None:
             device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         
@@ -284,7 +297,7 @@ def collect_sequential_preferences(data, segments, segment_indices, n_queries=10
         
         # Determine if we should use an ensemble
         use_ensemble = uncertainty_method == "disagreement"
-        num_models = 5 if use_ensemble else 1
+        num_models = cfg.active_learning.num_models if cfg and hasattr(cfg, 'active_learning') else 5
         
         if reward_model_path:
             print(f"Loading initial reward model from {reward_model_path} for active selection")
@@ -312,25 +325,46 @@ def collect_sequential_preferences(data, segments, segment_indices, n_queries=10
     compared_pairs = set()
     
     # For active learning, we need an initial set of preferences before training the model
-    initial_random_queries = min(retrain_interval, n_queries) if active_selection else 0
+    initial_size = cfg.active_learning.initial_size if cfg and hasattr(cfg, 'active_learning') else retrain_interval
+    initial_random_queries = min(initial_size, n_queries) if active_learning_enabled else 0
     
     with tqdm(total=n_queries, desc="Collecting preferences") as pbar:
         while len(preferences) < n_queries:
             # Determine if we should use active selection for this query
-            use_active = active_selection and len(preferences) >= initial_random_queries and reward_model is not None
+            use_active = active_learning_enabled and len(preferences) >= initial_random_queries and reward_model is not None
             
             # Select segment pair based on active selection or random sampling
             if use_active:
-                # Use active selection to choose the next pair
-                i, j = select_active_preference_query(
-                    segments, 
-                    segment_indices, 
-                    data, 
-                    reward_model, 
+                # Get the number of candidates to consider
+                n_candidates = 100
+                use_random_sampling = True
+                
+                # Extract configuration parameters if available
+                if cfg and hasattr(cfg, 'active_learning'):
+                    if hasattr(cfg.active_learning, 'n_candidates'):
+                        n_candidates = cfg.active_learning.n_candidates
+                    if hasattr(cfg.active_learning, 'use_random_sampling'):
+                        use_random_sampling = cfg.active_learning.use_random_sampling
+                
+                # Use the unified function for active selection
+                ranked_pairs = select_uncertain_pairs_comprehensive(
+                    reward_model,
+                    segments,
+                    segment_indices,
+                    data,
                     device,
-                    n_candidates=min(100, n_segments * (n_segments - 1) // 2),
-                    uncertainty_method=uncertainty_method
+                    uncertainty_method=uncertainty_method,
+                    max_pairs=1,
+                    use_random_candidate_sampling=use_random_sampling,
+                    n_candidates=n_candidates
                 )
+                
+                # Get the most uncertain pair
+                if ranked_pairs:
+                    i, j = ranked_pairs[0]
+                else:
+                    # Fallback to random selection if no pairs were selected
+                    i, j = random.sample(range(n_segments), 2)
             else:
                 # Sample two different random segments
                 i, j = random.sample(range(n_segments), 2)
@@ -424,7 +458,7 @@ def collect_sequential_preferences(data, segments, segment_indices, n_queries=10
             similar_segments_info.append(similar_info)
             
             # Retrain the reward model periodically if using active selection
-            if active_selection and len(preferences) % retrain_interval == 0:
+            if active_learning_enabled and len(preferences) % retrain_interval == 0:
                 print(f"\nRetraining reward model with {len(preferences)} preferences...")
                 
                 # Get observation and action dimensions
@@ -444,10 +478,11 @@ def collect_sequential_preferences(data, segments, segment_indices, n_queries=10
                     device,
                     state_dim,
                     action_dim,
-                    hidden_dims=[256, 256],
-                    num_epochs=10,  # Use fewer epochs for faster retraining
+                    hidden_dims=cfg.model.hidden_dims if hasattr(cfg, 'model') else [256, 256],
+                    num_epochs=cfg.training.num_epochs if hasattr(cfg, 'training') else 10,
                     use_ensemble=use_ensemble,
-                    num_models=num_models
+                    num_models=num_models,
+                    cfg=cfg
                 )
                 
                 # Make sure the model is in evaluation mode
@@ -1018,18 +1053,15 @@ def main(cfg: DictConfig):
     use_ground_truth = cfg.preferences.use_ground_truth
     use_dtw_distance = cfg.preferences.use_dtw_distance
     max_dtw_segments = cfg.preferences.max_dtw_segments
-    
-    # Extract active selection parameters
-    active_selection = cfg.preferences.get('active_selection', False)
-    uncertainty_method = cfg.preferences.get('uncertainty_method', 'entropy')
-    reward_model_path = cfg.preferences.get('reward_model_path', None)
-    retrain_interval = cfg.preferences.get('retrain_interval', 10)
-    
+        
     # Setup device
     device = None
-    if active_selection:
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        print(f"Using device: {device} for active selection")
+    if hasattr(cfg, 'active_learning') and getattr(cfg.active_learning, 'enabled', False):
+        if cfg.hardware.use_cpu:
+            device = torch.device("cpu")
+        else:
+            device = torch.device(f"cuda:{cfg.hardware.gpu}" if torch.cuda.is_available() else "cpu")
+        print(f"Using device: {device} for active learning")
     
     # Extract visualization parameters
     visualize = cfg.visualize
@@ -1042,8 +1074,17 @@ def main(cfg: DictConfig):
     
     # Create a more specific output directory with parameters
     dir_name = f"n{n_queries}_k{k_augment}_seed{random_seed}"
-    if active_selection:
+    
+    # Check if active learning is enabled
+    active_learning_enabled = False
+    uncertainty_method = "entropy"
+    if hasattr(cfg, 'active_learning'):
+        active_learning_enabled = getattr(cfg.active_learning, 'enabled', False)
+        uncertainty_method = getattr(cfg.active_learning, 'uncertainty_method', "entropy")
+        
+    if active_learning_enabled:
         dir_name += f"_active_{uncertainty_method}"
+        
     if max_dtw_segments is not None:
         dir_name += f"_dtw{max_dtw_segments}"
     output_dir = os.path.join(base_output_dir, dir_name)
@@ -1129,8 +1170,8 @@ def main(cfg: DictConfig):
         distance_matrix = None
     
     # Check if we should use DTW distance matrix from clustering
-    use_dtw_distance = cfg.preferences.get('use_dtw_distance', True)
-    max_dtw_segments = cfg.preferences.get('max_dtw_segments', None)
+    use_dtw_distance = getattr(cfg.preferences, 'use_dtw_distance', True)
+    max_dtw_segments = getattr(cfg.preferences, 'max_dtw_segments', None)
     
     # Compute DTW distance matrix if needed and not already available
     if use_dtw_distance and distance_matrix is None:
@@ -1156,11 +1197,8 @@ def main(cfg: DictConfig):
         k_augment=k_augment,
         use_ground_truth=use_ground_truth,
         distance_matrix=distance_matrix,
-        active_selection=active_selection,
-        uncertainty_method=uncertainty_method,
-        reward_model_path=reward_model_path,
         device=device,
-        retrain_interval=retrain_interval
+        cfg=cfg
     )
     
     # Separate direct and augmented preferences

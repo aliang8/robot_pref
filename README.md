@@ -71,21 +71,6 @@ python collect_cluster_preferences.py preferences.use_automatic_preferences=true
 ```bash
 # Basic sequential preference collection
 python collect_sequential_pref.py
-
-# Customize preference collection parameters
-python collect_sequential_pref.py preferences.n_queries=50 preferences.k_augment=10
-
-# Specify data path and output directory
-python collect_sequential_pref.py data.data_path="/path/to/dataset.pt" output.output_dir="./custom_results"
-
-# Adjust segment parameters
-python collect_sequential_pref.py data.segment_length=20 data.max_segments=1000
-
-# Configure DTW distance options
-python collect_sequential_pref.py preferences.use_dtw_distance=true preferences.max_dtw_segments=500
-
-# Control visualization generation
-python collect_sequential_pref.py visualize=true max_visualizations=5 max_augmentations=10
 ```
 
 Results will be saved in a directory structure like:
@@ -95,7 +80,7 @@ output_dir/
 │   ├── augmentation_visualizations/
 │   ├── preference_dataset.pkl
 │   └── raw_preferences.pkl
-└── n100_k5_seed42_dtw1000/
+└── n50_k10_seed42_active_disagreement/
     ├── augmentation_visualizations/
     ├── preference_dataset.pkl
     └── raw_preferences.pkl

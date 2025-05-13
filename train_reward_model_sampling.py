@@ -28,6 +28,7 @@ from utils import (
     evaluate_model_on_test_set,
     compute_uncertainty_scores,
     select_uncertain_pairs, 
+    select_uncertain_pairs_comprehensive,
     get_ground_truth_preferences,
     create_initial_dataset,
     train_ensemble_model
@@ -260,22 +261,48 @@ def active_preference_learning(cfg):
             break
         
         print(f"Computing uncertainty scores using {cfg.active_learning.uncertainty_method} method...")
-        uncertainty_scores = compute_uncertainty_scores(
+        
+        # Extract configuration parameter for candidate sampling approach
+        use_random_sampling = True
+        if hasattr(cfg.active_learning, 'use_random_sampling'):
+            use_random_sampling = cfg.active_learning.use_random_sampling
+        
+        # Get number of candidates to consider
+        n_candidates = cfg.active_learning.n_candidates if hasattr(cfg.active_learning, 'n_candidates') else 100
+        
+        # Use the unified function for uncertainty-based selection
+        candidate_pairs = []
+        candidate_indices = []
+        
+        # Map unlabeled pairs to their segment indices for the unified function
+        for idx, pair_idx in enumerate(unlabeled_indices):
+            i, j = unlabeled_pairs[idx]
+            candidate_pairs.append((i, j))
+            candidate_indices.append(idx)
+        
+        # Use the unified approach with comprehensive scoring
+        ranked_pairs = select_uncertain_pairs_comprehensive(
             ensemble,
-            unlabeled_pairs,
+            segments,
             segment_indices,
-            data_cpu,  # Use CPU data for indexing
+            data_cpu,
             device,
-            method=cfg.active_learning.uncertainty_method
+            uncertainty_method=cfg.active_learning.uncertainty_method,
+            max_pairs=batch_size,
+            use_random_candidate_sampling=False,  # Always use all unlabeled pairs here
+            n_candidates=None
         )
         
-        # Select most uncertain pairs
-        print(f"Selecting {batch_size} most uncertain pairs...")
-        selected_pairs, selected_indices = select_uncertain_pairs(
-            uncertainty_scores,
-            unlabeled_pairs,
-            batch_size
-        )
+        # Extract the selected pairs and their indices
+        selected_pairs = ranked_pairs[:batch_size]
+        selected_indices = []
+        
+        # Find the indices of selected pairs in the unlabeled set
+        for selected_pair in selected_pairs:
+            for idx, pair in enumerate(unlabeled_pairs):
+                if pair == selected_pair:
+                    selected_indices.append(idx)
+                    break
         
         # Check if we were able to select any pairs
         if len(selected_pairs) == 0:

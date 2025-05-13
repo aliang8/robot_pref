@@ -266,4 +266,70 @@ def select_active_preference_query(segments, segment_indices, data, reward_model
         print("Warning: No pairs selected based on uncertainty. Falling back to random selection.")
         return random.sample(range(n_segments), 2)
     
-    return selected_pairs[0] 
+    return selected_pairs[0]
+
+
+def select_uncertain_pairs_comprehensive(reward_model, segments, segment_indices, data, device, 
+                                       uncertainty_method="entropy", max_pairs=None,
+                                       use_random_candidate_sampling=True, n_candidates=100):
+    """Unified approach for uncertainty-based pair selection.
+    
+    This function provides two approaches:
+    1. Compute uncertainty for all possible segment pairs (more thorough but expensive)
+    2. Sample random candidates and compute uncertainty only for those (more efficient)
+    
+    Args:
+        reward_model: Trained reward model for uncertainty estimation
+        segments: List of trajectory segments
+        segment_indices: List of (start_idx, end_idx) for each segment
+        data: TensorDict with observations and actions
+        device: Device to run computation on
+        uncertainty_method: Method for uncertainty estimation ("entropy", "disagreement", "random")
+        max_pairs: Maximum number of pairs to select (None = select all pairs)
+        use_random_candidate_sampling: If True, sample random candidates; if False, evaluate all pairs
+        n_candidates: Number of random candidate pairs to consider if using sampling
+        
+    Returns:
+        all_pairs_ranked: List of all segment pairs ranked by uncertainty (highest to lowest)
+    """
+    n_segments = len(segments)
+    
+    # Determine approach based on parameters
+    if use_random_candidate_sampling:
+        # Approach 1: Sample random candidates (more efficient)
+        print(f"Using random candidate sampling with {n_candidates} candidate pairs")
+        candidate_pairs = []
+        for _ in range(n_candidates):
+            i, j = random.sample(range(n_segments), 2)
+            candidate_pairs.append((i, j))
+    else:
+        # Approach 2: Generate all possible segment pairs (more thorough but expensive)
+        print(f"Generating all possible pairs from {n_segments} segments")
+        candidate_pairs = [(i, j) for i in range(n_segments) for j in range(i+1, n_segments)]
+        
+        # If too many pairs, warn and limit
+        if len(candidate_pairs) > 10000:
+            print(f"Warning: Generated {len(candidate_pairs)} pairs, which may be memory intensive")
+    
+    # Compute uncertainty scores
+    print(f"Computing uncertainty for {len(candidate_pairs)} candidate pairs...")
+    uncertainty_scores = compute_uncertainty_scores(
+        reward_model,
+        candidate_pairs,
+        segment_indices,
+        data,
+        device,
+        method=uncertainty_method
+    )
+    
+    # Sort pairs by uncertainty (highest to lowest)
+    sorted_indices = np.argsort(uncertainty_scores)[::-1]
+    
+    # Limit number of pairs if specified
+    if max_pairs is not None and max_pairs < len(sorted_indices):
+        sorted_indices = sorted_indices[:max_pairs]
+    
+    # Get pairs in order of uncertainty
+    all_pairs_ranked = [candidate_pairs[i] for i in sorted_indices]
+    
+    return all_pairs_ranked 
