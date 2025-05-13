@@ -18,6 +18,7 @@ from trajectory_utils import (
     sample_segment_pairs
 )
 from utils.wandb_utils import log_to_wandb, log_artifact
+from utils.seed_utils import set_seed
 
 # Import shared models and utilities
 from models import SegmentRewardModel
@@ -43,30 +44,8 @@ def main(cfg: DictConfig):
     
     # Set random seed for reproducibility
     random_seed = cfg.get('random_seed', 42)
-    torch.manual_seed(random_seed)
-    np.random.seed(random_seed)
-    random.seed(random_seed)
-    
-    # Also set CUDA seeds if available
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed(random_seed)
-        torch.cuda.manual_seed_all(random_seed)  # For multi-GPU
-        torch.backends.cudnn.deterministic = True
-        torch.backends.cudnn.benchmark = False
-        
-        # Reduce memory fragmentation
-        torch.cuda.empty_cache()
-        # Use more aggressive memory caching if available (PyTorch 1.11+)
-        if hasattr(torch.cuda, 'memory_stats'):
-            print("Enabling memory_stats for better CUDA memory management")
-            torch.cuda.memory_stats(device=None)
-        # Set memory allocation strategy to avoid fragmentation
-        if hasattr(torch.cuda, 'set_per_process_memory_fraction'):
-            # Use 80% of available memory to leave room for system
-            torch.cuda.set_per_process_memory_fraction(0.8, 0)
-            print("Set CUDA memory fraction to 80%")
-            
-    print(f"Using random seed: {random_seed}")
+    set_seed(random_seed)
+    print(f"Global random seed set to {random_seed}")
     
     # Initialize wandb
     if cfg.wandb.use_wandb:

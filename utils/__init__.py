@@ -11,7 +11,7 @@ from utils.dataset_utils import (
     load_preferences_data
 )
 
-from utils.training_utils import train_reward_model
+from utils.training_utils import train_reward_model, train_model
 
 from utils.active_learning_utils import (
     compute_uncertainty_scores,
@@ -21,6 +21,8 @@ from utils.active_learning_utils import (
     select_active_preference_query,
     select_uncertain_pairs_comprehensive
 )
+
+from utils.seed_utils import set_seed
 
 __all__ = [
     # dataset_utils
@@ -32,6 +34,7 @@ __all__ = [
     
     # training_utils
     'train_reward_model',
+    'train_model',
     
     # active_learning_utils
     'compute_uncertainty_scores',
@@ -39,5 +42,8 @@ __all__ = [
     'get_ground_truth_preferences',
     'create_initial_dataset',
     'select_active_preference_query',
-    'select_uncertain_pairs_comprehensive'
+    'select_uncertain_pairs_comprehensive',
+    
+    # seed_utils
+    'set_seed'
 ] 

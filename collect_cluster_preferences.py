@@ -43,6 +43,9 @@ from eef_segment_matching import (
     create_comparison_video
 )
 
+# Import seed utility
+from utils.seed_utils import set_seed
+
 # Set random seed for reproducibility
 random.seed(RANDOM_SEED)
 np.random.seed(RANDOM_SEED)
@@ -912,10 +915,8 @@ def main(cfg: DictConfig):
     
     # Set random seed for reproducibility
     random_seed = cfg.random_seed
-    random.seed(random_seed)
-    np.random.seed(random_seed)
-    torch.manual_seed(random_seed)
-    print(f"Using random seed: {random_seed}")
+    set_seed(random_seed)
+    print(f"Global random seed set to {random_seed}")
     
     # Create output directory
     os.makedirs(cfg.output.output_dir, exist_ok=True)

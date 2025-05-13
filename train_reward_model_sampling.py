@@ -25,11 +25,13 @@ from models import SegmentRewardModel, EnsembleRewardModel
 from utils.dataset_utils import PreferenceDataset, bradley_terry_loss
 from utils.active_learning_utils import (
     select_uncertain_pairs_comprehensive,
-    create_initial_dataset,
-    get_ground_truth_preferences
+    create_initial_dataset
 )
 from utils.training_utils import train_model
 from utils import evaluate_model_on_test_set
+from utils.dataset_utils import create_data_loaders
+from utils.seed_utils import set_seed
+
 
 def train_final_reward_model(labeled_pairs, segment_indices, labeled_preferences, data_cpu, 
                            state_dim, action_dim, device, cfg, random_seed):
@@ -54,57 +56,46 @@ def train_final_reward_model(labeled_pairs, segment_indices, labeled_preferences
     print(f"Training on all {len(labeled_pairs)} labeled pairs")
     
     # Create dataset from all labeled pairs
-    final_dataset = PreferenceDataset(data_cpu, labeled_pairs, segment_indices, labeled_preferences)
+    final_dataset = PreferenceDataset(data_cpu, labeled_pairs, segment_indices, labeled_preferences)    
+    # Use the utility function to create data loaders with appropriate splits
+    data_loaders = create_data_loaders(
+        final_dataset,
+        train_ratio=1.0,
+        val_ratio=0,
+        batch_size=min(cfg.training.batch_size, len(final_dataset)),
+        num_workers=cfg.training.get('num_workers', 4),
+        pin_memory=cfg.training.get('pin_memory', True),
+        seed=random_seed
+    )
     
-    # Check if we have enough data
-    if len(final_dataset) < 3:
-        print("Warning: Very few samples for training. Results may not be reliable.")
-    
-    # Create train/val/test split with appropriate handling for small datasets
-    if len(final_dataset) <= 5:
-        # For very small datasets, use the same data for train/val/test
-        print("Using the same data for train/val/test due to small dataset size")
-        train_dataset = final_dataset
-        val_dataset = final_dataset
-        final_test_dataset = final_dataset
-    else:
-        # Normal split for larger datasets
-        train_size = int(0.8 * len(final_dataset))
-        val_size = int(0.1 * len(final_dataset))
-        test_size = len(final_dataset) - train_size - val_size
-        
-        train_dataset, val_dataset, final_test_dataset = torch.utils.data.random_split(
-            final_dataset, 
-            [train_size, val_size, test_size],
-            generator=torch.Generator().manual_seed(random_seed)
-        )
-    
-    # Create data loaders with appropriate batch sizes
-    batch_size = min(cfg.training.batch_size, len(train_dataset))
-    train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-    val_loader = torch.utils.data.DataLoader(val_dataset, batch_size=batch_size)
-    test_loader = torch.utils.data.DataLoader(final_test_dataset, batch_size=batch_size)
+    train_loader = data_loaders['train']
+    print(f"Created data loaders with {data_loaders['train_size']} train, {data_loaders['val_size']} val, and {data_loaders['test_size']} test samples")
     
     # Train final model
     final_model = SegmentRewardModel(state_dim, action_dim, hidden_dims=cfg.model.hidden_dims)
+    
+    # No ensemble training for final model
     final_model, train_losses, val_losses = train_model(
         final_model,
         train_loader,
-        val_loader,
+        None,
         device,
         num_epochs=cfg.training.num_epochs,
         lr=cfg.model.lr,
         wandb=wandb if cfg.wandb.use_wandb else None,
         is_ensemble=False
     )
+    return final_model, None, train_losses, val_losses
+
+@hydra.main(config_path="config", config_name="reward_model_sampling", version_base=None)
+def main(cfg: DictConfig):
+    """Main entry point for active preference learning."""
+    # Set random seed for reproducibility at the beginning
+    random_seed = cfg.get('random_seed', 42)
+    set_seed(random_seed)
+    print(f"Global random seed set to {random_seed}")
     
-    # Evaluate final model
-    print("\nEvaluating final model...")
-    final_metrics = evaluate_model_on_test_set(final_model, test_loader, device)
-    
-    print(f"Final model test accuracy: {final_metrics['test_accuracy']:.4f}")
-    
-    return final_model, final_metrics, train_losses, val_losses
+    active_preference_learning(cfg)
 
 def active_preference_learning(cfg):
     """Main function for active preference learning.
@@ -132,11 +123,8 @@ def active_preference_learning(cfg):
     print(f"  Ensemble models: {cfg.active_learning.num_models}")
     print(f"  Training epochs per iteration: {cfg.training.num_epochs}")
     
-    # Set random seed for reproducibility
+    # Get random seed from config (already set in main)
     random_seed = cfg.get('random_seed', 42)
-    torch.manual_seed(random_seed)
-    np.random.seed(random_seed)
-    random.seed(random_seed)
     
     # Setup device
     if cfg.hardware.use_cpu:
@@ -218,6 +206,7 @@ def active_preference_learning(cfg):
         test_pairs = []
         test_preferences = []
     else:
+        # Use the same random seed for reproducibility
         test_indices = random.sample(range(len(all_segment_pairs)), test_size)
         test_pairs = [all_segment_pairs[i] for i in test_indices]
         test_preferences = [gt_preferences[i] for i in test_indices]
@@ -269,6 +258,11 @@ def active_preference_learning(cfg):
     # Keep track of the previous ensemble for fine-tuning
     prev_ensemble = None
     
+    # Create a mapping from pair to original index for preference lookup
+    pair_to_original_idx = {}
+    for i, pair in enumerate(all_segment_pairs):
+        pair_to_original_idx[tuple(pair)] = i
+    
     while total_labeled < max_queries and len(unlabeled_pairs) > 0:
         iteration += 1
         print(f"\n--- Active Learning Iteration {iteration} ---")
@@ -280,18 +274,21 @@ def active_preference_learning(cfg):
         # Create dataset for training the ensemble
         ensemble_dataset = PreferenceDataset(data_cpu, labeled_pairs, segment_indices, labeled_preferences)
         
-        train_size = int(0.8 * len(ensemble_dataset))
-        val_size = len(ensemble_dataset) - train_size
-        
-        train_dataset, val_dataset = torch.utils.data.random_split(
-            ensemble_dataset, 
-            [train_size, val_size],
-            generator=torch.Generator().manual_seed(random_seed)
+        # Use utility function to create data loaders
+        data_loaders = create_data_loaders(
+            ensemble_dataset,
+            train_ratio=0.8,
+            val_ratio=0.2,
+            batch_size=min(64, len(ensemble_dataset)),
+            num_workers=cfg.training.get('num_workers', 4),
+            pin_memory=cfg.training.get('pin_memory', True),
+            seed=random_seed
         )
         
-        # Create data loaders with appropriate batch sizes
-        train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=min(64, len(train_dataset)), shuffle=True)
-        val_loader = torch.utils.data.DataLoader(val_dataset, batch_size=min(64, len(val_dataset)))
+        train_loader = data_loaders['train']
+        val_loader = data_loaders['val']
+        
+        print(f"Created ensemble data loaders with {data_loaders['train_size']} train and {data_loaders['val_size']} val samples")
         
         if cfg.active_learning.fine_tune and prev_ensemble is not None:
             print("Fine-tuning from previous ensemble model")
@@ -378,17 +375,27 @@ def active_preference_learning(cfg):
             break
         
         print(f"Selected {len(selected_pairs)} pairs based on uncertainty")
+        print(f"Selected pairs: {selected_pairs}")
         
         # Get ground truth preferences for selected pairs
         # In a real system, this would be where we query the human
         selected_preferences = []
+        valid_selected_pairs = []
         for pair in selected_pairs:
-            # Find the original index of this pair in all_segment_pairs
-            for i, orig_pair in enumerate(all_segment_pairs):
-                if pair[0] == orig_pair[0] and pair[1] == orig_pair[1]:
-                    selected_preferences.append(gt_preferences[i])
-                    break
+            pair_tuple = tuple(pair)
+            if pair_tuple in pair_to_original_idx:
+                selected_preferences.append(gt_preferences[pair_to_original_idx[pair_tuple]])
+                valid_selected_pairs.append(pair)
+            else:
+                print(f"Warning: Pair {pair} not found in original pairs mapping")
         
+        # Update selected_pairs to only include valid ones
+        selected_pairs = valid_selected_pairs
+        
+        if len(selected_pairs) == 0:
+            print("No valid pairs selected. Ending active learning loop.")
+            break
+            
         # Add newly labeled pairs to labeled set
         labeled_pairs.extend(selected_pairs)
         labeled_preferences.extend(selected_preferences)
@@ -494,11 +501,6 @@ def active_preference_learning(cfg):
         
         # Finish wandb run
         wandb.finish()
-
-@hydra.main(config_path="config", config_name="reward_model_sampling", version_base=None)
-def main(cfg: DictConfig):
-    """Main entry point for active preference learning."""
-    active_preference_learning(cfg)
 
 if __name__ == "__main__":
     main() 

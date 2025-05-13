@@ -27,6 +27,7 @@ from utils.eval_utils import evaluate_policy_manual, custom_evaluate_on_environm
 from utils.data_utils import AttrDict
 from utils.viz import create_video_grid
 from train_reward_model import SegmentRewardModel
+from utils.seed_utils import set_seed
 
 def is_valid_video_file(file_path):
     """Simple check if a video file exists and is valid."""
@@ -242,10 +243,8 @@ def main(cfg: DictConfig):
     
     # Set random seed for reproducibility
     random_seed = cfg.get('random_seed', 42)
-    torch.manual_seed(random_seed)
-    np.random.seed(random_seed)
-    random.seed(random_seed)
-    print(f"Using random seed: {random_seed}")
+    set_seed(random_seed)
+    print(f"Global random seed set to {random_seed}")
     
     # Initialize wandb
     if cfg.wandb.use_wandb:

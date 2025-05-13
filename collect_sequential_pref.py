@@ -53,6 +53,9 @@ from utils.active_learning_utils import (
     select_uncertain_pairs_comprehensive
 )
 
+# Import seed utility
+from utils.seed_utils import set_seed
+
 def get_reward_based_preference(data, segment1, segment2):
     """Determine ground truth preference based on cumulative reward.
     
@@ -1036,10 +1039,8 @@ def main(cfg: DictConfig):
     
     # Set random seed for reproducibility
     random_seed = cfg.random_seed
-    random.seed(random_seed)
-    np.random.seed(random_seed)
-    torch.manual_seed(random_seed)
-    print(f"Using random seed: {random_seed}")
+    set_seed(random_seed)
+    print(f"Global random seed set to {random_seed}")
     
     # Extract configuration parameters
     data_path = cfg.data.data_path
