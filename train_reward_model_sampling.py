@@ -33,6 +33,45 @@ from utils.dataset_utils import create_data_loaders
 from utils.seed_utils import set_seed
 
 
+def run_reward_analysis(model_path, data_path, output_dir, num_episodes=9, device=None, random_seed=42, wandb_run=None):
+    """Run reward analysis on the trained model and log results to wandb.
+    
+    Args:
+        model_path: Path to the trained reward model
+        data_path: Path to the dataset
+        output_dir: Directory to save the analysis plots
+        num_episodes: Number of episodes to analyze
+        device: Device to run the analysis on
+        random_seed: Random seed for reproducibility
+        wandb_run: Wandb run object for logging
+    """
+    # Import analyze_rewards here to avoid circular imports
+    from analyze_rewards import analyze_rewards
+    
+    print("\n--- Running Reward Analysis ---")
+    
+    # Run the analysis
+    analyze_rewards(
+        data_path=data_path,
+        model_path=model_path,
+        output_dir=output_dir,
+        num_episodes=num_episodes,
+        device=device,
+        random_seed=random_seed
+    )
+    
+    # Log the analysis results to wandb
+    if wandb_run is not None and wandb_run.run:
+        reward_grid_path = os.path.join(output_dir, "reward_grid.png")
+        if os.path.exists(reward_grid_path):
+            print(f"Logging reward analysis grid to wandb")
+            wandb_run.log({"reward_analysis/grid": wandb.Image(reward_grid_path)})
+        else:
+            print(f"Warning: Could not find reward grid image at {reward_grid_path}")
+    
+    print("Reward analysis completed successfully")
+
+
 def train_final_reward_model(labeled_pairs, segment_indices, labeled_preferences, data_cpu, 
                            state_dim, action_dim, device, cfg, random_seed):
     """Train the final reward model on all labeled data.
@@ -51,6 +90,8 @@ def train_final_reward_model(labeled_pairs, segment_indices, labeled_preferences
     Returns:
         final_model: Trained final model
         final_metrics: Evaluation metrics on test set
+        train_losses: List of training losses
+        val_losses: List of validation losses
     """
     print("\n--- Training Final Model ---")
     print(f"Training on all {len(labeled_pairs)} labeled pairs")
@@ -74,6 +115,19 @@ def train_final_reward_model(labeled_pairs, segment_indices, labeled_preferences
     # Train final model
     final_model = SegmentRewardModel(state_dim, action_dim, hidden_dims=cfg.model.hidden_dims)
     
+    # Create descriptive output directory structure
+    dataset_name = Path(cfg.data.data_path).stem
+    uncertainty_method = cfg.active_learning.uncertainty_method
+    fine_tune_str = "finetune" if cfg.active_learning.fine_tune else "scratch"
+    
+    # Create descriptive subdirectory path
+    output_subdir = f"{dataset_name}_active_{uncertainty_method}_init{cfg.active_learning.initial_size}_max{cfg.active_learning.max_queries}_batch{cfg.active_learning.batch_size}_{fine_tune_str}"
+    model_dir = os.path.join(cfg.output.output_dir, output_subdir)
+    os.makedirs(model_dir, exist_ok=True)
+    
+    # Path for training curve
+    training_curve_path = os.path.join(model_dir, "training_curve.png")
+    
     # No ensemble training for final model
     final_model, train_losses, val_losses = train_model(
         final_model,
@@ -83,7 +137,8 @@ def train_final_reward_model(labeled_pairs, segment_indices, labeled_preferences
         num_epochs=cfg.training.num_epochs,
         lr=cfg.model.lr,
         wandb=wandb if cfg.wandb.use_wandb else None,
-        is_ensemble=False
+        is_ensemble=False,
+        output_path=training_curve_path
     )
     return final_model, None, train_losses, val_losses
 
@@ -440,14 +495,6 @@ def active_preference_learning(cfg):
             "total_iterations": iteration
         })
     
-    # Plot learning curve
-    plt.figure(figsize=(10, 6))
-    plt.plot(metrics["num_labeled"], metrics["test_accuracy"], marker='o')
-    plt.xlabel("Number of Labeled Pairs")
-    plt.ylabel("Test Accuracy")
-    plt.title(f"Active Learning Curve ({cfg.active_learning.uncertainty_method})")
-    plt.grid(True)
-    
     # Create descriptive output directory structure
     dataset_name = Path(cfg.data.data_path).stem
     uncertainty_method = cfg.active_learning.uncertainty_method
@@ -456,17 +503,26 @@ def active_preference_learning(cfg):
     # Create descriptive subdirectory
     output_subdir = f"{dataset_name}_active_{uncertainty_method}_init{cfg.active_learning.initial_size}_max{cfg.active_learning.max_queries}_batch{cfg.active_learning.batch_size}_{fine_tune_str}"
     
-    # Save plot with descriptive name
-    plot_path = os.path.join(cfg.output.output_dir, f"{output_subdir}_learning_curve.png")
-    plt.savefig(plot_path)
-    
-    if cfg.wandb.use_wandb:
-        wandb.log({"learning_curve": wandb.Image(plot_path)})
-    
-    # Save final model in descriptive directory
+    # Create model directory
     model_dir = os.path.join(cfg.output.output_dir, output_subdir)
     os.makedirs(model_dir, exist_ok=True)
     
+    # Plot learning curve
+    plt.figure(figsize=(10, 6))
+    plt.plot(metrics["num_labeled"], metrics["test_accuracy"], marker='o')
+    plt.xlabel("Number of Labeled Pairs")
+    plt.ylabel("Test Accuracy")
+    plt.title(f"Active Learning Curve ({cfg.active_learning.uncertainty_method})")
+    plt.grid(True)
+    
+    # Save plot in the model directory
+    learning_curve_path = os.path.join(model_dir, "learning_curve.png")
+    plt.savefig(learning_curve_path)
+    
+    if cfg.wandb.use_wandb:
+        wandb.log({"learning_curve": wandb.Image(learning_curve_path)})
+    
+    # Save final model in model directory
     model_path = os.path.join(model_dir, "final_model.pt")
     torch.save(final_model.state_dict(), model_path)
     
@@ -481,6 +537,27 @@ def active_preference_learning(cfg):
         f.write(OmegaConf.to_yaml(cfg))
     
     print(f"\nActive learning completed. Final model saved to {model_path}")
+    
+    # Run reward analysis on the final model
+    analysis_dir = os.path.join(model_dir, "analysis")
+    os.makedirs(analysis_dir, exist_ok=True)
+    
+    # Check if reward analysis is enabled (default to True)
+    run_analysis = cfg.get('run_reward_analysis', True)
+    
+    if run_analysis:
+        try:
+            run_reward_analysis(
+                model_path=model_path,
+                data_path=cfg.data.data_path,
+                output_dir=analysis_dir,
+                num_episodes=cfg.get('analysis_episodes', 9),
+                device=device,
+                random_seed=random_seed,
+                wandb_run=wandb if cfg.wandb.use_wandb else None
+            )
+        except Exception as e:
+            print(f"Warning: Error during reward analysis: {e}")
     
     # Log artifacts to wandb
     if cfg.wandb.use_wandb:

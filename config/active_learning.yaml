@@ -9,7 +9,7 @@ active_learning:
   # Number of random candidate pairs to consider for uncertainty selection
   n_candidates: 500
   # Whether to use random candidate sampling (true) or consider all possible pairs (false)
-  use_random_sampling: true
+  use_random_sampling: false
   # Number of pairs to select in each iteration
   batch_size: 5
   # Initial number of randomly labeled pairs before active learning starts

@@ -33,88 +33,119 @@ def compute_uncertainty_scores(model, segment_pairs, segment_indices, data, devi
     # Ensure data is on CPU for indexing operations
     data_cpu = {k: v.cpu() if isinstance(v, torch.Tensor) else v for k, v in data.items()}
     
-    uncertainty_scores = []
+    # If using random method, we can skip all computation
+    if method == "random":
+        return [random.random() for _ in range(len(segment_pairs))]
     
-    # Process in batches to avoid memory issues
-    batch_size = 32
-    num_batches = (len(segment_pairs) + batch_size - 1) // batch_size
+    # Find all unique segments that need evaluation
+    unique_segments = set()
+    for seg_idx1, seg_idx2 in segment_pairs:
+        unique_segments.add(seg_idx1)
+        unique_segments.add(seg_idx2)
+    
+    unique_segments = sorted(list(unique_segments))
+    print(f"Pre-computing rewards for {len(unique_segments)} unique segments")
+    
+    # Create a mapping from segment index to position in our batch
+    segment_to_batch_idx = {seg_idx: i for i, seg_idx in enumerate(unique_segments)}
+    
+    # Prepare batches of observations and actions for all unique segments
+    batch_obs = []
+    batch_actions = []
+    
+    for seg_idx in unique_segments:
+        start, end = segment_indices[seg_idx]
+        
+        # Extract observations and actions
+        obs = data_cpu[obs_key][start:end].clone()
+        actions = data_cpu[action_key][start:end-1].clone()
+        
+        # Ensure observations and actions have same length
+        min_len = min(obs.shape[0]-1, actions.shape[0])
+        obs = obs[:min_len]
+        actions = actions[:min_len]
+        
+        batch_obs.append(obs)
+        batch_actions.append(actions)
+    
+    # Process segments in sub-batches to avoid memory issues
+    sub_batch_size = 128
+    num_sub_batches = (len(unique_segments) + sub_batch_size - 1) // sub_batch_size
+    
+    # Dictionary to store segment rewards
+    segment_rewards = {}
     
     with torch.no_grad():
-        for i in tqdm(range(num_batches), desc=f"Computing {method} scores"):
-            batch_start = i * batch_size
-            batch_end = min((i + 1) * batch_size, len(segment_pairs))
-            batch_pairs = segment_pairs[batch_start:batch_end]
+        for i in tqdm(range(num_sub_batches), desc=f"Computing segment rewards"):
+            start_idx = i * sub_batch_size
+            end_idx = min((i + 1) * sub_batch_size, len(unique_segments))
             
-            batch_scores = []
+            # Get segment indices for this sub-batch
+            sub_batch_segments = unique_segments[start_idx:end_idx]
             
-            for pair_idx, (seg_idx1, seg_idx2) in enumerate(batch_pairs):
-                # Get segment indices
-                start1, end1 = segment_indices[seg_idx1]
-                start2, end2 = segment_indices[seg_idx2]
+            # Process each segment in the sub-batch
+            for batch_idx, seg_idx in enumerate(sub_batch_segments):
+                # Get the observations and actions for this segment
+                obs = batch_obs[segment_to_batch_idx[seg_idx]].to(device)
+                actions = batch_actions[segment_to_batch_idx[seg_idx]].to(device)
                 
-                # Extract observations and actions from CPU data
-                obs1 = data_cpu[obs_key][start1:end1].clone()
-                actions1 = data_cpu[action_key][start1:end1-1].clone()
-                obs2 = data_cpu[obs_key][start2:end2].clone()
-                actions2 = data_cpu[action_key][start2:end2-1].clone()
-                
-                # Ensure observations and actions have same length
-                min_len1 = min(obs1.shape[0]-1, actions1.shape[0])
-                min_len2 = min(obs2.shape[0]-1, actions2.shape[0])
-                
-                obs1 = obs1[:min_len1]
-                actions1 = actions1[:min_len1]
-                obs2 = obs2[:min_len2]
-                actions2 = actions2[:min_len2]
-                
-                # Move to device only after slicing
-                obs1 = obs1.to(device)
-                actions1 = actions1.to(device)
-                obs2 = obs2.to(device)
-                actions2 = actions2.to(device)
-                
-                if method == "random":
-                    # Random sampling - just assign random score
-                    score = random.random()
-                
-                elif method == "entropy":
-                    # Entropy-based uncertainty
+                # Compute rewards based on the method
+                if method == "entropy":
                     if hasattr(model, 'mean_reward'):
                         # Use mean prediction from ensemble
-                        reward1 = model.mean_reward(obs1, actions1)
-                        reward2 = model.mean_reward(obs2, actions2)
+                        reward = model.mean_reward(obs, actions)
                     else:
                         # Single model
-                        reward1 = model(obs1, actions1)
-                        reward2 = model(obs2, actions2)
+                        reward = model(obs, actions)
                     
-                    # Compute preference probability
-                    logits = reward1 - reward2
-                    probs = torch.sigmoid(logits)
-                    
-                    # Compute entropy of binary prediction
-                    probs_2d = torch.stack([probs, 1 - probs], dim=0)
-                    score = compute_entropy(probs_2d).item()
+                    # Store the scalar reward
+                    segment_rewards[seg_idx] = reward
                 
                 elif method == "disagreement":
-                    # Disagreement-based uncertainty (requires ensemble)
+                    # For disagreement, we need all model predictions
                     if not hasattr(model, 'models'):
                         raise ValueError("Disagreement method requires an ensemble model")
                     
                     # Get reward predictions from all models
-                    rewards1 = model(obs1, actions1)  # Shape: [num_models]
-                    rewards2 = model(obs2, actions2)  # Shape: [num_models]
+                    rewards = model(obs, actions)  # Shape: [num_models]
                     
-                    # Compute preference probability for each model
-                    logits = rewards1 - rewards2  # Shape: [num_models]
-                    probs = torch.sigmoid(logits)  # Shape: [num_models]
-                    
-                    # Disagreement is variance in preference probabilities
-                    score = probs.var().item()
-                
-                batch_scores.append(score)
+                    # Store all model predictions
+                    segment_rewards[seg_idx] = rewards
+    
+    # Now compute uncertainty scores for each pair using pre-computed rewards
+    uncertainty_scores = []
+    
+    for seg_idx1, seg_idx2 in tqdm(segment_pairs, desc=f"Computing {method} scores for pairs"):
+        # Get pre-computed rewards
+        reward1 = segment_rewards[seg_idx1]
+        reward2 = segment_rewards[seg_idx2]
+        
+        if method == "entropy":
+            # Compute preference probability
+            logits = reward1 - reward2
+            probs = torch.sigmoid(logits)
             
-            uncertainty_scores.extend(batch_scores)
+            # Compute entropy of binary prediction
+            # Binary entropy: -p*log(p) - (1-p)*log(1-p)
+            eps = 1e-8
+            p = torch.clamp(probs, min=eps, max=1-eps)
+            entropy = -p * torch.log(p) - (1-p) * torch.log(1-p)
+            
+            # Take mean if we have a batch
+            if entropy.dim() > 0:
+                score = entropy.mean().item()
+            else:
+                score = entropy.item()
+            
+        elif method == "disagreement":
+            # Compute preference probability for each model
+            logits = reward1 - reward2  # Shape: [num_models]
+            probs = torch.sigmoid(logits)  # Shape: [num_models]
+            
+            # Disagreement is variance in preference probabilities
+            score = probs.var().item()
+        
+        uncertainty_scores.append(score)
     
     return uncertainty_scores
 
