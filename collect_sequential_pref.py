@@ -45,7 +45,7 @@ from models.reward_models import SegmentRewardModel, EnsembleRewardModel
 
 # Import utility functions from the modular structure
 from utils.dataset_utils import PreferenceDataset, bradley_terry_loss
-from utils.training_utils import train_ensemble_model
+from utils.training_utils import train_model
 from utils.active_learning_utils import (
     compute_uncertainty_scores, 
     select_uncertain_pairs,
@@ -202,7 +202,7 @@ def train_reward_model_from_preferences(preferences, segment_indices, data, devi
     
     if use_ensemble:
         # Train an ensemble of models using the new utility function
-        model = train_ensemble_model(
+        model = train_model(
             state_dim,
             action_dim,
             segment_pairs,
@@ -212,7 +212,8 @@ def train_reward_model_from_preferences(preferences, segment_indices, data, devi
             device,
             num_models=num_models,
             hidden_dims=hidden_dims,
-            num_epochs=num_epochs
+            num_epochs=num_epochs,
+            is_ensemble=True
         )
     else:
         # Train a single model
@@ -1097,7 +1098,9 @@ def main(cfg: DictConfig):
     if cfg.wandb.use_wandb:
         import wandb
         wandb.init(
-            project="robot-preferences",
+            project=cfg.wandb.project,
+            entity=cfg.wandb.entity,
+            name=cfg.wandb.name,
             tags=cfg.wandb.tags,
             notes=cfg.wandb.notes,
             config=OmegaConf.to_container(cfg, resolve=True)

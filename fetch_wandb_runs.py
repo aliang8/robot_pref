@@ -76,7 +76,6 @@ def fetch_wandb_runs(project="robot_pref", entity="clvr", filters=None, max_runs
             "summary": run.summary._json_dict,
             "url": run.url
         }
-
         
         # Add user information if available
         if hasattr(run, "user"):

@@ -34,7 +34,7 @@ training:
 
 # Output parameters
 output:
-  output_dir: "bc_robomimic_model"
+  output_dir: "bc_model"
 
 # Wandb configuration specific to BC
 wandb:

@@ -24,7 +24,7 @@ iql:
   critic_learning_rate: 1e-4
   batch_size: 256
   gamma: 0.99
-  tau: 0.005
+tau: 0.005
   n_critics: 2
   expectile: 0.7
   weight_temp: 3.0

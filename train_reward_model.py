@@ -24,7 +24,6 @@ from utils.seed_utils import set_seed
 from models import SegmentRewardModel
 from utils import (
     PreferenceDataset,
-    bradley_terry_loss,
     create_data_loaders,
     evaluate_model_on_test_set,
     load_preferences_data,

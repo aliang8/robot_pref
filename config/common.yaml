@@ -33,7 +33,6 @@ wandb:
   entity: clvr
   name: null  # Will be auto-generated if null 
 
-
 defaults:
   - hydra: default  # set the directory where the output files get saved
   # - override hydra/hydra_logging: default
