@@ -1,5 +1,7 @@
 # Common settings shared across different algorithms
 
+debug: false
+
 # Random seed for reproducibility
 random_seed: 42
 

@@ -3,7 +3,6 @@ import numpy as np
 
 
 @nb.jit(nopython=True)
-# def get_distance_matrix(query: np.ndarray, reference: np.ndarray):
 def get_distance_matrix(query: np.ndarray, reference: np.ndarray):
     query_squared = np.sum(query**2, axis=1)[:, np.newaxis]  # a^2
     ref_squared = np.sum(reference**2, axis=1)[:, np.newaxis]  # b^2

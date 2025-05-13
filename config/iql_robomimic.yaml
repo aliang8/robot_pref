@@ -49,7 +49,7 @@ output:
 
 # Wandb configuration specific to IQL
 wandb:
-  use_wandb: true
+  use_wandb: false
   project: robot_pref
   entity: clvr
   name: null  # Will be auto-generated if null

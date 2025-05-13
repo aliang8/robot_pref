@@ -76,13 +76,17 @@ def fetch_wandb_runs(project="robot_pref", entity="clvr", filters=None, max_runs
             "summary": run.summary._json_dict,
             "url": run.url
         }
+
         
         # Add user information if available
         if hasattr(run, "user"):
             run_dict["user"] = run.user.username
-        
+
         # Get history data - focusing only on eval/success_rate
-        history = run.history(keys=["eval/success_rate", "epoch"])
+        # TODO: fix
+        history = run.history(keys=["eval/success_rate", "eval/epoch"])
+        if history.empty:
+            history = run.history(keys=["eval/success_rate", "epoch"])
         
         if not history.empty and "eval/success_rate" in history.columns:
             # Get success rates, filtering out NaN values
@@ -227,57 +231,6 @@ def save_summary_csv(df, output_path="iql_runs_summary.csv"):
     print(f"Saved top 3 summary CSV to {top3_output_path}")
     
     return top3_output_path
-
-def group_and_analyze(df):
-    """Group data by algorithm and dataset and calculate statistics.
-    
-    Args:
-        df: DataFrame with run information
-        
-    Returns:
-        DataFrame with statistics for each algorithm/dataset combination
-    """
-    # Ensure algorithm column exists
-    if "algorithm" not in df.columns:
-        print("'algorithm' column not found, attempting to derive from run_name...")
-        # Try to extract algorithm from run_name
-        if "run_name" in df.columns:
-            # Common algorithms to look for in run names
-            algorithms = ["bc", "iql", "cql", "sac", "td3", "ddpg"]
-            
-            def extract_algorithm(run_name):
-                if not isinstance(run_name, str):
-                    return "unknown"
-                run_name = run_name.lower()
-                for alg in algorithms:
-                    if alg in run_name:
-                        return alg
-                return "unknown"
-            
-            df["algorithm"] = df["run_name"].apply(extract_algorithm)
-            print(f"Extracted algorithms: {df['algorithm'].unique()}")
-    
-    # Group by dataset and algorithm
-    grouped = df.groupby(["dataset", "algorithm"])
-
-    # Calculate statistics for each group
-    stats = grouped["top3_avg_eval_success_rate"].agg([
-        ("mean", np.mean),
-        ("std", np.std),
-        ("min", np.min),
-        ("max", np.max),
-        ("count", "count"),
-        ("median", np.median)
-    ]).reset_index()
-    
-    # Add 95% confidence interval
-    stats["ci_95"] = 1.96 * stats["std"] / np.sqrt(stats["count"].clip(1))
-    
-    # Round statistics for readability
-    for col in ["mean", "std", "min", "max", "median", "ci_95"]:
-        stats[col] = stats[col].round(3)
-    
-    return stats
 
 def plot_algorithm_comparisons(df, output_dir="algorithm_plots"):
     """Create plots comparing algorithm performance across datasets.

@@ -24,19 +24,22 @@ class WandbCallback:
             "epoch": epoch,
             "total_step": total_step
         }
-        
-        # Get metrics from logger if available
-        logger = algo._active_logger
-        if hasattr(logger, '_metrics_buffer'):
-            for name, buffer in logger._metrics_buffer.items():
-                if buffer:  # Check if there are values
-                    # Calculate the mean of accumulated values
-                    mean_value = np.mean(buffer)
-                    metrics[name] = mean_value
-                    
-                    # Track loss values for plotting
-                    if name.endswith('_loss') or name.startswith('loss'):
-                        self.training_losses[name] = self.training_losses.get(name, []) + [mean_value]
+
+        # Get metrics from logger if available 
+        try: 
+            logger = algo._active_logger
+            if hasattr(logger, '_metrics_buffer'):
+                for name, buffer in logger._metrics_buffer.items():
+                    if buffer:  # Check if there are values
+                        # Calculate the mean of accumulated values
+                        mean_value = np.mean(buffer)
+                        metrics[name] = mean_value
+                        
+                        # Track loss values for plotting
+                        if name.endswith('_loss') or name.startswith('loss'):
+                            self.training_losses[name] = self.training_losses.get(name, []) + [mean_value]
+        except Exception as e:
+            print(f"Error processing metrics: {e}")
         
         # Log to wandb if enabled
         if self.use_wandb and wandb.run:
