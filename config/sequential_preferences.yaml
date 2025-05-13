@@ -29,8 +29,6 @@ preferences:
 active_learning:
   enabled: false  # Default to disabled for sequential preferences
   reward_model_path: null  # Path to pre-trained reward model for active selection
-  # Use random sampling by default for sequential preferences to be more efficient
-  use_random_sampling: true
 
 # Model training parameters
 model:
@@ -44,7 +42,7 @@ hardware:
 
 # Training parameters
 training:
-  num_epochs: 50            # Number of epochs for reward model retraining
+  num_epochs: 20            # Number of epochs for reward model retraining
   batch_size: 64            # Batch size for training
 
 # Visualization parameters

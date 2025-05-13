@@ -205,12 +205,20 @@ def create_initial_dataset(segment_pairs, segment_indices, preferences, data, in
     
     if initial_size == 0:
         print("Warning: No pairs available for initial dataset")
-        return [], [], [], []
+        return [], [], segment_pairs, list(range(len(segment_pairs)))
     
     # Randomly select initial pairs
     all_indices = list(range(len(segment_pairs)))
-    labeled_indices = random.sample(all_indices, initial_size)
-    unlabeled_indices = [i for i in all_indices if i not in labeled_indices]
+    
+    # Handle case where initial_size is very close to total number of pairs
+    if initial_size >= len(segment_pairs) - 1:
+        print(f"Warning: Initial size {initial_size} is almost equal to total pairs {len(segment_pairs)}.")
+        print("Using all pairs as labeled data.")
+        labeled_indices = all_indices
+        unlabeled_indices = []
+    else:
+        labeled_indices = random.sample(all_indices, initial_size)
+        unlabeled_indices = [i for i in all_indices if i not in labeled_indices]
     
     # Get labeled pairs and preferences
     labeled_pairs = [segment_pairs[i] for i in labeled_indices]
@@ -218,6 +226,8 @@ def create_initial_dataset(segment_pairs, segment_indices, preferences, data, in
     
     # Get unlabeled pairs
     unlabeled_pairs = [segment_pairs[i] for i in unlabeled_indices]
+    
+    print(f"Created initial dataset with {len(labeled_pairs)} labeled pairs and {len(unlabeled_pairs)} unlabeled pairs")
     
     return labeled_pairs, labeled_preferences, unlabeled_pairs, unlabeled_indices
 

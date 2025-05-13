@@ -67,8 +67,17 @@ class SegmentRewardModel(nn.Module):
         super(SegmentRewardModel, self).__init__()
         self.reward_model = StateActionRewardModel(state_dim, action_dim, hidden_dims)
     
-    def forward(self, observations, actions):
-        """Compute reward for a sequence of observation-action pairs."""
+    def forward(self, observations, actions, return_ensemble_format=False):
+        """Compute reward for a sequence of observation-action pairs.
+        
+        Args:
+            observations: Observations tensor
+            actions: Actions tensor
+            return_ensemble_format: If True, add an extra dimension to mimic ensemble output
+            
+        Returns:
+            Reward tensor, with shape [batch_size] or [1, batch_size] if return_ensemble_format=True
+        """
         # Handle both single segments and batches
         if observations.dim() == 2:  # Single segment (seq_len, obs_dim)
             # Observations and actions should be the same length now
@@ -91,7 +100,12 @@ class SegmentRewardModel(nn.Module):
             # Process through the reward model
             rewards = self.reward_model.model(combined_inputs)
             rewards = rewards.reshape(batch_obs.size(0), -1)
-            return rewards.sum(1)[0]  # Sum over sequence length and remove batch dim
+            result = rewards.sum(1)[0]  # Sum over sequence length and remove batch dim
+            
+            # Add ensemble dimension if requested
+            if return_ensemble_format:
+                return result.unsqueeze(0)  # Shape: [1]
+            return result
         
         elif observations.dim() == 3:  # Batch of segments (batch_size, seq_len, obs_dim)
             batch_size = observations.size(0)
@@ -113,10 +127,34 @@ class SegmentRewardModel(nn.Module):
             # Process through the reward model
             flat_rewards = self.reward_model.model(combined_inputs)
             rewards = flat_rewards.reshape(batch_size, -1)
-            return rewards.sum(1)  # Sum over sequence length
+            result = rewards.sum(1)  # Sum over sequence length, shape: [batch_size]
+            
+            # Add ensemble dimension if requested
+            if return_ensemble_format:
+                return result.unsqueeze(0)  # Shape: [1, batch_size]
+            return result
         
         else:
             raise ValueError(f"Unexpected input shape: observations {observations.shape}, actions {actions.shape}")
+    
+    def compute_paired_rewards(self, obs1, actions1, obs2, actions2):
+        """Compute rewards for two segments.
+        
+        This is a convenience method for training that computes rewards for both
+        segments in a preference pair.
+        
+        Args:
+            obs1: First segment observations
+            actions1: First segment actions
+            obs2: Second segment observations
+            actions2: Second segment actions
+            
+        Returns:
+            Tuple of (reward1, reward2) with shape [1, batch_size]
+        """
+        reward1 = self(obs1, actions1, return_ensemble_format=True)
+        reward2 = self(obs2, actions2, return_ensemble_format=True)
+        return reward1, reward2
     
     def logpdf(self, observations, actions, rewards):
         """Compute log probability of rewards given observations and actions.
@@ -162,18 +200,43 @@ class EnsembleRewardModel(nn.Module):
         self.num_models = num_models
     
     def forward(self, observations, actions):
-        """Return rewards from all models in the ensemble."""
+        """Return rewards from all models in the ensemble.
+        
+        Returns:
+            Tensor of rewards with shape [num_models, batch_size]
+        """
         rewards = []
         for model in self.models:
             rewards.append(model(observations, actions))
         
-        # Stack rewards from all models
-        if isinstance(rewards[0], torch.Tensor) and rewards[0].dim() == 0:
-            # Handle single segment case
-            return torch.stack(rewards)
-        else:
-            # Handle batch case
-            return torch.stack(rewards, dim=0)
+        # Stack rewards from all models along first dimension
+        # Shape: [num_models, batch_size] or [num_models] for single sample
+        stacked_rewards = torch.stack(rewards, dim=0)
+        
+        # Ensure we always return [num_models, batch_size] even for single samples
+        if stacked_rewards.dim() == 1:  # [num_models]
+            stacked_rewards = stacked_rewards.unsqueeze(-1)  # [num_models, 1]
+            
+        return stacked_rewards
+    
+    def compute_paired_rewards(self, obs1, actions1, obs2, actions2):
+        """Compute rewards for two segments across all models.
+        
+        This is a convenience method for training that computes rewards for both
+        segments in a preference pair.
+        
+        Args:
+            obs1: First segment observations
+            actions1: First segment actions
+            obs2: Second segment observations
+            actions2: Second segment actions
+            
+        Returns:
+            Tuple of (reward1, reward2) with shape [num_models, batch_size]
+        """
+        reward1 = self(obs1, actions1)
+        reward2 = self(obs2, actions2)
+        return reward1, reward2
     
     def mean_reward(self, observations, actions):
         """Return mean reward across all models."""

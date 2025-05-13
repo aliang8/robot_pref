@@ -22,17 +22,91 @@ from utils.wandb_utils import log_to_wandb, log_artifact
 
 # Import shared models and utilities
 from models import SegmentRewardModel, EnsembleRewardModel
-from utils import (
-    PreferenceDataset, 
-    bradley_terry_loss,
-    evaluate_model_on_test_set,
-    compute_uncertainty_scores,
-    select_uncertain_pairs, 
+from utils.dataset_utils import PreferenceDataset, bradley_terry_loss
+from utils.active_learning_utils import (
     select_uncertain_pairs_comprehensive,
-    get_ground_truth_preferences,
     create_initial_dataset,
-    train_ensemble_model
+    get_ground_truth_preferences
 )
+from utils.training_utils import train_model
+from utils import evaluate_model_on_test_set
+
+def train_final_reward_model(labeled_pairs, segment_indices, labeled_preferences, data_cpu, 
+                           state_dim, action_dim, device, cfg, random_seed):
+    """Train the final reward model on all labeled data.
+    
+    Args:
+        labeled_pairs: List of labeled segment pairs
+        segment_indices: List of segment indices
+        labeled_preferences: List of preferences for labeled pairs
+        data_cpu: Data dictionary containing observations and actions
+        state_dim: Dimension of state space
+        action_dim: Dimension of action space
+        device: Device to run training on
+        cfg: Configuration object
+        random_seed: Random seed for reproducibility
+        
+    Returns:
+        final_model: Trained final model
+        final_metrics: Evaluation metrics on test set
+    """
+    print("\n--- Training Final Model ---")
+    print(f"Training on all {len(labeled_pairs)} labeled pairs")
+    
+    # Create dataset from all labeled pairs
+    final_dataset = PreferenceDataset(data_cpu, labeled_pairs, segment_indices, labeled_preferences)
+    
+    # Check if we have enough data
+    if len(final_dataset) < 3:
+        print("Warning: Very few samples for training. Results may not be reliable.")
+    
+    # Create train/val/test split with appropriate handling for small datasets
+    if len(final_dataset) <= 5:
+        # For very small datasets, use the same data for train/val/test
+        print("Using the same data for train/val/test due to small dataset size")
+        train_dataset = final_dataset
+        val_dataset = final_dataset
+        final_test_dataset = final_dataset
+    else:
+        # Normal split for larger datasets
+        train_size = int(0.8 * len(final_dataset))
+        val_size = int(0.1 * len(final_dataset))
+        test_size = len(final_dataset) - train_size - val_size
+        
+        train_dataset, val_dataset, final_test_dataset = torch.utils.data.random_split(
+            final_dataset, 
+            [train_size, val_size, test_size],
+            generator=torch.Generator().manual_seed(random_seed)
+        )
+    
+    # Create data loaders with appropriate batch sizes
+    batch_size = min(cfg.training.batch_size, len(train_dataset))
+    train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+    val_loader = torch.utils.data.DataLoader(val_dataset, batch_size=batch_size)
+    test_loader = torch.utils.data.DataLoader(final_test_dataset, batch_size=batch_size)
+    
+    # Train final model
+    final_model = SegmentRewardModel(state_dim, action_dim, hidden_dims=cfg.model.hidden_dims)
+    
+    from utils.training_utils import train_model
+    final_model, train_losses, val_losses = train_model(
+        final_model,
+        train_loader,
+        val_loader,
+        device,
+        num_epochs=cfg.training.num_epochs,
+        lr=cfg.model.lr,
+        wandb=wandb if cfg.wandb.use_wandb else None,
+        is_ensemble=False
+    )
+    
+    # Evaluate final model
+    print("\nEvaluating final model...")
+    final_metrics = evaluate_model_on_test_set(final_model, test_loader, device)
+    
+    print(f"Final model test accuracy: {final_metrics['test_accuracy']:.4f}")
+    
+    return final_model, final_metrics, train_losses, val_losses
 
 def active_preference_learning(cfg):
     """Main function for active preference learning.
@@ -58,7 +132,7 @@ def active_preference_learning(cfg):
     if cfg.active_learning.fine_tune:
         print(f"  Fine-tuning learning rate: {cfg.active_learning.fine_tune_lr}")
     print(f"  Ensemble models: {cfg.active_learning.num_models}")
-    print(f"  Training epochs per iteration: {cfg.active_learning.train_epochs}")
+    print(f"  Training epochs per iteration: {cfg.training.num_epochs}")
     
     # Set random seed for reproducibility
     random_seed = cfg.get('random_seed', 42)
@@ -211,20 +285,59 @@ def active_preference_learning(cfg):
         
         # Train ensemble model on current labeled dataset
         print("Training ensemble model...")
-        ensemble = train_ensemble_model(
-            state_dim,
-            action_dim,
-            labeled_pairs,
-            segment_indices,
-            labeled_preferences,
-            data_cpu,  # Use CPU data for indexing
+        
+        # Create dataset for training the ensemble
+        ensemble_dataset = PreferenceDataset(data_cpu, labeled_pairs, segment_indices, labeled_preferences)
+        
+        # Create train/val split with appropriate handling for small datasets
+        if len(ensemble_dataset) <= 3:
+            # For very small datasets, use the same data for train/val
+            print("Using the same data for train/val due to small dataset size")
+            train_dataset = ensemble_dataset
+            val_dataset = ensemble_dataset
+        else:
+            # Normal split for larger datasets
+            train_size = int(0.8 * len(ensemble_dataset))
+            val_size = len(ensemble_dataset) - train_size
+            
+            train_dataset, val_dataset = torch.utils.data.random_split(
+                ensemble_dataset, 
+                [train_size, val_size],
+                generator=torch.Generator().manual_seed(random_seed)
+            )
+        
+        # Create data loaders with appropriate batch sizes
+        batch_size = min(64, len(train_dataset))
+        train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+        val_loader = torch.utils.data.DataLoader(val_dataset, batch_size=batch_size)
+        
+        # Create or reuse ensemble model
+        from models.reward_models import EnsembleRewardModel
+        
+        if cfg.active_learning.fine_tune and prev_ensemble is not None:
+            print("Fine-tuning from previous ensemble model")
+            ensemble = prev_ensemble
+            # Ensure the ensemble has the right number of models
+            if len(ensemble.models) != cfg.active_learning.num_models:
+                print(f"Warning: Previous ensemble has {len(ensemble.models)} models, but {cfg.active_learning.num_models} requested. "
+                     f"Creating new ensemble.")
+                ensemble = EnsembleRewardModel(state_dim, action_dim, cfg.model.hidden_dims, cfg.active_learning.num_models)
+            lr = cfg.active_learning.fine_tune_lr  # Use lower learning rate for fine-tuning
+        else:
+            print("Training new ensemble model from scratch")
+            ensemble = EnsembleRewardModel(state_dim, action_dim, cfg.model.hidden_dims, cfg.active_learning.num_models)
+            lr = cfg.model.lr  # Use standard learning rate for training from scratch
+        
+        # Train the ensemble using the unified training function
+        ensemble, _, _ = train_model(
+            ensemble,
+            train_loader,
+            val_loader,
             device,
-            num_models=cfg.active_learning.num_models,
-            hidden_dims=cfg.model.hidden_dims,
-            num_epochs=cfg.active_learning.train_epochs,
-            fine_tune=cfg.active_learning.fine_tune,
-            prev_ensemble=prev_ensemble,
-            fine_tune_lr=cfg.active_learning.fine_tune_lr
+            num_epochs=cfg.training.num_epochs,
+            lr=lr,
+            wandb=None,  # Don't log ensemble training to wandb
+            is_ensemble=True
         )
         
         # Store the current ensemble for potential fine-tuning in the next iteration
@@ -261,15 +374,7 @@ def active_preference_learning(cfg):
             break
         
         print(f"Computing uncertainty scores using {cfg.active_learning.uncertainty_method} method...")
-        
-        # Extract configuration parameter for candidate sampling approach
-        use_random_sampling = True
-        if hasattr(cfg.active_learning, 'use_random_sampling'):
-            use_random_sampling = cfg.active_learning.use_random_sampling
-        
-        # Get number of candidates to consider
-        n_candidates = cfg.active_learning.n_candidates if hasattr(cfg.active_learning, 'n_candidates') else 100
-        
+
         # Use the unified function for uncertainty-based selection
         candidate_pairs = []
         candidate_indices = []
@@ -289,8 +394,8 @@ def active_preference_learning(cfg):
             device,
             uncertainty_method=cfg.active_learning.uncertainty_method,
             max_pairs=batch_size,
-            use_random_candidate_sampling=False,  # Always use all unlabeled pairs here
-            n_candidates=None
+            use_random_candidate_sampling=cfg.active_learning.use_random_sampling, 
+            n_candidates=cfg.active_learning.n_candidates
         )
         
         # Extract the selected pairs and their indices
@@ -328,50 +433,25 @@ def active_preference_learning(cfg):
         print(f"Now have {len(labeled_pairs)} labeled and {len(unlabeled_pairs)} unlabeled pairs")
     
     # Train final model on all labeled data
-    print("\n--- Training Final Model ---")
-    print(f"Training on all {len(labeled_pairs)} labeled pairs")
-    
-    # Create dataset from all labeled pairs
-    final_dataset = PreferenceDataset(data_cpu, labeled_pairs, segment_indices, labeled_preferences)
-    
-    # Create train/val/test split
-    train_size = int(0.8 * len(final_dataset))
-    val_size = int(0.1 * len(final_dataset))
-    test_size = len(final_dataset) - train_size - val_size
-    
-    train_dataset, val_dataset, final_test_dataset = torch.utils.data.random_split(
-        final_dataset, 
-        [train_size, val_size, test_size],
-        generator=torch.Generator().manual_seed(random_seed)
+    final_model, final_metrics, train_losses, val_losses = train_final_reward_model(
+        labeled_pairs, 
+        segment_indices, 
+        labeled_preferences, 
+        data_cpu, 
+        state_dim, 
+        action_dim, 
+        device, 
+        cfg, 
+        random_seed
     )
     
-    train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=cfg.training.batch_size, shuffle=True)
-    val_loader = torch.utils.data.DataLoader(val_dataset, batch_size=cfg.training.batch_size)
-    final_test_loader = torch.utils.data.DataLoader(final_test_dataset, batch_size=cfg.training.batch_size)
-    
-    # Train final model
-    final_model = SegmentRewardModel(state_dim, action_dim, hidden_dims=cfg.model.hidden_dims)
-    
-    from utils.training_utils import train_reward_model
-    final_model, train_losses, val_losses = train_reward_model(
-        final_model,
-        train_loader,
-        val_loader,
-        device,
-        num_epochs=cfg.training.num_epochs,
-        lr=cfg.model.lr,
-        wandb=wandb if cfg.wandb.use_wandb else None
-    )
-    
-    # Evaluate final model
-    print("\nEvaluating final model...")
-    final_metrics = evaluate_model_on_test_set(final_model, final_test_loader, device)
-    
-    # Also evaluate on the consistent test set
-    consistent_metrics = evaluate_model_on_test_set(final_model, test_loader, device)
-    
-    print(f"Final model test accuracy: {final_metrics['test_accuracy']:.4f}")
-    print(f"Final model accuracy on consistent test set: {consistent_metrics['test_accuracy']:.4f}")
+    # Also evaluate on the consistent test set if available
+    if test_loader is not None:
+        consistent_metrics = evaluate_model_on_test_set(final_model, test_loader, device)
+        print(f"Final model accuracy on consistent test set: {consistent_metrics['test_accuracy']:.4f}")
+    else:
+        consistent_metrics = {"test_accuracy": None, "test_loss": None}
+        print("No consistent test set available for evaluation")
     
     # Log final metrics
     if cfg.wandb.use_wandb:
