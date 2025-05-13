@@ -17,7 +17,7 @@ active_learning:
   # Whether to fine-tune the model from the previous iteration or train from scratch
   fine_tune: false
   # If fine-tuning, the learning rate to use
-  fine_tune_lr: 5e-5
+  fine_tune_lr: 1e-4
   # How often to retrain the model (in number of preferences)
   retrain_interval: 1
   # Maximum number of queries (labels) to collect
@@ -31,4 +31,6 @@ model:
 # Training parameters
 training:
   num_epochs: 20
-  batch_size: 32 
+  batch_size: 256
+  num_workers: 4
+  pin_memory: true

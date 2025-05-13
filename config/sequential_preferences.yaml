@@ -40,11 +40,6 @@ hardware:
   use_cpu: false            # Force CPU usage even when GPU is available
   gpu: 0                    # GPU index to use if available
 
-# Training parameters
-training:
-  num_epochs: 20            # Number of epochs for reward model retraining
-  batch_size: 64            # Batch size for training
-
 # Visualization parameters
 visualize: true
 visualize_augmented: true

@@ -302,6 +302,7 @@ def active_preference_learning(cfg):
         "num_labeled": [],
         "test_accuracy": [],
         "test_loss": [],
+        "avg_logpdf": [],
         "iterations": []
     }
     
@@ -385,6 +386,7 @@ def active_preference_learning(cfg):
         metrics["num_labeled"].append(total_labeled)
         metrics["test_accuracy"].append(test_metrics["test_accuracy"])
         metrics["test_loss"].append(test_metrics["test_loss"])
+        metrics["avg_logpdf"].append(test_metrics["avg_logpdf"])
         metrics["iterations"].append(iteration)
         
         # Log to wandb
@@ -393,6 +395,7 @@ def active_preference_learning(cfg):
                 "num_labeled": total_labeled,
                 "test_accuracy": test_metrics["test_accuracy"],
                 "test_loss": test_metrics["test_loss"],
+                "avg_logpdf": test_metrics["avg_logpdf"],
                 "active_iteration": iteration
             })
         
@@ -505,17 +508,36 @@ def active_preference_learning(cfg):
     model_dir = os.path.join(cfg.output.output_dir, output_subdir)
     os.makedirs(model_dir, exist_ok=True)
     
-    # Plot learning curve
-    plt.figure(figsize=(10, 6))
-    plt.plot(metrics["num_labeled"], metrics["test_accuracy"], marker='o')
-    plt.xlabel("Number of Labeled Pairs")
-    plt.ylabel("Test Accuracy")
-    plt.title(f"Active Learning Curve ({cfg.active_learning.uncertainty_method})")
-    plt.grid(True)
+    # Plot learning curve with three subplots: accuracy, loss, and logpdf
+    fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(18, 6), constrained_layout=True)
+    
+    # Plot test accuracy
+    ax1.plot(metrics["num_labeled"], metrics["test_accuracy"], marker='o', color='blue')
+    ax1.set_xlabel("Number of Labeled Pairs")
+    ax1.set_ylabel("Test Accuracy")
+    ax1.set_title(f"Test Accuracy vs Labeled Pairs ({cfg.active_learning.uncertainty_method})")
+    ax1.grid(True)
+    
+    # Plot test loss (Bradley-Terry)
+    ax2.plot(metrics["num_labeled"], metrics["test_loss"], marker='o', color='red')
+    ax2.set_xlabel("Number of Labeled Pairs")
+    ax2.set_ylabel("Bradley-Terry Loss (BCE)")
+    ax2.set_title(f"Preference Learning Loss vs Labeled Pairs ({cfg.active_learning.uncertainty_method})")
+    ax2.grid(True)
+    
+    # Plot test logpdf (log probability density)
+    ax3.plot(metrics["num_labeled"], metrics["avg_logpdf"], marker='o', color='green')
+    ax3.set_xlabel("Number of Labeled Pairs") 
+    ax3.set_ylabel("Average Log Probability")
+    ax3.set_title(f"Avg Log Probability vs Labeled Pairs ({cfg.active_learning.uncertainty_method})")
+    ax3.grid(True)
+   
+    # Add a global title
+    fig.suptitle(f"Active Learning Performance Metrics", fontsize=16)
     
     # Save plot in the model directory
     learning_curve_path = os.path.join(model_dir, "learning_curve.png")
-    plt.savefig(learning_curve_path)
+    plt.savefig(learning_curve_path, dpi=300, bbox_inches='tight')
     
     if cfg.wandb.use_wandb:
         wandb.log({"learning_curve": wandb.Image(learning_curve_path)})

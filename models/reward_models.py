@@ -251,4 +251,25 @@ class EnsembleRewardModel(nn.Module):
     def disagreement(self, observations, actions):
         """Return disagreement (variance) across models."""
         rewards = self(observations, actions)
-        return rewards.var(dim=0) 
+        return rewards.var(dim=0)
+        
+    def logpdf(self, observations, actions, rewards):
+        """Compute mean log probability density across all models in the ensemble.
+        
+        Args:
+            observations: Batch of observation sequences or single observation sequence
+            actions: Batch of action sequences or single action sequence
+            rewards: Target reward values
+            
+        Returns:
+            Mean log probability across all models
+        """
+        # Compute logpdf for each model in the ensemble
+        log_probs = []
+        for model in self.models:
+            log_prob = model.logpdf(observations, actions, rewards)
+            log_probs.append(log_prob)
+            
+        # Stack and compute mean across models
+        stacked_log_probs = torch.stack(log_probs, dim=0)
+        return stacked_log_probs.mean(dim=0) 
