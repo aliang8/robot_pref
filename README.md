@@ -71,18 +71,19 @@ python collect_cluster_preferences.py preferences.use_automatic_preferences=true
 ```bash
 # Basic sequential preference collection
 python collect_sequential_pref.py
+```
 
-# Customize preference collection parameters
-python collect_sequential_pref.py preferences.n_queries=50 preferences.k_augment=10
-
-# Specify data path and output directory
-python collect_sequential_pref.py data.data_path="/path/to/dataset.pt" output.output_dir="./sequential_pref_results"
-
-# Adjust segment parameters
-python collect_sequential_pref.py data.segment_length=20 data.max_segments=1000
-
-# Configure DTW distance options
-python collect_sequential_pref.py preferences.use_dtw_distance=true preferences.max_dtw_segments=500
+Results will be saved in a directory structure like:
+```
+output_dir/
+├── n50_k10_seed42_dtw500/
+│   ├── augmentation_visualizations/
+│   ├── preference_dataset.pkl
+│   └── raw_preferences.pkl
+└── n50_k10_seed42_active_disagreement/
+    ├── augmentation_visualizations/
+    ├── preference_dataset.pkl
+    └── raw_preferences.pkl
 ```
 
 ## Train Reward Model
@@ -98,6 +99,16 @@ python train_reward_model.py data.data_path="/path/to/dataset.pt" model.hidden_d
 
 # Run with SLURM
 python train_reward_model.py --multirun
+```
+
+## Train Reward Model with Active Learning
+
+```bash
+# Train reward model with active learning using disagreement-based uncertainty sampling
+python train_reward_model_sampling.py active_learning.uncertainty_method="disagreement" active_learning.num_models=5
+
+# Enable fine-tuning between active learning iterations
+python train_reward_model_sampling.py active_learning.fine_tune=true active_learning.fine_tune_lr=5e-5
 ```
 
 ## Train Policy
@@ -123,3 +134,5 @@ python train_policy.py --config-name=bc data.data_path="/path/to/dataset.pt"
 
 # With custom parameters
 python train_policy.py --config-name=bc data.data_path="/path/to/dataset.pt" model.learning_rate=1e-4 training.n_epochs=200 evaluation.record_video=true
+
+/scr/aliang80/robot_pref/labeled_datasets/buffer_assembly-v2_balanced.pt

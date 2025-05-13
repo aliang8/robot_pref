@@ -37,4 +37,4 @@ wandb:
 defaults:
   - hydra: default  # set the directory where the output files get saved
   # - override hydra/hydra_logging: default
-  - override hydra/launcher: slurm
+  - override hydra/launcher: local

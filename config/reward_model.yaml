@@ -21,7 +21,7 @@ model:
 # Training parameters
 training:
   batch_size: 256
-  num_epochs: 50
+  num_epochs: 100
   num_workers: 4
   pin_memory: true
 
@@ -32,7 +32,7 @@ hardware:
 
 # Output parameters
 output:
-  output_dir: /scr/aliang80/robot_pref/reward_model
+  output_dir: /scr/aliang80/robot_pref/results/reward_model
   
 # Wandb configuration
 wandb:

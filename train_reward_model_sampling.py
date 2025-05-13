@@ -1,0 +1,506 @@
+import os
+import torch
+import numpy as np
+import random
+from tqdm import tqdm
+import matplotlib.pyplot as plt
+import pickle
+import time
+from pathlib import Path
+import hydra
+from omegaconf import DictConfig, OmegaConf
+import wandb
+from copy import deepcopy
+
+# Import utility functions
+from trajectory_utils import (
+    load_tensordict,
+    create_segments,
+    sample_segment_pairs
+)
+from utils.wandb_utils import log_to_wandb, log_artifact
+
+# Import shared models and utilities
+from models import SegmentRewardModel, EnsembleRewardModel
+from utils.dataset_utils import PreferenceDataset, bradley_terry_loss
+from utils.active_learning_utils import (
+    select_uncertain_pairs_comprehensive,
+    create_initial_dataset
+)
+from utils.training_utils import train_model
+from utils import evaluate_model_on_test_set
+from utils.dataset_utils import create_data_loaders
+from utils.seed_utils import set_seed
+
+
+def train_final_reward_model(labeled_pairs, segment_indices, labeled_preferences, data_cpu, 
+                           state_dim, action_dim, device, cfg, random_seed):
+    """Train the final reward model on all labeled data.
+    
+    Args:
+        labeled_pairs: List of labeled segment pairs
+        segment_indices: List of segment indices
+        labeled_preferences: List of preferences for labeled pairs
+        data_cpu: Data dictionary containing observations and actions
+        state_dim: Dimension of state space
+        action_dim: Dimension of action space
+        device: Device to run training on
+        cfg: Configuration object
+        random_seed: Random seed for reproducibility
+        
+    Returns:
+        final_model: Trained final model
+        final_metrics: Evaluation metrics on test set
+    """
+    print("\n--- Training Final Model ---")
+    print(f"Training on all {len(labeled_pairs)} labeled pairs")
+    
+    # Create dataset from all labeled pairs
+    final_dataset = PreferenceDataset(data_cpu, labeled_pairs, segment_indices, labeled_preferences)    
+    # Use the utility function to create data loaders with appropriate splits
+    data_loaders = create_data_loaders(
+        final_dataset,
+        train_ratio=1.0,
+        val_ratio=0,
+        batch_size=min(cfg.training.batch_size, len(final_dataset)),
+        num_workers=cfg.training.get('num_workers', 4),
+        pin_memory=cfg.training.get('pin_memory', True),
+        seed=random_seed
+    )
+    
+    train_loader = data_loaders['train']
+    print(f"Created data loaders with {data_loaders['train_size']} train, {data_loaders['val_size']} val, and {data_loaders['test_size']} test samples")
+    
+    # Train final model
+    final_model = SegmentRewardModel(state_dim, action_dim, hidden_dims=cfg.model.hidden_dims)
+    
+    # No ensemble training for final model
+    final_model, train_losses, val_losses = train_model(
+        final_model,
+        train_loader,
+        None,
+        device,
+        num_epochs=cfg.training.num_epochs,
+        lr=cfg.model.lr,
+        wandb=wandb if cfg.wandb.use_wandb else None,
+        is_ensemble=False
+    )
+    return final_model, None, train_losses, val_losses
+
+@hydra.main(config_path="config", config_name="reward_model_sampling", version_base=None)
+def main(cfg: DictConfig):
+    """Main entry point for active preference learning."""
+    # Set random seed for reproducibility at the beginning
+    random_seed = cfg.get('random_seed', 42)
+    set_seed(random_seed)
+    print(f"Global random seed set to {random_seed}")
+    
+    active_preference_learning(cfg)
+
+def active_preference_learning(cfg):
+    """Main function for active preference learning.
+    
+    Args:
+        cfg: Configuration object from Hydra
+    """
+    print("\n" + "=" * 50)
+    print("Active Preference Learning with Uncertainty Sampling")
+    print("=" * 50)
+    
+    # Print config
+    print("\nConfiguration:")
+    print(OmegaConf.to_yaml(cfg))
+    
+    # Print a summary of active learning parameters
+    print("\nActive Learning Parameters:")
+    print(f"  Uncertainty method: {cfg.active_learning.uncertainty_method}")
+    print(f"  Initial labeled pairs: {cfg.active_learning.initial_size}")
+    print(f"  Maximum queries: {cfg.active_learning.max_queries}")
+    print(f"  Batch size: {cfg.active_learning.batch_size}")
+    print(f"  Fine-tuning: {'Enabled' if cfg.active_learning.fine_tune else 'Disabled'}")
+    if cfg.active_learning.fine_tune:
+        print(f"  Fine-tuning learning rate: {cfg.active_learning.fine_tune_lr}")
+    print(f"  Ensemble models: {cfg.active_learning.num_models}")
+    print(f"  Training epochs per iteration: {cfg.training.num_epochs}")
+    
+    # Get random seed from config (already set in main)
+    random_seed = cfg.get('random_seed', 42)
+    
+    # Setup device
+    if cfg.hardware.use_cpu:
+        device = torch.device("cpu")
+    else:
+        cuda_device = f"cuda:{cfg.hardware.gpu}" if torch.cuda.is_available() else "cpu"
+        device = torch.device(cuda_device)
+    
+    print(f"Using device: {device}")
+    
+    # Initialize wandb
+    if cfg.wandb.use_wandb:
+        # Generate experiment name based on data path
+        dataset_name = Path(cfg.data.data_path).stem
+        
+        # Set up a run name if not specified
+        run_name = cfg.wandb.name
+        if run_name is None:
+            run_name = f"active_reward_{dataset_name}_{time.strftime('%Y%m%d_%H%M%S')}"
+        
+        # Initialize wandb
+        wandb.init(
+            project=cfg.wandb.project,
+            entity=cfg.wandb.entity,
+            name=run_name,
+            config=OmegaConf.to_container(cfg, resolve=True),
+            tags=cfg.wandb.tags + ["active_learning"],
+            notes=cfg.wandb.notes
+        )
+        
+        print(f"Wandb initialized: {wandb.run.name}")
+    
+    # Create output directory
+    os.makedirs(cfg.output.output_dir, exist_ok=True)
+    
+    # Load data
+    print(f"Loading data from {cfg.data.data_path}")
+    data = load_tensordict(cfg.data.data_path)
+    
+    # Keep a CPU version of the data for indexing operations
+    data_cpu = {k: v.cpu() if isinstance(v, torch.Tensor) else v for k, v in data.items()}
+    
+    # Get observation and action dimensions
+    observations = data_cpu["obs"] if "obs" in data_cpu else data_cpu["state"]
+    actions = data_cpu["action"]
+    rewards = data_cpu["reward"]
+    
+    state_dim = observations.shape[1]
+    action_dim = actions.shape[1]
+    
+    print(f"Observation dimension: {state_dim}, Action dimension: {action_dim}")
+    
+    # Create segments
+    print(f"Creating segments of length {cfg.data.segment_length}...")
+    # Pass CPU data to create_segments to ensure proper indexing
+    segments, segment_indices = create_segments(
+        data_cpu, 
+        segment_length=cfg.data.segment_length,
+        max_segments=cfg.data.num_segments
+    )
+    
+    # Generate all possible segment pairs
+    print(f"Generating {cfg.data.num_pairs} segment pairs...")
+    # Pass CPU rewards to sample_segment_pairs
+    all_segment_pairs, gt_preferences = sample_segment_pairs(
+        segments, 
+        segment_indices, 
+        data_cpu["reward"], 
+        n_pairs=cfg.data.num_pairs
+    )
+    
+    # Create test dataset from a separate set of pairs for consistent evaluation
+    # We use 20% of all pairs for testing
+    test_size = min(int(0.2 * len(all_segment_pairs)), len(all_segment_pairs))
+    
+    if test_size == 0:
+        print("Warning: Not enough pairs for testing. Using all pairs for training.")
+        test_indices = []
+        test_pairs = []
+        test_preferences = []
+    else:
+        # Use the same random seed for reproducibility
+        test_indices = random.sample(range(len(all_segment_pairs)), test_size)
+        test_pairs = [all_segment_pairs[i] for i in test_indices]
+        test_preferences = [gt_preferences[i] for i in test_indices]
+    
+    # Create a set of test indices for faster lookup
+    test_indices_set = set(test_indices)
+    
+    # Make sure test pairs are not in labeled or unlabeled sets
+    # First create initial dataset excluding test pairs
+    remaining_indices = [i for i in range(len(all_segment_pairs)) if i not in test_indices_set]
+    remaining_pairs = [all_segment_pairs[i] for i in remaining_indices]
+    remaining_preferences = [gt_preferences[i] for i in remaining_indices]
+    
+    # Now create the labeled/unlabeled split from the remaining pairs
+    print(f"Creating initial dataset with {cfg.active_learning.initial_size} labeled pairs...")
+    print(f"Using {len(remaining_pairs)} pairs after excluding test set")
+    
+    labeled_pairs, labeled_preferences, unlabeled_pairs, unlabeled_indices = create_initial_dataset(
+        remaining_pairs,
+        segment_indices,
+        remaining_preferences,
+        data_cpu,  # Use CPU data for indexing
+        cfg.active_learning.initial_size
+    )
+    
+    # Map unlabeled_indices back to original indices
+    unlabeled_indices = [remaining_indices[i] for i in unlabeled_indices]
+    
+    # Create test dataset if we have test pairs
+    test_dataset = PreferenceDataset(data_cpu, test_pairs, segment_indices, test_preferences)
+    test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=64)
+    print(f"Created test dataset with {len(test_dataset)} pairs")
+
+    print(f"Starting with {len(labeled_pairs)} labeled and {len(unlabeled_pairs)} unlabeled pairs")
+    
+    # Initialize metrics tracking
+    metrics = {
+        "num_labeled": [],
+        "test_accuracy": [],
+        "test_loss": [],
+        "iterations": []
+    }
+    
+    # Main active learning loop
+    iteration = 0
+    total_labeled = len(labeled_pairs)
+    max_queries = cfg.active_learning.max_queries
+    
+    # Keep track of the previous ensemble for fine-tuning
+    prev_ensemble = None
+    
+    # Create a mapping from pair to original index for preference lookup
+    pair_to_original_idx = {}
+    for i, pair in enumerate(all_segment_pairs):
+        pair_to_original_idx[tuple(pair)] = i
+    
+    while total_labeled < max_queries and len(unlabeled_pairs) > 0:
+        iteration += 1
+        print(f"\n--- Active Learning Iteration {iteration} ---")
+        print(f"Currently have {total_labeled} labeled pairs")
+        
+        # Train ensemble model on current labeled dataset
+        print("Training ensemble model...")
+        
+        # Create dataset for training the ensemble
+        ensemble_dataset = PreferenceDataset(data_cpu, labeled_pairs, segment_indices, labeled_preferences)
+        
+        # Use utility function to create data loaders
+        data_loaders = create_data_loaders(
+            ensemble_dataset,
+            train_ratio=0.8,
+            val_ratio=0.2,
+            batch_size=min(64, len(ensemble_dataset)),
+            num_workers=cfg.training.get('num_workers', 4),
+            pin_memory=cfg.training.get('pin_memory', True),
+            seed=random_seed
+        )
+        
+        train_loader = data_loaders['train']
+        val_loader = data_loaders['val']
+        
+        print(f"Created ensemble data loaders with {data_loaders['train_size']} train and {data_loaders['val_size']} val samples")
+        
+        if cfg.active_learning.fine_tune and prev_ensemble is not None:
+            print("Fine-tuning from previous ensemble model")
+            ensemble = prev_ensemble
+            # Ensure the ensemble has the right number of models
+            if len(ensemble.models) != cfg.active_learning.num_models:
+                print(f"Warning: Previous ensemble has {len(ensemble.models)} models, but {cfg.active_learning.num_models} requested. "
+                     f"Creating new ensemble.")
+                ensemble = EnsembleRewardModel(state_dim, action_dim, cfg.model.hidden_dims, cfg.active_learning.num_models)
+            lr = cfg.active_learning.fine_tune_lr  # Use lower learning rate for fine-tuning
+        else:
+            print("Training new ensemble model from scratch")
+            ensemble = EnsembleRewardModel(state_dim, action_dim, cfg.model.hidden_dims, cfg.active_learning.num_models)
+            lr = cfg.model.lr  # Use standard learning rate for training from scratch
+        
+        # Train the ensemble using the unified training function
+        ensemble, _, _ = train_model(
+            ensemble,
+            train_loader,
+            val_loader,
+            device,
+            num_epochs=cfg.training.num_epochs,
+            lr=lr,
+            wandb=None,  # Don't log ensemble training to wandb
+            is_ensemble=True
+        )
+        
+        # Store the current ensemble for potential fine-tuning in the next iteration
+        if cfg.active_learning.fine_tune:
+            prev_ensemble = deepcopy(ensemble)
+        
+        # Move ensemble to device
+        ensemble = ensemble.to(device)
+        
+        # Evaluate ensemble on test set
+        print("Evaluating ensemble on test set...")
+        # Use the first model in the ensemble for evaluation
+        test_metrics = evaluate_model_on_test_set(ensemble.models[0], test_loader, device)
+        
+        # Log metrics
+        metrics["num_labeled"].append(total_labeled)
+        metrics["test_accuracy"].append(test_metrics["test_accuracy"])
+        metrics["test_loss"].append(test_metrics["test_loss"])
+        metrics["iterations"].append(iteration)
+        
+        # Log to wandb
+        if cfg.wandb.use_wandb:
+            log_to_wandb({
+                "num_labeled": total_labeled,
+                "test_accuracy": test_metrics["test_accuracy"],
+                "test_loss": test_metrics["test_loss"],
+                "active_iteration": iteration
+            })
+        
+        # Select next batch of uncertain pairs
+        batch_size = min(cfg.active_learning.batch_size, max_queries - total_labeled)
+        if batch_size <= 0 or len(unlabeled_pairs) == 0:
+            print("Reached maximum number of queries or no more unlabeled data")
+            break
+        
+        print(f"Computing uncertainty scores using {cfg.active_learning.uncertainty_method} method...")
+
+        # Use the unified function for uncertainty-based selection
+        # Instead of passing all unlabeled pairs, we'll directly use them
+        ranked_pairs = select_uncertain_pairs_comprehensive(
+            ensemble,
+            segments,
+            segment_indices,
+            data_cpu,
+            device,
+            uncertainty_method=cfg.active_learning.uncertainty_method,
+            max_pairs=batch_size,
+            use_random_candidate_sampling=cfg.active_learning.use_random_sampling, 
+            n_candidates=cfg.active_learning.n_candidates,
+            candidate_pairs=unlabeled_pairs  # Pass unlabeled_pairs directly
+        )
+        
+        # Extract the selected pairs
+        selected_pairs = ranked_pairs[:batch_size]
+        
+        # Check if we were able to select any pairs
+        if len(selected_pairs) == 0:
+            print("No pairs were selected. Ending active learning loop.")
+            break
+        
+        print(f"Selected {len(selected_pairs)} pairs based on uncertainty")
+        print(f"Selected pairs: {selected_pairs}")
+        
+        # Get ground truth preferences for selected pairs
+        # In a real system, this would be where we query the human
+        selected_preferences = []
+        valid_selected_pairs = []
+        for pair in selected_pairs:
+            pair_tuple = tuple(pair)
+            if pair_tuple in pair_to_original_idx:
+                selected_preferences.append(gt_preferences[pair_to_original_idx[pair_tuple]])
+                valid_selected_pairs.append(pair)
+            else:
+                print(f"Warning: Pair {pair} not found in original pairs mapping")
+        
+        # Update selected_pairs to only include valid ones
+        selected_pairs = valid_selected_pairs
+        
+        if len(selected_pairs) == 0:
+            print("No valid pairs selected. Ending active learning loop.")
+            break
+            
+        # Add newly labeled pairs to labeled set
+        labeled_pairs.extend(selected_pairs)
+        labeled_preferences.extend(selected_preferences)
+        total_labeled += len(selected_pairs)
+        
+        # Remove selected pairs from unlabeled set
+        # Create a set of pairs to remove for faster lookup
+        pairs_to_remove = set(tuple(p) for p in selected_pairs)
+        unlabeled_pairs = [p for p in unlabeled_pairs if tuple(p) not in pairs_to_remove]
+        
+        print(f"Now have {len(labeled_pairs)} labeled and {len(unlabeled_pairs)} unlabeled pairs")
+    
+    # Train final model on all labeled data
+    final_model, final_metrics, train_losses, val_losses = train_final_reward_model(
+        labeled_pairs, 
+        segment_indices, 
+        labeled_preferences, 
+        data_cpu, 
+        state_dim, 
+        action_dim, 
+        device, 
+        cfg, 
+        random_seed
+    )
+    
+    # Also evaluate on the consistent test set if available
+    if test_loader is not None:
+        consistent_metrics = evaluate_model_on_test_set(final_model, test_loader, device)
+        print(f"Final model accuracy on consistent test set: {consistent_metrics['test_accuracy']:.4f}")
+    else:
+        consistent_metrics = {"test_accuracy": None, "test_loss": None}
+        print("No consistent test set available for evaluation")
+    
+    # Log final metrics
+    if cfg.wandb.use_wandb:
+        log_to_wandb({
+            "final_test_accuracy": final_metrics["test_accuracy"],
+            "final_test_loss": final_metrics["test_loss"],
+            "consistent_test_accuracy": consistent_metrics["test_accuracy"],
+            "consistent_test_loss": consistent_metrics["test_loss"],
+            "total_queries": total_labeled,
+            "total_iterations": iteration
+        })
+    
+    # Plot learning curve
+    plt.figure(figsize=(10, 6))
+    plt.plot(metrics["num_labeled"], metrics["test_accuracy"], marker='o')
+    plt.xlabel("Number of Labeled Pairs")
+    plt.ylabel("Test Accuracy")
+    plt.title(f"Active Learning Curve ({cfg.active_learning.uncertainty_method})")
+    plt.grid(True)
+    
+    # Create descriptive output directory structure
+    dataset_name = Path(cfg.data.data_path).stem
+    uncertainty_method = cfg.active_learning.uncertainty_method
+    fine_tune_str = "finetune" if cfg.active_learning.fine_tune else "scratch"
+    
+    # Create descriptive subdirectory
+    output_subdir = f"{dataset_name}_active_{uncertainty_method}_init{cfg.active_learning.initial_size}_max{cfg.active_learning.max_queries}_batch{cfg.active_learning.batch_size}_{fine_tune_str}"
+    
+    # Save plot with descriptive name
+    plot_path = os.path.join(cfg.output.output_dir, f"{output_subdir}_learning_curve.png")
+    plt.savefig(plot_path)
+    
+    if cfg.wandb.use_wandb:
+        wandb.log({"learning_curve": wandb.Image(plot_path)})
+    
+    # Save final model in descriptive directory
+    model_dir = os.path.join(cfg.output.output_dir, output_subdir)
+    os.makedirs(model_dir, exist_ok=True)
+    
+    model_path = os.path.join(model_dir, "final_model.pt")
+    torch.save(final_model.state_dict(), model_path)
+    
+    # Save metrics
+    metrics_path = os.path.join(model_dir, "metrics.pkl")
+    with open(metrics_path, "wb") as f:
+        pickle.dump(metrics, f)
+    
+    # Save configuration
+    config_path = os.path.join(model_dir, "config.yaml")
+    with open(config_path, "w") as f:
+        f.write(OmegaConf.to_yaml(cfg))
+    
+    print(f"\nActive learning completed. Final model saved to {model_path}")
+    
+    # Log artifacts to wandb
+    if cfg.wandb.use_wandb:
+        log_artifact(
+            model_path,
+            artifact_type="model",
+            metadata={
+                "method": cfg.active_learning.uncertainty_method,
+                "fine_tune": cfg.active_learning.fine_tune,
+                "initial_size": cfg.active_learning.initial_size,
+                "max_queries": cfg.active_learning.max_queries,
+                "batch_size": cfg.active_learning.batch_size,
+                "num_queries": total_labeled,
+                "final_accuracy": final_metrics["test_accuracy"],
+                "consistent_accuracy": consistent_metrics["test_accuracy"]
+            }
+        )
+        
+        # Finish wandb run
+        wandb.finish()
+
+if __name__ == "__main__":
+    main() 

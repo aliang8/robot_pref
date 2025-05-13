@@ -3,6 +3,7 @@
 # Include common settings
 defaults:
   - common
+  - active_learning  # Include shared active learning parameters
   - _self_  # Allow this config to override common settings
 
 # Random seed for reproducibility
@@ -13,16 +14,42 @@ data:
   data_path: "/scr/shared/clam/datasets/metaworld/assembly-v2/buffer_assembly-v2.pt"
   preprocessed_data: null  # Path to preprocessed data file (skips extraction if provided)
   segment_length: 32
-  max_segments: 2000
+  max_segments: 5000
   use_relative_differences: true
 
 # Preference collection parameters
 preferences:
-  n_queries: 100          # Number of direct preference queries to collect
+  n_queries: 50           # Number of direct preference queries to collect
   k_augment: 5            # Number of similar segments to use for augmentation (for each segment)
   use_ground_truth: true  # Use ground truth rewards for preferences (instead of user input)
   use_dtw_distance: true  # Use DTW distance for segment similarity
-  max_dtw_segments: 1000  # Limit segments for DTW calculation to save memory
+  max_dtw_segments: 5000  # Limit segments for DTW calculation to save memory
+  
+# Override active learning parameters if needed
+active_learning:
+  enabled: false  # Default to disabled for sequential preferences
+  reward_model_path: null  # Path to pre-trained reward model for active selection
+
+# Model training parameters
+model:
+  hidden_dims: [256, 256]  # Hidden dimensions for the reward model
+  lr: 3e-4                 # Learning rate for training the reward model
+  
+# Hardware parameters
+hardware:
+  use_cpu: false            # Force CPU usage even when GPU is available
+  gpu: 0                    # GPU index to use if available
+
+# Training parameters
+training:
+  num_epochs: 20            # Number of epochs for reward model retraining
+  batch_size: 64            # Batch size for training
+
+# Visualization parameters
+visualize: true
+visualize_augmented: true
+max_visualizations: 3      # Number of preference pairs to visualize
+max_augmentations: 5      # Maximum number of augmentations to show per preference pair
 
 # Output parameters
 output:

@@ -37,6 +37,7 @@ from utils.eval_utils import evaluate_policy_manual, custom_evaluate_on_environm
 from utils.data_utils import AttrDict
 from utils.viz import create_video_grid
 from train_reward_model import SegmentRewardModel
+from utils.seed_utils import set_seed
 
 # Import evaluation and rendering utilities
 from utils.eval_utils import (
@@ -251,6 +252,16 @@ def load_dataset(data, reward_model=None, device=None, use_ground_truth=False, m
     
     return dataset
 
+# Add a helper function to print model architecture information
+def print_model_architecture(algo):
+    """Print the architecture details of a d3rlpy algorithm.
+    
+    Args:
+        algo: A d3rlpy algorithm instance (IQL, BC, etc.)
+    """
+    print("\nModel Architecture Details:")
+    print("=" * 50)
+
 @hydra.main(config_path="config", config_name="iql")
 def main(cfg: DictConfig):
     """Train a policy using specified algorithm with Hydra config."""
@@ -272,6 +283,11 @@ def main(cfg: DictConfig):
     # Print config for visibility (using original OmegaConf for pretty printing)
     print("\nConfiguration:")
     print(OmegaConf.to_yaml(OmegaConf.create(cfg_dict)))
+    
+    # Set random seed for reproducibility
+    random_seed = cfg.get('random_seed', 42)
+    set_seed(random_seed)
+    print(f"Global random seed set to {random_seed}")
     
     # Initialize wandb
     if cfg.wandb.use_wandb:
@@ -461,6 +477,9 @@ def main(cfg: DictConfig):
         
     else:
         raise ValueError(f"Unsupported algorithm: {algorithm_name}")
+    
+    # Print model architecture details
+    print_model_architecture(algo)
     
     # Get number of training epochs
     n_epochs = cfg.training.n_epochs

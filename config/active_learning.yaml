@@ -1,0 +1,34 @@
+# Common active learning parameters for preference-based learning
+active_learning:
+  # Whether to use active learning
+  enabled: true
+  # Uncertainty estimation method: "entropy", "disagreement", or "random"
+  uncertainty_method: "entropy"
+  # Number of models in the ensemble (for disagreement method)
+  num_models: 5
+  # Number of random candidate pairs to consider for uncertainty selection
+  n_candidates: 500
+  # Whether to use random candidate sampling (true) or consider all possible pairs (false)
+  use_random_sampling: true
+  # Number of pairs to select in each iteration
+  batch_size: 5
+  # Initial number of randomly labeled pairs before active learning starts
+  initial_size: 5
+  # Whether to fine-tune the model from the previous iteration or train from scratch
+  fine_tune: false
+  # If fine-tuning, the learning rate to use
+  fine_tune_lr: 5e-5
+  # How often to retrain the model (in number of preferences)
+  retrain_interval: 1
+  # Maximum number of queries (labels) to collect
+  max_queries: 50
+
+# Model parameters for reward model
+model:
+  hidden_dims: [256, 256]
+  lr: 1e-4
+
+# Training parameters
+training:
+  num_epochs: 20
+  batch_size: 32 

@@ -475,6 +475,262 @@ def create_algorithm_summary_csv(df, output_dir="algorithm_plots"):
     
     return output_path
 
+def plot_reward_model_comparisons(df, output_dir="reward_model_plots"):
+    """Create plots comparing algorithm performance across datasets and reward models.
+    
+    Args:
+        df: DataFrame with run information
+        output_dir: Directory to save plots
+        
+    Returns:
+        Path to output directory
+    """
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Filter out rows with missing data
+    df_filtered = df.dropna(subset=["top3_avg_eval_success_rate"])
+    
+    # Process reward model paths for better display
+    if "reward_model" in df_filtered.columns:
+        # Extract just the relevant parts of the reward model path for display
+        def extract_reward_model_name(path):
+            if not isinstance(path, str) or path == "none":
+                return "none"
+            
+            # Try to extract informative parts of the path
+            path_obj = Path(path)
+            
+            # Look for directories that might contain model parameters
+            # Check if parent directory contains model parameters
+            parent_dir = path_obj.parent.name
+            if any(param in parent_dir for param in ["n", "k", "seed", "dtw", "model", "seg", "hidden", "epochs"]):
+                return parent_dir
+            
+            # Fall back to filename if parent directory not informative
+            return path_obj.name
+        
+        df_filtered["reward_model_name"] = df_filtered["reward_model"].apply(extract_reward_model_name)
+    else:
+        # If reward_model column doesn't exist, create a dummy one
+        df_filtered["reward_model_name"] = "unknown"
+    
+    if len(df_filtered) == 0:
+        print("No runs with valid success rate metrics found. Cannot generate plots.")
+        return output_dir
+    
+    print(f"Using {len(df_filtered)} runs with valid metrics for reward model comparison plots")
+    
+    # Metrics to plot
+    metrics_to_plot = [
+        {"column": "top3_avg_eval_success_rate", "title": "Average of Top 3 Checkpoints Success Rate"}
+    ]
+    
+    # Set up the style
+    sns.set_style("whitegrid")
+    plt.rcParams.update({'font.size': 12})
+    
+    # Get unique datasets and algorithms
+    datasets = df_filtered["dataset"].unique()
+    algorithms = df_filtered["algorithm"].unique()
+    
+    print(f"Found {len(datasets)} datasets and {len(algorithms)} algorithms to plot")
+    
+    # For each dataset and algorithm combination, create plots comparing reward models
+    for dataset in datasets:
+        for algorithm in algorithms:
+            # Filter data for this dataset and algorithm
+            dataset_algo_df = df_filtered[(df_filtered["dataset"] == dataset) & 
+                                         (df_filtered["algorithm"] == algorithm)]
+            
+            # Skip if no data for this combination
+            if len(dataset_algo_df) == 0:
+                continue
+            
+            # Group by reward model
+            reward_models = dataset_algo_df["reward_model_name"].unique()
+            
+            # Skip if only one or no reward model
+            if len(reward_models) <= 1:
+                print(f"Skipping {algorithm} on {dataset} - only one reward model: {reward_models}")
+                continue
+                
+            print(f"Creating plots for {algorithm} on {dataset} with {len(reward_models)} reward models")
+            
+            # For each metric, create a plot
+            for metric in metrics_to_plot:
+                metric_column = metric["column"]
+                metric_title = metric["title"]
+                
+                # Skip if metric not available
+                if metric_column not in dataset_algo_df.columns:
+                    continue
+                
+                # Group and analyze by reward model
+                grouped = dataset_algo_df.groupby(["reward_model_name"])
+                
+                # Calculate statistics for the current metric
+                stats = grouped[metric_column].agg([
+                    ("mean", np.mean),
+                    ("std", np.std),
+                    ("min", np.min),
+                    ("max", np.max),
+                    ("count", "count"),
+                    ("median", np.median)
+                ]).reset_index()
+                
+                # Add 95% confidence interval
+                stats["ci_95"] = 1.96 * stats["std"] / np.sqrt(stats["count"].clip(1))
+                
+                # Round statistics for readability
+                for col in ["mean", "std", "min", "max", "median", "ci_95"]:
+                    stats[col] = stats[col].round(3)
+                
+                # Sort by mean performance (descending)
+                stats = stats.sort_values("mean", ascending=False)
+                
+                # Set up the figure - wider for many reward models
+                plt.figure(figsize=(max(12, len(reward_models)*1.5), 6))
+                
+                # Create bar plot with error bars
+                ax = sns.barplot(
+                    x="reward_model_name", 
+                    y="mean", 
+                    data=stats,
+                    palette="viridis",
+                    alpha=0.8
+                )
+                
+                # Add error bars for standard deviation
+                for i, row in enumerate(stats.itertuples()):
+                    plt.errorbar(
+                        i, row.mean, 
+                        yerr=row.std, 
+                        fmt='none', 
+                        ecolor='black', 
+                        capsize=5
+                    )
+                
+                # Add data labels on top of bars
+                for i, row in enumerate(stats.itertuples()):
+                    plt.text(
+                        i, row.mean + 0.02, 
+                        f"{row.mean:.3f}±{row.std:.3f}\nn={row.count}", 
+                        ha='center', 
+                        va='bottom',
+                        fontsize=10
+                    )
+                
+                # Add a title and labels
+                plt.title(f"Reward Model Comparison for {algorithm} on {dataset}\n({metric_title})")
+                plt.ylabel("Success Rate")
+                plt.xlabel("Reward Model")
+                
+                # Rotate x-axis labels for better readability with long reward model names
+                plt.xticks(rotation=45, ha='right')
+                
+                # Add gridlines for readability
+                plt.grid(axis='y', linestyle='--', alpha=0.7)
+                
+                # Adjust the y-axis to start at 0 and have some headroom
+                max_value = stats["mean"].max() + stats["std"].max()
+                plt.ylim(0, min(1.0, max_value * 1.2))
+                
+                # Save the figure
+                safe_dataset = str(dataset).replace("/", "_")
+                safe_algorithm = str(algorithm).replace("/", "_")
+                plt.tight_layout()
+                output_path = os.path.join(output_dir, f"{safe_dataset}_{safe_algorithm}_reward_model_comparison.png")
+                plt.savefig(output_path, dpi=300, bbox_inches='tight')
+                print(f"Saved reward model comparison plot to {output_path}")
+                plt.close()
+    
+    # Also create a summary CSV with reward model performance
+    create_reward_model_summary_csv(df_filtered, output_dir)
+    
+    return output_dir
+
+def create_reward_model_summary_csv(df, output_dir="reward_model_plots"):
+    """Create a summary CSV with reward model performance by dataset and algorithm."""
+    # Create a CSV summary of reward model performance
+    summary_rows = []
+    
+    # Process reward model paths for better display if needed
+    if "reward_model_name" not in df.columns and "reward_model" in df.columns:
+        # Extract just the relevant parts of the reward model path for display
+        def extract_reward_model_name(path):
+            if not isinstance(path, str) or path == "none":
+                return "none"
+            
+            # Try to extract informative parts of the path
+            path_obj = Path(path)
+            
+            # Look for directories that might contain model parameters
+            # Check if parent directory contains model parameters
+            parent_dir = path_obj.parent.name
+            if any(param in parent_dir for param in ["n", "k", "seed", "dtw", "model", "seg", "hidden", "epochs"]):
+                return parent_dir
+            
+            # Fall back to filename if parent directory not informative
+            return path_obj.name
+        
+        df["reward_model_name"] = df["reward_model"].apply(extract_reward_model_name)
+    
+    # Group by dataset, algorithm, and reward model
+    if all(col in df.columns for col in ["dataset", "algorithm", "reward_model_name"]):
+        grouped = df.groupby(["dataset", "algorithm", "reward_model_name"])
+        
+        for (dataset, algorithm, reward_model), group_data in grouped:
+            row = {
+                "Dataset": dataset,
+                "Algorithm": algorithm,
+                "Reward Model": reward_model
+            }
+            
+            # Add success rate metrics
+            if "top3_avg_eval_success_rate" in df.columns:
+                values = group_data["top3_avg_eval_success_rate"].dropna()
+                
+                if len(values) > 0:
+                    row["Mean"] = values.mean()
+                    row["Std"] = values.std()
+                    row["Min"] = values.min()
+                    row["Max"] = values.max()
+                    row["Count"] = len(values)
+                    
+                    # Format for display
+                    row["Success Rate"] = f"{row['Mean']:.3f}±{row['Std']:.3f} (n={row['Count']})"
+                else:
+                    row["Success Rate"] = "N/A"
+            
+            summary_rows.append(row)
+    
+    # Create summary DataFrame and save to CSV
+    if summary_rows:
+        summary_df = pd.DataFrame(summary_rows)
+        
+        # Sort by dataset, algorithm, and mean success rate (descending)
+        if "Mean" in summary_df.columns:
+            summary_df = summary_df.sort_values(["Dataset", "Algorithm", "Mean"], 
+                                              ascending=[True, True, False])
+        
+        output_path = os.path.join(output_dir, "reward_model_comparison.csv")
+        summary_df.to_csv(output_path, index=False)
+        print(f"Saved reward model comparison CSV to {output_path}")
+        
+        # Create a pivoted version for easier reading
+        if "Success Rate" in summary_df.columns:
+            try:
+                pivot_df = summary_df.pivot(index=["Dataset", "Algorithm"], 
+                                          columns="Reward Model", 
+                                          values="Success Rate")
+                pivot_path = os.path.join(output_dir, "reward_model_comparison_pivot.csv")
+                pivot_df.to_csv(pivot_path)
+                print(f"Saved pivoted reward model comparison CSV to {pivot_path}")
+            except Exception as e:
+                print(f"Could not create pivoted CSV: {e}")
+    
+    return output_dir
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Fetch and analyze wandb runs for IQL policy")
     parser.add_argument("--project", type=str, default="robot_pref", help="wandb project name")
@@ -483,7 +739,7 @@ def parse_args():
     parser.add_argument("--max_runs", type=int, default=None, help="Maximum number of runs to fetch")
     parser.add_argument("--output_dir", type=str, default="analysis", help="Directory to save analysis outputs")
     parser.add_argument("--filter", type=str, default=None, help="JSON string with additional filters")
-    parser.add_argument("--plot", action="store_true", help="Generate algorithm comparison plots")
+    parser.add_argument("--plot", action="store_true", help="Generate comparison plots")
     parser.add_argument("--plot_dir", type=str, default="algorithm_plots", help="Directory to save algorithm comparison plots")
     
     return parser.parse_args()
@@ -556,6 +812,12 @@ def main():
         plot_output_dir = os.path.join(args.output_dir, args.plot_dir)
         plot_algorithm_comparisons(df, plot_output_dir)
         print(f"Plots saved to {plot_output_dir}")
+        
+        # Generate reward model comparison plots
+        print("\nGenerating reward model comparison plots...")
+        reward_model_plot_dir = os.path.join(args.output_dir, "reward_model_plots")
+        plot_reward_model_comparisons(df, reward_model_plot_dir)
+        print(f"Reward model comparison plots saved to {reward_model_plot_dir}")
     
     print(f"\nAnalysis complete. Data saved to {csv_path}")
 

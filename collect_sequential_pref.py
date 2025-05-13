@@ -9,9 +9,13 @@ import sys
 from pathlib import Path
 from tqdm import tqdm
 import matplotlib.pyplot as plt
+from matplotlib.colors import to_rgba
+import matplotlib.gridspec as gridspec
+from mpl_toolkits.mplot3d import Axes3D
 import time
 import hydra
 from omegaconf import DictConfig, OmegaConf
+import matplotlib.animation as animation
 
 # For running in interactive environments
 is_notebook = 'ipykernel' in sys.modules
@@ -35,6 +39,22 @@ from eef_clustering import (
     compute_dtw_distance,
     perform_hierarchical_clustering
 )
+
+# Import models from the modular structure
+from models.reward_models import SegmentRewardModel, EnsembleRewardModel
+
+# Import utility functions from the modular structure
+from utils.dataset_utils import PreferenceDataset, bradley_terry_loss
+from utils.training_utils import train_ensemble_model
+from utils.active_learning_utils import (
+    compute_uncertainty_scores, 
+    select_uncertain_pairs,
+    select_active_preference_query,
+    select_uncertain_pairs_comprehensive
+)
+
+# Import seed utility
+from utils.seed_utils import set_seed
 
 def get_reward_based_preference(data, segment1, segment2):
     """Determine ground truth preference based on cumulative reward.
@@ -134,7 +154,86 @@ def find_similar_segments(segments, query_idx, k=5, distance_matrix=None):
     
     return similar_indices.tolist()
 
-def collect_sequential_preferences(data, segments, segment_indices, n_queries=100, k_augment=5, use_ground_truth=True, distance_matrix=None):
+def train_reward_model_from_preferences(preferences, segment_indices, data, device, 
+                                       state_dim, action_dim, hidden_dims=[256, 256],
+                                       num_epochs=20, use_ensemble=False, num_models=5,
+                                       cfg=None):
+    """Train a reward model from collected preferences.
+    
+    Args:
+        preferences: List of (i, j, pref) preference tuples
+        segment_indices: List of (start_idx, end_idx) for each segment
+        data: TensorDict with observations and actions
+        device: Device to run training on
+        state_dim: Dimension of state space
+        action_dim: Dimension of action space
+        hidden_dims: Hidden dimensions for the model
+        num_epochs: Number of epochs to train
+        use_ensemble: Whether to train an ensemble of models
+        num_models: Number of models in the ensemble
+        
+    Returns:
+        Trained reward model (either SegmentRewardModel or EnsembleRewardModel)
+    """
+    print(f"Training {'ensemble' if use_ensemble else 'single'} reward model on {len(preferences)} preferences...")
+    
+    # Create segment pairs and preferences for training
+    segment_pairs = [(i, j) for i, j, _ in preferences]
+    preference_labels = [pref for _, _, pref in preferences]
+    
+    # Create dataset
+    from torch.utils.data import Dataset, DataLoader, random_split
+    
+    # Create a preference dataset
+    dataset = PreferenceDataset(data, segment_pairs, segment_indices, preference_labels)
+    
+    # Create train/val split
+    train_size = int(0.8 * len(dataset))
+    val_size = len(dataset) - train_size
+    
+    train_dataset, val_dataset = random_split(
+        dataset, 
+        [train_size, val_size],
+        generator=torch.Generator().manual_seed(42)
+    )
+    
+    train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=32)
+    
+    if use_ensemble:
+        # Train an ensemble of models using the new utility function
+        model = train_ensemble_model(
+            state_dim,
+            action_dim,
+            segment_pairs,
+            segment_indices,
+            preference_labels,
+            data,
+            device,
+            num_models=num_models,
+            hidden_dims=hidden_dims,
+            num_epochs=num_epochs
+        )
+    else:
+        # Train a single model
+        model = SegmentRewardModel(state_dim, action_dim, hidden_dims)
+        
+        # Use the train_reward_model from utils.training_utils
+        from utils.training_utils import train_reward_model
+        model, _, _ = train_reward_model(
+            model, 
+            train_loader, 
+            val_loader, 
+            device, 
+            num_epochs=num_epochs, 
+            lr=1e-4 if cfg is None or not hasattr(cfg, 'model') else cfg.model.lr
+        )
+    
+    return model
+
+def collect_sequential_preferences(data, segments, segment_indices, n_queries=100, k_augment=5, 
+                                 use_ground_truth=True, distance_matrix=None, 
+                                 device=None, cfg=None):
     """Collect sequential preferences with similarity-based augmentation.
     
     Args:
@@ -145,11 +244,17 @@ def collect_sequential_preferences(data, segments, segment_indices, n_queries=10
         k_augment: Number of similar segments to use for augmentation
         use_ground_truth: If True, use ground truth rewards for preferences
         distance_matrix: Pre-computed distance matrix (optional)
+        active_selection: If True, use active learning to select queries
+        uncertainty_method: Method for uncertainty estimation ("entropy", "disagreement", "random")
+        reward_model_path: Path to pre-trained reward model for active selection
+        device: Device to run computation on
+        retrain_interval: How often to retrain the model (in number of preferences)
         
     Returns:
-        tuple: (all_preferences, distance_matrix)
+        tuple: (all_preferences, distance_matrix, similar_segments_info)
             all_preferences: List of collected preferences [(i, j, pref), ...]
             distance_matrix: Computed or provided distance matrix
+            similar_segments_info: List of dictionaries with info about similar segments for each preference
     """
     n_segments = len(segments)
     print(f"Collecting {n_queries} sequential preferences with k={k_augment} augmentations each...")
@@ -170,17 +275,102 @@ def collect_sequential_preferences(data, segments, segment_indices, n_queries=10
     else:
         print("Using provided distance matrix")
     
+    # Get active learning parameters from config
+    active_learning_enabled = False
+    uncertainty_method = "entropy"
+    reward_model_path = None
+    retrain_interval = 10
+    
+    if cfg and hasattr(cfg, 'active_learning'):
+        active_learning_enabled = getattr(cfg.active_learning, 'enabled', False)
+        uncertainty_method = getattr(cfg.active_learning, 'uncertainty_method', "entropy")
+        reward_model_path = getattr(cfg.active_learning, 'reward_model_path', None)
+        retrain_interval = getattr(cfg.active_learning, 'retrain_interval', 10)
+    
+    # Initialize reward model for active selection if requested
+    reward_model = None
+    if active_learning_enabled:
+        if device is None:
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        
+        # Get observation and action dimensions for model initialization
+        obs_key = "obs" if "obs" in data else "state"
+        state_dim = data[obs_key].shape[1]
+        action_dim = data["action"].shape[1]
+        
+        # Determine if we should use an ensemble
+        use_ensemble = uncertainty_method == "disagreement"
+        num_models = cfg.active_learning.num_models if cfg and hasattr(cfg, 'active_learning') else 5
+        
+        if reward_model_path:
+            print(f"Loading initial reward model from {reward_model_path} for active selection")
+            
+            # Load the reward model based on uncertainty method
+            if use_ensemble:
+                reward_model = EnsembleRewardModel(state_dim, action_dim, num_models=num_models)
+                # TODO: Implement proper loading of ensemble model if needed
+                print("Warning: Loading ensemble models from file not implemented. Initializing new ensemble.")
+            else:
+                reward_model = SegmentRewardModel(state_dim, action_dim)
+                reward_model.load_state_dict(torch.load(reward_model_path, map_location=device))
+            
+            reward_model = reward_model.to(device)
+            reward_model.eval()
+        else:
+            print(f"No reward model provided. Will train from scratch after collecting initial preferences.")
+    
     # Collect preferences
     preferences = []
     augmented_preferences = []
+    similar_segments_info = []  # Store info about similar segments for visualization
     
     # Keep track of compared pairs to avoid duplicates
     compared_pairs = set()
     
+    # For active learning, we need an initial set of preferences before training the model
+    initial_size = cfg.active_learning.initial_size if cfg and hasattr(cfg, 'active_learning') else retrain_interval
+    initial_random_queries = min(initial_size, n_queries) if active_learning_enabled else 0
+    
     with tqdm(total=n_queries, desc="Collecting preferences") as pbar:
         while len(preferences) < n_queries:
-            # Sample two different random segments
-            i, j = random.sample(range(n_segments), 2)
+            # Determine if we should use active selection for this query
+            use_active = active_learning_enabled and len(preferences) >= initial_random_queries and reward_model is not None
+            
+            # Select segment pair based on active selection or random sampling
+            if use_active:
+                # Get the number of candidates to consider
+                n_candidates = 100
+                use_random_sampling = True
+                
+                # Extract configuration parameters if available
+                if cfg and hasattr(cfg, 'active_learning'):
+                    if hasattr(cfg.active_learning, 'n_candidates'):
+                        n_candidates = cfg.active_learning.n_candidates
+                    if hasattr(cfg.active_learning, 'use_random_sampling'):
+                        use_random_sampling = cfg.active_learning.use_random_sampling
+                
+                # Use the unified function for active selection
+                ranked_pairs = select_uncertain_pairs_comprehensive(
+                    reward_model,
+                    segments,
+                    segment_indices,
+                    data,
+                    device,
+                    uncertainty_method=uncertainty_method,
+                    max_pairs=1,
+                    use_random_candidate_sampling=use_random_sampling,
+                    n_candidates=n_candidates
+                )
+                
+                # Get the most uncertain pair
+                if ranked_pairs:
+                    i, j = ranked_pairs[0]
+                else:
+                    # Fallback to random selection if no pairs were selected
+                    i, j = random.sample(range(n_segments), 2)
+            else:
+                # Sample two different random segments
+                i, j = random.sample(range(n_segments), 2)
             
             # Skip if this pair has already been compared
             if (i, j) in compared_pairs or (j, i) in compared_pairs:
@@ -213,39 +403,93 @@ def collect_sequential_preferences(data, segments, segment_indices, n_queries=10
             preferences.append((i, j, pref))
             pbar.update(1)
             
+            # Initialize similar segments info for this preference
+            similar_info = {
+                'original_preference': (i, j, pref),
+                'similar_to_i': [],
+                'similar_to_j': [],
+                'augmented_preferences': []  # Track which augmentations belong to this preference
+            }
+            
             # Augment preferences based on similarity
             if k_augment > 0:
                 # If segment i is preferred
                 if pref == 1:
                     # Find segments similar to segment i
                     similar_to_i = find_similar_segments(segments, i, k=k_augment, distance_matrix=distance_matrix)
+                    similar_info['similar_to_i'] = similar_to_i
                     
                     # All segments similar to i are also preferred over j
                     for sim_idx in similar_to_i:
-                        augmented_preferences.append((sim_idx, j, 1))
+                        aug_pref = (sim_idx, j, 1)
+                        augmented_preferences.append(aug_pref)
+                        similar_info['augmented_preferences'].append(aug_pref)
                     
                     # Find segments similar to segment j
                     similar_to_j = find_similar_segments(segments, j, k=k_augment, distance_matrix=distance_matrix)
+                    similar_info['similar_to_j'] = similar_to_j
                     
                     # Segment i is preferred over all segments similar to j
                     for sim_idx in similar_to_j:
-                        augmented_preferences.append((i, sim_idx, 1))
+                        aug_pref = (i, sim_idx, 1)
+                        augmented_preferences.append(aug_pref)
+                        similar_info['augmented_preferences'].append(aug_pref)
                 
                 # If segment j is preferred
                 elif pref == 2:
                     # Find segments similar to segment j
                     similar_to_j = find_similar_segments(segments, j, k=k_augment, distance_matrix=distance_matrix)
+                    similar_info['similar_to_j'] = similar_to_j
                     
                     # All segments similar to j are also preferred over i
                     for sim_idx in similar_to_j:
-                        augmented_preferences.append((i, sim_idx, 2))
+                        aug_pref = (i, sim_idx, 2)
+                        augmented_preferences.append(aug_pref)
+                        similar_info['augmented_preferences'].append(aug_pref)
                     
                     # Find segments similar to segment i
                     similar_to_i = find_similar_segments(segments, i, k=k_augment, distance_matrix=distance_matrix)
+                    similar_info['similar_to_i'] = similar_to_i
                     
                     # Segment j is preferred over all segments similar to i
                     for sim_idx in similar_to_i:
-                        augmented_preferences.append((sim_idx, j, 2))
+                        aug_pref = (sim_idx, j, 2)
+                        augmented_preferences.append(aug_pref)
+                        similar_info['augmented_preferences'].append(aug_pref)
+            
+            # Store similar segments info
+            similar_segments_info.append(similar_info)
+            
+            # Retrain the reward model periodically if using active selection
+            if active_learning_enabled and len(preferences) % retrain_interval == 0:
+                print(f"\nRetraining reward model with {len(preferences)} preferences...")
+                
+                # Get observation and action dimensions
+                obs_key = "obs" if "obs" in data else "state"
+                state_dim = data[obs_key].shape[1]
+                action_dim = data["action"].shape[1]
+                
+                # Train a new model using all collected preferences
+                use_ensemble = uncertainty_method == "disagreement"
+                num_models = 5 if use_ensemble else 1
+                
+                # Train the model
+                reward_model = train_reward_model_from_preferences(
+                    preferences,
+                    segment_indices,
+                    data,
+                    device,
+                    state_dim,
+                    action_dim,
+                    hidden_dims=cfg.model.hidden_dims if hasattr(cfg, 'model') else [256, 256],
+                    num_epochs=cfg.training.num_epochs if hasattr(cfg, 'training') else 10,
+                    use_ensemble=use_ensemble,
+                    num_models=num_models,
+                    cfg=cfg
+                )
+                
+                # Make sure the model is in evaluation mode
+                reward_model.eval()
     
     print(f"Collected {len(preferences)} direct preferences")
     print(f"Generated {len(augmented_preferences)} augmented preferences")
@@ -253,7 +497,7 @@ def collect_sequential_preferences(data, segments, segment_indices, n_queries=10
     # Combine direct and augmented preferences
     all_preferences = preferences + augmented_preferences
     
-    return all_preferences, distance_matrix
+    return all_preferences, distance_matrix, similar_segments_info
 
 def verify_augmented_preferences(data, segment_indices, preferences, augmented_preferences):
     """Verify augmented preferences against ground truth.
@@ -379,9 +623,412 @@ def create_preference_dataset(data, segment_indices, preferences, output_file):
     
     return preference_dataset
 
+def create_grid_video(images, segments_info, output_file, title=None, grid_size=None):
+    """Create a grid video showing multiple segments at once.
+    
+    Args:
+        images: Tensor of all observation images
+        segments_info: List of dicts with keys 'indices', 'title', 'is_preferred', 'border_color', 'verdict'
+        output_file: Path to save the output video
+        title: Optional title for the video
+        grid_size: Optional tuple (rows, cols) specifying the grid layout
+        
+    Returns:
+        str: Path to the saved video
+    """
+    # Calculate grid dimensions
+    n_segments = len(segments_info)
+    
+    if grid_size is None:
+        # Auto-calculate grid size
+        grid_size = int(np.ceil(np.sqrt(n_segments)))
+        rows = grid_size
+        cols = grid_size
+    else:
+        # Use provided grid size
+        rows, cols = grid_size
+    
+    # Extract image sequences for all segments
+    sequences = []
+    max_length = 0
+    
+    for segment in segments_info:
+        start, end = segment['indices']
+        seq = images[start:end+1]
+        sequences.append(seq)
+        max_length = max(max_length, len(seq))
+    
+    # Create figure for video
+    fig = plt.figure(figsize=(cols*4, rows*4))
+    gs = gridspec.GridSpec(rows, cols, figure=fig)
+    
+    # Define colors for preferred and non-preferred segments
+    preferred_color = 'green'
+    non_preferred_color = 'red'
+    
+    # Set up subplots for each segment
+    axes = []
+    img_objects = []
+    
+    for i, (segment, seq) in enumerate(zip(segments_info, sequences)):
+        row = i // cols
+        col = i % cols
+        
+        # Create subplot
+        ax = fig.add_subplot(gs[row, col])
+        axes.append(ax)
+        
+        # Set title with verdict if available
+        title_text = segment['title']
+        if 'verdict' in segment and segment['verdict']:
+            title_text = f"{title_text} {segment['verdict']}"
+        ax.set_title(title_text)
+        
+        # Set up initial image
+        img = ax.imshow(seq[0])
+        img_objects.append(img)
+        
+        # Turn off axis ticks
+        ax.set_xticks([])
+        ax.set_yticks([])
+        
+        # Set border color based on preference
+        border_color = segment['border_color']
+        if border_color is None:
+            border_color = preferred_color if segment['is_preferred'] else non_preferred_color
+            
+        for spine in ax.spines.values():
+            spine.set_edgecolor(border_color)
+            spine.set_linewidth(3)
+            spine.set_visible(True)
+    
+    # Add a global title
+    if title:
+        suptitle = fig.suptitle(f"{title} - Frame: 0", fontsize=16)
+    else:
+        suptitle = fig.suptitle(f"Frame: 0", fontsize=16)
+    
+    # Adjust layout
+    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+    
+    # Function to update the figure for animation
+    def update(frame):
+        updated_artists = [suptitle]
+        
+        # Update frame counter in title
+        if title:
+            suptitle.set_text(f"{title} - Frame: {frame}")
+        else:
+            suptitle.set_text(f"Frame: {frame}")
+        
+        # Update each image
+        for i, (img, seq) in enumerate(zip(img_objects, sequences)):
+            if frame < len(seq):
+                img.set_array(seq[frame])
+            updated_artists.append(img)
+        
+        return updated_artists
+    
+    # Create animation
+    anim = animation.FuncAnimation(fig, update, frames=max_length, interval=100, blit=True)
+    
+    # Save as video file
+    try:
+        writer = animation.FFMpegWriter(fps=5, metadata=dict(artist='Robot Pref'))
+        anim.save(output_file, writer=writer)
+        print(f"Saved grid video to {output_file}")
+    except Exception as e:
+        print(f"Error saving video: {e}")
+        # As a fallback, save a few key frames as images
+        os.makedirs(os.path.dirname(output_file), exist_ok=True)
+        base_path = os.path.splitext(output_file)[0]
+        for frame in [0, max_length//4, max_length//2, 3*max_length//4, max_length-1]:
+            if frame < max_length:
+                update(frame)
+                plt.savefig(f"{base_path}_frame{frame}.png")
+                print(f"Saved frame {frame} to {base_path}_frame{frame}.png")
+    
+    plt.close(fig)
+    return output_file
+
+def create_augmented_grid_video(images, original_pair, augmented_pairs, segment_indices, output_file, data=None, distance_matrix=None, title=None, max_augmentations=10):
+    """Create a grid video showing original preference pair and multiple augmented trajectories.
+    
+    Args:
+        images: Tensor of all observation images
+        original_pair: Tuple (i, j, pref) for the original preference
+        augmented_pairs: List of (i, j, pref) tuples for augmented preferences
+        segment_indices: List of (start_idx, end_idx) for each segment
+        output_file: Path to save the output video
+        data: TensorDict with observations and rewards
+        distance_matrix: Optional distance matrix for showing distances in titles
+        title: Optional title for the video
+        max_augmentations: Maximum number of augmentations to show
+        
+    Returns:
+        str: Path to the saved video
+    """
+    # Extract original pair info
+    i, j, pref = original_pair
+    
+    # Limit the number of augmented pairs to show
+    augmented_pairs = augmented_pairs[:min(max_augmentations, len(augmented_pairs))]
+    
+    # Calculate total number of rows (original pair + augmented pairs)
+    n_rows = 1 + len(augmented_pairs)
+    
+    print(f"Creating grid video with {n_rows} rows (1 original + {len(augmented_pairs)} augmentations)")
+    
+    # Create output directory for videos
+    os.makedirs(os.path.dirname(output_file), exist_ok=True)
+    
+    # Collect all segment indices and metadata
+    all_segments = []
+    
+    # Get ground truth preference based on reward
+    gt_pref = None
+    if "reward" in data:
+        gt_pref = get_reward_based_preference(data, segment_indices[i], segment_indices[j])
+    
+    # Create GT preference label
+    gt_label = ""
+    if gt_pref is not None:
+        if gt_pref == 1:
+            gt_label = "GT preference: Left > Right"
+        elif gt_pref == 2:
+            gt_label = "GT preference: Right > Left"
+        else:
+            gt_label = "GT preference: Equal"
+    
+    # Original preference pair (first row)
+    all_segments.append({
+        'indices': segment_indices[i],
+        'title': f"Original Seg {i}\n{gt_label}",
+        'is_preferred': pref == 1,
+        'border_color': 'green' if pref == 1 else 'red',
+        'verdict': ""
+    })
+    
+    all_segments.append({
+        'indices': segment_indices[j],
+        'title': f"Original Seg {j}",
+        'is_preferred': pref == 2,
+        'border_color': 'green' if pref == 2 else 'red',
+        'verdict': ""
+    })
+    
+    # Add augmented pairs (each pair gets its own row)
+    for aug_idx, (aug_i, aug_j, aug_pref) in enumerate(augmented_pairs):
+        # Get augmented preference label
+        aug_label = ""
+        if aug_pref == 1:
+            aug_label = "Augmented preference: Left > Right"
+        elif aug_pref == 2:
+            aug_label = "Augmented preference: Right > Left"
+        
+        # Get ground truth preference for this augmented pair
+        aug_gt_pref = None
+        aug_gt_label = ""
+        if "reward" in data:
+            aug_gt_pref = get_reward_based_preference(data, segment_indices[aug_i], segment_indices[aug_j])
+            if aug_gt_pref == 1:
+                aug_gt_label = "GT preference: Left > Right"
+            elif aug_gt_pref == 2:
+                aug_gt_label = "GT preference: Right > Left"
+            elif aug_gt_pref == 0:
+                aug_gt_label = "GT preference: Equal"
+        
+        # Combine labels
+        combined_label = aug_label
+        if aug_gt_label:
+            combined_label += f"\n{aug_gt_label}"
+            
+        # Check if augmented preference matches ground truth
+        matches_gt = (aug_pref == aug_gt_pref) if aug_gt_pref not in [None, 0] else None
+        verdict = ""
+        if matches_gt is not None:
+            verdict = "✓" if matches_gt else "✗"
+        
+        # Check which segment is new/augmented
+        is_i_augmented = (aug_i != i and aug_i != j)
+        is_j_augmented = (aug_j != i and aug_j != j)
+        
+        # Get distances if distance matrix is available
+        dist_i_str = ""
+        dist_j_str = ""
+        if distance_matrix is not None:
+            # Only show distance for the augmented segment
+            if is_i_augmented:
+                # Get distance from original segment to augmented segment
+                if aug_i != i:  # If this is an augmentation of i
+                    dist_i = distance_matrix[i, aug_i]
+                    dist_i_str = f" (d={dist_i:.2f})"
+            if is_j_augmented:
+                # Get distance from original segment to augmented segment
+                if aug_j != j:  # If this is an augmentation of j
+                    dist_j = distance_matrix[j, aug_j]
+                    dist_j_str = f" (d={dist_j:.2f})"
+        
+        # Add first segment of augmented pair
+        all_segments.append({
+            'indices': segment_indices[aug_i],
+            'title': f"Aug {aug_idx+1}: Seg {aug_i}{dist_i_str}\n{combined_label} {verdict}",
+            'is_preferred': aug_pref == 1,
+            'border_color': 'green' if aug_pref == 1 else 'red',
+            'verdict': ""
+        })
+        
+        # Add second segment of augmented pair (without aug_label)
+        all_segments.append({
+            'indices': segment_indices[aug_j],
+            'title': f"Aug {aug_idx+1}: Seg {aug_j}{dist_j_str}",
+            'is_preferred': aug_pref == 2,
+            'border_color': 'green' if aug_pref == 2 else 'red',
+            'verdict': ""
+        })
+    
+    # Create the grid video
+    video_path = create_grid_video(
+        images,
+        all_segments,
+        output_file=output_file,
+        title=title,
+        grid_size=(n_rows, 2)  # Each row has 2 columns
+    )
+    
+    print(f"Created grid video: {video_path}")
+    return video_path
+
+def visualize_all_augmentations(data, segments, segment_indices, direct_preferences, augmented_preferences, output_dir, similar_segments_info=None, distance_matrix=None, max_visualizations=3, max_augmentations=10):
+    """Create visualizations showing original preference pairs and their augmentations.
+    
+    Args:
+        data: TensorDict with observations
+        segments: List of trajectory segments
+        segment_indices: List of (start_idx, end_idx) for each segment
+        direct_preferences: List of (i, j, pref) tuples for direct preferences
+        augmented_preferences: List of (i, j, pref) tuples for augmented preferences
+        output_dir: Directory to save the visualizations
+        similar_segments_info: List of dictionaries with info about similar segments for each preference
+        distance_matrix: Optional distance matrix for showing distances in titles
+        max_visualizations: Maximum number of preference pairs to visualize
+        max_augmentations: Maximum number of augmentations to show per preference pair
+        
+    Returns:
+        list: Paths to the created visualizations
+    """
+    # Check if we have image data
+    if "image" not in data:
+        print("WARNING: No image data found in dataset. Cannot create grid visualizations.")
+        return []
+    
+    # Get observation images
+    images = data["image"].cpu()
+    
+    # Create output directory for videos
+    vis_dir = os.path.join(output_dir, "augmentation_visualizations")
+    os.makedirs(vis_dir, exist_ok=True)
+    
+    # Select preference pairs to visualize
+    if similar_segments_info:
+        print(f"\nUsing similar_segments_info to group augmented preferences")
+        # Use the similar_segments_info to get the grouping
+        if len(similar_segments_info) > max_visualizations:
+            # Randomly select some preference pairs
+            selected_indices = random.sample(range(len(similar_segments_info)), max_visualizations)
+        else:
+            selected_indices = list(range(len(similar_segments_info)))
+    else:
+        print("\nWARNING: No similar_segments_info provided, falling back to heuristic grouping")
+        # Group augmented preferences by original preference pair
+        augmentation_groups = {}
+        
+        # First, identify which segments are used in direct preferences
+        segments_in_direct = set()
+        for i, j, _ in direct_preferences:
+            segments_in_direct.add(i)
+            segments_in_direct.add(j)
+        
+        print(f"DEBUG: Found {len(segments_in_direct)} segments in direct preferences")
+        print(f"DEBUG: Total augmented preferences: {len(augmented_preferences)}")
+        
+        # Group augmented preferences by which direct preference they came from
+        for aug_idx, (aug_i, aug_j, aug_pref) in enumerate(augmented_preferences):
+            found_match = False
+            # Try to find which direct preference this augmentation belongs to
+            for dir_idx, (dir_i, dir_j, _) in enumerate(direct_preferences):
+                # Check if this augmentation involves one of the segments from the direct preference
+                if aug_i == dir_i or aug_j == dir_j:
+                    if dir_idx not in augmentation_groups:
+                        augmentation_groups[dir_idx] = []
+                    augmentation_groups[dir_idx].append((aug_i, aug_j, aug_pref))
+                    found_match = True
+                    break
+            
+            if not found_match:
+                print(f"DEBUG: Augmentation {aug_idx} ({aug_i}, {aug_j}) not matched to any direct preference")
+        
+        print(f"DEBUG: Created {len(augmentation_groups)} augmentation groups")
+        for group_idx, augs in augmentation_groups.items():
+            print(f"DEBUG: Group {group_idx} has {len(augs)} augmentations")
+        
+        # Choose random preference pairs to visualize
+        if len(augmentation_groups) > max_visualizations:
+            selected_indices = random.sample(list(augmentation_groups.keys()), max_visualizations)
+        else:
+            selected_indices = list(augmentation_groups.keys())
+    
+    print(f"Creating visualizations for {len(selected_indices)} randomly selected preference pairs")
+    
+    # Create visualizations
+    visualization_paths = []
+    
+    for idx in selected_indices:
+        if similar_segments_info:
+            # Get info from similar_segments_info
+            similar_info = similar_segments_info[idx]
+            original_pair = similar_info['original_preference']
+            augmented_pairs = similar_info.get('augmented_preferences', [])
+        else:
+            # Get original preference pair
+            original_pair = direct_preferences[idx]
+            
+            # Get augmented preferences for this pair
+            augmented_pairs = augmentation_groups.get(idx, [])
+        
+        if not augmented_pairs:
+            print(f"DEBUG: No augmented pairs found for preference {idx}, skipping")
+            continue
+            
+        # Create output file path
+        output_file = os.path.join(vis_dir, f"augmentations_for_pref_{idx}.mp4")
+        
+        # Create title
+        i, j, pref = original_pair
+        title = f"Preference {idx+1}: {'Seg ' + str(i) + ' > ' + str(j) if pref == 1 else 'Seg ' + str(j) + ' > ' + str(i)}"
+        
+        print(f"DEBUG: Creating visualization for preference {idx} with {len(augmented_pairs)} augmentations")
+        
+        # Create grid visualization
+        video_path = create_augmented_grid_video(
+            images,
+            original_pair,
+            augmented_pairs,
+            segment_indices,
+            output_file,
+            data=data,
+            distance_matrix=distance_matrix,
+            title=title,
+            max_augmentations=max_augmentations
+        )
+        
+        visualization_paths.append(video_path)
+    
+    return visualization_paths
+
 @hydra.main(config_path="config", config_name="sequential_preferences", version_base=None)
 def main(cfg: DictConfig):
-    """Run sequential preference collection with Hydra configuration."""
+    """Main function for collecting sequential preferences with similarity-based augmentation."""
     print("\n" + "="*50)
     print("Collecting sequential preferences with similarity-based augmentation")
     print("="*50)
@@ -392,15 +1039,10 @@ def main(cfg: DictConfig):
     
     # Set random seed for reproducibility
     random_seed = cfg.random_seed
-    random.seed(random_seed)
-    np.random.seed(random_seed)
-    torch.manual_seed(random_seed)
-    print(f"Using random seed: {random_seed}")
+    set_seed(random_seed)
+    print(f"Global random seed set to {random_seed}")
     
-    # Create output directory
-    os.makedirs(cfg.output.output_dir, exist_ok=True)
-    
-    # Extract parameters from config
+    # Extract configuration parameters
     data_path = cfg.data.data_path
     preprocessed_data = cfg.data.preprocessed_data
     segment_length = cfg.data.segment_length
@@ -410,8 +1052,56 @@ def main(cfg: DictConfig):
     n_queries = cfg.preferences.n_queries
     k_augment = cfg.preferences.k_augment
     use_ground_truth = cfg.preferences.use_ground_truth
+    use_dtw_distance = cfg.preferences.use_dtw_distance
+    max_dtw_segments = cfg.preferences.max_dtw_segments
+        
+    # Setup device
+    device = None
+    if hasattr(cfg, 'active_learning') and getattr(cfg.active_learning, 'enabled', False):
+        if cfg.hardware.use_cpu:
+            device = torch.device("cpu")
+        else:
+            device = torch.device(f"cuda:{cfg.hardware.gpu}" if torch.cuda.is_available() else "cpu")
+        print(f"Using device: {device} for active learning")
     
-    output_dir = cfg.output.output_dir
+    # Extract visualization parameters
+    visualize = cfg.visualize
+    visualize_augmented = cfg.visualize_augmented
+    max_visualizations = cfg.max_visualizations
+    max_augmentations = cfg.max_augmentations
+    
+    # Output parameters
+    base_output_dir = cfg.output.output_dir
+    
+    # Create a more specific output directory with parameters
+    dir_name = f"n{n_queries}_k{k_augment}_seed{random_seed}"
+    
+    # Check if active learning is enabled
+    active_learning_enabled = False
+    uncertainty_method = "entropy"
+    if hasattr(cfg, 'active_learning'):
+        active_learning_enabled = getattr(cfg.active_learning, 'enabled', False)
+        uncertainty_method = getattr(cfg.active_learning, 'uncertainty_method', "entropy")
+        
+    if active_learning_enabled:
+        dir_name += f"_active_{uncertainty_method}"
+        
+    if max_dtw_segments is not None:
+        dir_name += f"_dtw{max_dtw_segments}"
+    output_dir = os.path.join(base_output_dir, dir_name)
+    os.makedirs(output_dir, exist_ok=True)
+    
+    print(f"Results will be saved to: {output_dir}")
+    
+    # Initialize wandb if enabled
+    if cfg.wandb.use_wandb:
+        import wandb
+        wandb.init(
+            project="robot-preferences",
+            tags=cfg.wandb.tags,
+            notes=cfg.wandb.notes,
+            config=OmegaConf.to_container(cfg, resolve=True)
+        )
     
     # Load data
     if preprocessed_data:
@@ -481,8 +1171,8 @@ def main(cfg: DictConfig):
         distance_matrix = None
     
     # Check if we should use DTW distance matrix from clustering
-    use_dtw_distance = cfg.preferences.get('use_dtw_distance', True)
-    max_dtw_segments = cfg.preferences.get('max_dtw_segments', None)
+    use_dtw_distance = getattr(cfg.preferences, 'use_dtw_distance', True)
+    max_dtw_segments = getattr(cfg.preferences, 'max_dtw_segments', None)
     
     # Compute DTW distance matrix if needed and not already available
     if use_dtw_distance and distance_matrix is None:
@@ -500,14 +1190,16 @@ def main(cfg: DictConfig):
             segment_indices = [segment_indices[idx_mapping[i]] for i in range(len(idx_mapping))]
     
     # Collect sequential preferences with augmentation
-    all_preferences, distance_matrix = collect_sequential_preferences(
+    all_preferences, distance_matrix, similar_segments_info = collect_sequential_preferences(
         data, 
         segments, 
         segment_indices, 
         n_queries=n_queries, 
         k_augment=k_augment,
         use_ground_truth=use_ground_truth,
-        distance_matrix=distance_matrix
+        distance_matrix=distance_matrix,
+        device=device,
+        cfg=cfg
     )
     
     # Separate direct and augmented preferences
@@ -525,6 +1217,27 @@ def main(cfg: DictConfig):
     else:
         verification_stats = None
     
+    # Create visualizations for a few selected preference pairs
+    visualization_paths = []
+    if visualize and visualize_augmented and len(augmented_preferences) > 0:
+        print("\nCreating augmentation grid visualizations...")
+        # Create grid visualizations showing original preferences and their augmentations
+        visualization_paths = visualize_all_augmentations(
+            data, 
+            segments, 
+            segment_indices, 
+            direct_preferences, 
+            augmented_preferences, 
+            output_dir,
+            similar_segments_info=similar_segments_info,
+            distance_matrix=distance_matrix,
+            max_visualizations=max_visualizations,
+            max_augmentations=max_augmentations
+        )
+        
+        if visualization_paths:
+            print(f"Created {len(visualization_paths)} augmentation grid videos")
+    
     # Save raw preferences
     preferences_file = os.path.join(output_dir, "raw_preferences.pkl")
     
@@ -534,7 +1247,9 @@ def main(cfg: DictConfig):
         'verification_stats': verification_stats,
         'distance_matrix': distance_matrix,
         'segments': segments,
-        'segment_indices': segment_indices
+        'segment_indices': segment_indices,
+        'similar_segments_info': similar_segments_info,
+        'visualization_paths': visualization_paths
     }
     
     torch.save(raw_data, preferences_file)
@@ -561,6 +1276,12 @@ def main(cfg: DictConfig):
         print(f"  Incorrect: {verification_stats['incorrect']}")
         print(f"  Equal: {verification_stats['equal']}")
         print(f"  Accuracy: {verification_stats['accuracy']:.2%}")
+    
+    # Print visualization summary if created
+    if visualization_paths:
+        print("\nCreated visualizations:")
+        for path in visualization_paths:
+            print(f"  {path}")
     
     return preference_dataset
 
