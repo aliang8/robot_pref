@@ -64,31 +64,25 @@ class MetaWorldEnvCreator:
 class RobomimicEnvCreator:
     """A picklable environment creator for Robomimic environments."""
     
-    def __init__(self, data_path):
+    def __init__(self, env_name="lift"):
         """Initialize the creator with the dataset name."""
-        self.data_path = data_path
+        self.env_name = env_name
 
     def __call__(self):
         """Create a new environment with a random seed."""
         # Generate a unique seed each time this function is called
         unique_seed = int(time.time() * 1000) % 100000 + random.randint(0, 10000)
-        return get_robomimic_env(self.data_path, seed=unique_seed)
+        return get_robomimic_env(self.env_name, seed=unique_seed)
 
 def get_robomimic_env(
-    data_path,
+    env_name,
     render=True,
     render_offscreen=True,
     use_image_obs=True,
     base_path="/scr/matthewh6/robomimic/robomimic/datasets",
     seed=42,
 ):
-    # dataset_name = Path(data_path).stem
-    # type, hdf5_type = dataset_name.split("_", 1)
-    # task = Path(data_path).parent.stem
-
-    # dataset_path = f"{base_path}/{task}/{type}/{hdf5_type}_v15.hdf5"
-    # TODO
-    dataset_path="/scr/matthewh6/robomimic/robomimic/datasets/lift/mg/demo_v15.hdf5"
+    dataset_path = f"{base_path}/{env_name}/mg/demo_v15.hdf5"
     env_meta = FileUtils.get_env_metadata_from_dataset(dataset_path)
 
     obs_modality_dict = {

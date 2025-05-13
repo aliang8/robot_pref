@@ -12,6 +12,11 @@ data:
   reward_model_path: "/scr/matthewh6/robot_pref/reward_model/state_action_reward_model.pt"
   max_segments: 0
   reward_batch_size: 32
+  use_ground_truth: false  # Set to true to use ground truth rewards instead of reward model
+  scale_rewards: false     # Set to true to scale rewards to min/max range
+  reward_min: -1.0         # Minimum value for scaled rewards
+  reward_max: 1.0          # Maximum value for scaled rewards
+  env_name: "robomimic-lift"  # Exact name of the RoboMimic environment
 
 # Model architecture
 model:
@@ -24,7 +29,7 @@ iql:
   critic_learning_rate: 1e-4
   batch_size: 256
   gamma: 0.99
-tau: 0.005
+  tau: 0.005
   n_critics: 2
   expectile: 0.7
   weight_temp: 3.0

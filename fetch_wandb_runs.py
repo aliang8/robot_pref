@@ -587,8 +587,10 @@ def plot_reward_model_comparisons(df, output_dir="reward_model_plots"):
                 # Sort by mean performance (descending)
                 stats = stats.sort_values("mean", ascending=False)
                 
-                # Set up the figure - wider for many reward models
-                plt.figure(figsize=(max(12, len(reward_models)*1.5), 6))
+                # Set up the figure - adjust height based on number of reward models for better x-label spacing
+                fig_width = max(12, len(reward_models)*1.5)
+                fig_height = 8  # Increased height to accommodate x-labels
+                plt.figure(figsize=(fig_width, fig_height))
                 
                 # Create bar plot with error bars
                 ax = sns.barplot(
@@ -625,7 +627,8 @@ def plot_reward_model_comparisons(df, output_dir="reward_model_plots"):
                 plt.xlabel("Reward Model")
                 
                 # Rotate x-axis labels for better readability with long reward model names
-                plt.xticks(rotation=45, ha='right')
+                plt.xticks(rotation=15, ha='right')
+                plt.subplots_adjust(bottom=0.3)
                 
                 # Add gridlines for readability
                 plt.grid(axis='y', linestyle='--', alpha=0.7)
@@ -634,10 +637,10 @@ def plot_reward_model_comparisons(df, output_dir="reward_model_plots"):
                 max_value = stats["mean"].max() + stats["std"].max()
                 plt.ylim(0, min(1.0, max_value * 1.2))
                 
-                # Save the figure
+                # Save the figure with tight layout and extra bottom padding
                 safe_dataset = str(dataset).replace("/", "_")
                 safe_algorithm = str(algorithm).replace("/", "_")
-                plt.tight_layout()
+                plt.tight_layout(pad=2.0, rect=[0, 0.15, 1, 0.95])  # Add extra padding at bottom
                 output_path = os.path.join(output_dir, f"{safe_dataset}_{safe_algorithm}_reward_model_comparison.png")
                 plt.savefig(output_path, dpi=300, bbox_inches='tight')
                 print(f"Saved reward model comparison plot to {output_path}")

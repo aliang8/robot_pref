@@ -32,7 +32,7 @@ hardware:
 
 # Output parameters
 output:
-  output_dir: /scr/aliang80/robot_pref/results/reward_model
+  output_dir: results/reward_model
   
 # Wandb configuration
 wandb:

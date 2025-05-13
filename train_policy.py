@@ -400,12 +400,10 @@ def main(cfg: DictConfig):
             # Fallback to a default environment name if not specified
             env_name = "assembly-v2-goal-observable"
             print(f"No environment name specified in config. Using default: {env_name}")
-        
+
         if "metaworld" in cfg.data.data_path:
-            # Create an environment creator that will generate different seeds for each call
-            env_creator = MetaWorldEnvCreator(dataset_name)
+            env_creator = MetaWorldEnvCreator(env_name)
         elif "robomimic" in cfg.data.data_path:
-            # Create an environment creator that will generate different seeds for each call
             env_creator = RobomimicEnvCreator(cfg.data.data_path)
         else:
             raise ValueError(f"No environment creator found for dataset: {cfg.data.data_path}")
