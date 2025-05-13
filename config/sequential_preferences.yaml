@@ -19,10 +19,10 @@ data:
 # Preference collection parameters
 preferences:
   n_queries: 100          # Number of direct preference queries to collect
-  k_augment: 2            # Number of similar segments to use for augmentation (for each segment)
+  k_augment: 5            # Number of similar segments to use for augmentation (for each segment)
   use_ground_truth: true  # Use ground truth rewards for preferences (instead of user input)
   use_dtw_distance: true  # Use DTW distance for segment similarity
-  max_dtw_segments: 100  # Limit segments for DTW calculation to save memory
+  max_dtw_segments: 1000  # Limit segments for DTW calculation to save memory
 
 # Visualization parameters
 visualize: true

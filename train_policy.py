@@ -212,6 +212,16 @@ def load_dataset(data, reward_model=None, device=None, use_ground_truth=False, m
     
     return dataset
 
+# Add a helper function to print model architecture information
+def print_model_architecture(algo):
+    """Print the architecture details of a d3rlpy algorithm.
+    
+    Args:
+        algo: A d3rlpy algorithm instance (IQL, BC, etc.)
+    """
+    print("\nModel Architecture Details:")
+    print("=" * 50)
+
 @hydra.main(config_path="config", config_name="iql")
 def main(cfg: DictConfig):
     """Train a policy using specified algorithm with Hydra config."""
@@ -392,6 +402,9 @@ def main(cfg: DictConfig):
         )
     else:
         raise ValueError(f"Unsupported algorithm: {algorithm_name}")
+    
+    # Print model architecture details
+    print_model_architecture(algo)
     
     # Get number of training epochs
     n_epochs = cfg.training.n_epochs

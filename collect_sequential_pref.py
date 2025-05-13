@@ -849,8 +849,16 @@ def main(cfg: DictConfig):
     max_augmentations = cfg.max_augmentations
     
     # Output parameters
-    output_dir = cfg.output.output_dir
+    base_output_dir = cfg.output.output_dir
+    
+    # Create a more specific output directory with parameters
+    dir_name = f"n{n_queries}_k{k_augment}_seed{random_seed}"
+    if max_dtw_segments is not None:
+        dir_name += f"_dtw{max_dtw_segments}"
+    output_dir = os.path.join(base_output_dir, dir_name)
     os.makedirs(output_dir, exist_ok=True)
+    
+    print(f"Results will be saved to: {output_dir}")
     
     # Initialize wandb if enabled
     if cfg.wandb.use_wandb:

@@ -14,7 +14,7 @@ data:
 # Model architecture
 model:
   hidden_dims: [256, 256]
-  learning_rate: 1e-4
+  learning_rate: 3e-4
   batch_size: 256
   encoder_dims: [256, 256, 256]
 

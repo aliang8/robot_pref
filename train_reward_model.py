@@ -693,14 +693,33 @@ def main(cfg: DictConfig):
         
         print(f"Wandb initialized: {wandb.run.name}")
     
-    # Create output directory
-    os.makedirs(cfg.output.output_dir, exist_ok=True)
-    
+    output_dir = cfg.output.output_dir
+
     # Get dataset name for the subdirectory
     dataset_name = Path(cfg.data.data_path).stem
     
-    os.makedirs(cfg.output.output_dir, exist_ok=True)
-    model_dir = cfg.output.output_dir
+    # If using preference data, include that in the output directory path
+    pref_dataset_info = ""
+    if hasattr(cfg.data, 'preferences_data_path') and cfg.data.preferences_data_path:
+        # Extract key parameters from the preference dataset path
+        pref_path = Path(cfg.data.preferences_data_path)
+        pref_dir = pref_path.parent
+        
+        # Try to extract parameters from directory name (e.g., n50_k10_seed42_dtw500)
+        dir_parts = pref_dir.name.split('_')
+        
+        # Extract n_queries and k_augment if present in the directory name
+        n_queries = next((part[1:] for part in dir_parts if part.startswith('n') and part[1:].isdigit()), "")
+        k_augment = next((part[1:] for part in dir_parts if part.startswith('k') and part[1:].isdigit()), "")
+        
+        if n_queries and k_augment:
+            pref_dataset_info = f"_n{n_queries}_k{k_augment}"
+        else:
+            # If we can't extract parameters, just use the parent directory name
+            pref_dataset_info = f"_{pref_dir.name}"
+    
+    os.makedirs(output_dir, exist_ok=True)
+    model_dir = output_dir
     
     # Setup CUDA device
     if cfg.hardware.use_cpu:
@@ -892,12 +911,12 @@ def main(cfg: DictConfig):
     hidden_dims_str = "_".join(map(str, cfg.model.hidden_dims))
     
     # Also save a version with more detailed filename for versioning
-    sub_dir = f"{dataset_name}_model_seg{cfg.data.segment_length}_hidden{hidden_dims_str}_epochs{cfg.training.num_epochs}_pairs{cfg.data.num_pairs}"
+    sub_dir = f"{dataset_name}{pref_dataset_info}_model_seg{cfg.data.segment_length}_hidden{hidden_dims_str}_epochs{cfg.training.num_epochs}_pairs{cfg.data.num_pairs}"
     
     os.makedirs(os.path.join(model_dir, sub_dir), exist_ok=True)
     model_path = os.path.join(model_dir, sub_dir, "model.pt")
     torch.save(model.state_dict(), model_path)
-    print(f"Model also saved with detailed name: {model_path}")
+    print(f"Model saved with detailed name: {model_path}")
     
     # Log as wandb artifact
     if cfg.wandb.use_wandb:
@@ -911,14 +930,15 @@ def main(cfg: DictConfig):
                 "test_loss": test_metrics["test_loss"],
                 "num_segments": len(segments) if segments is not None else 0,
                 "num_pairs": len(segment_pairs) if segment_pairs is not None else 0,
-                "segment_length": cfg.data.segment_length
+                "segment_length": cfg.data.segment_length,
+                "preference_data": cfg.data.preferences_data_path if hasattr(cfg.data, 'preferences_data_path') else None
             }
             
             # Create and log artifact
             artifact = log_artifact(
                 model_path, 
                 artifact_type="reward_model", 
-                name=f"{dataset_name}_seg{cfg.data.segment_length}_pairs{cfg.data.num_pairs}_epochs{cfg.training.num_epochs}", 
+                name=f"{dataset_name}{pref_dataset_info}_seg{cfg.data.segment_length}_pairs{cfg.data.num_pairs}_epochs{cfg.training.num_epochs}", 
                 metadata=metadata
             )
             if artifact:

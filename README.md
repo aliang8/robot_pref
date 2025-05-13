@@ -76,7 +76,7 @@ python collect_sequential_pref.py
 python collect_sequential_pref.py preferences.n_queries=50 preferences.k_augment=10
 
 # Specify data path and output directory
-python collect_sequential_pref.py data.data_path="/path/to/dataset.pt" output.output_dir="./sequential_pref_results"
+python collect_sequential_pref.py data.data_path="/path/to/dataset.pt" output.output_dir="./custom_results"
 
 # Adjust segment parameters
 python collect_sequential_pref.py data.segment_length=20 data.max_segments=1000
@@ -85,7 +85,20 @@ python collect_sequential_pref.py data.segment_length=20 data.max_segments=1000
 python collect_sequential_pref.py preferences.use_dtw_distance=true preferences.max_dtw_segments=500
 
 # Control visualization generation
-python collect_sequential_pref.py preferences.visualize_augmentations=true preferences.n_visualizations=5
+python collect_sequential_pref.py visualize=true max_visualizations=5 max_augmentations=10
+```
+
+Results will be saved in a directory structure like:
+```
+output_dir/
+├── n50_k10_seed42_dtw500/
+│   ├── augmentation_visualizations/
+│   ├── preference_dataset.pkl
+│   └── raw_preferences.pkl
+└── n100_k5_seed42_dtw1000/
+    ├── augmentation_visualizations/
+    ├── preference_dataset.pkl
+    └── raw_preferences.pkl
 ```
 
 ## Train Reward Model
@@ -134,3 +147,5 @@ python train_policy.py --config-name=bc data.data_path="/path/to/dataset.pt"
 
 # With custom parameters
 python train_policy.py --config-name=bc data.data_path="/path/to/dataset.pt" model.learning_rate=1e-4 training.n_epochs=200 evaluation.record_video=true
+
+/scr/aliang80/robot_pref/labeled_datasets/buffer_assembly-v2_balanced.pt
