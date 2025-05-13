@@ -19,6 +19,5 @@ python train_policy.py \
     --config-name=iql \
     data.data_path=/scr/aliang80/robot_pref/labeled_datasets/buffer_assembly-v2_balanced.pt \
     wandb.use_wandb=true \
-    model.weight_temp=0.1 \
-    random_seed=521,522 \
+    random_seed=521,522,523 \
     data.reward_model_path=/scr/aliang80/robot_pref/results/active_reward_model/
