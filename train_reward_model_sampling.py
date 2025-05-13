@@ -87,8 +87,6 @@ def train_final_reward_model(labeled_pairs, segment_indices, labeled_preferences
     
     # Train final model
     final_model = SegmentRewardModel(state_dim, action_dim, hidden_dims=cfg.model.hidden_dims)
-    
-    from utils.training_utils import train_model
     final_model, train_losses, val_losses = train_model(
         final_model,
         train_loader,
@@ -249,17 +247,10 @@ def active_preference_learning(cfg):
     unlabeled_indices = [remaining_indices[i] for i in unlabeled_indices]
     
     # Create test dataset if we have test pairs
-    if test_size > 0:
-        test_dataset = PreferenceDataset(data_cpu, test_pairs, segment_indices, test_preferences)
-        test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=64)
-        print(f"Created test dataset with {len(test_dataset)} pairs")
-    else:
-        # Create a small dummy test dataset from the labeled data if no separate test set
-        test_dataset = PreferenceDataset(data_cpu, labeled_pairs[:min(10, len(labeled_pairs))], 
-                                        segment_indices, labeled_preferences[:min(10, len(labeled_preferences))])
-        test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=64)
-        print(f"Created dummy test dataset with {len(test_dataset)} pairs from labeled data")
-    
+    test_dataset = PreferenceDataset(data_cpu, test_pairs, segment_indices, test_preferences)
+    test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=64)
+    print(f"Created test dataset with {len(test_dataset)} pairs")
+
     print(f"Starting with {len(labeled_pairs)} labeled and {len(unlabeled_pairs)} unlabeled pairs")
     
     # Initialize metrics tracking
@@ -289,30 +280,18 @@ def active_preference_learning(cfg):
         # Create dataset for training the ensemble
         ensemble_dataset = PreferenceDataset(data_cpu, labeled_pairs, segment_indices, labeled_preferences)
         
-        # Create train/val split with appropriate handling for small datasets
-        if len(ensemble_dataset) <= 3:
-            # For very small datasets, use the same data for train/val
-            print("Using the same data for train/val due to small dataset size")
-            train_dataset = ensemble_dataset
-            val_dataset = ensemble_dataset
-        else:
-            # Normal split for larger datasets
-            train_size = int(0.8 * len(ensemble_dataset))
-            val_size = len(ensemble_dataset) - train_size
-            
-            train_dataset, val_dataset = torch.utils.data.random_split(
-                ensemble_dataset, 
-                [train_size, val_size],
-                generator=torch.Generator().manual_seed(random_seed)
-            )
+        train_size = int(0.8 * len(ensemble_dataset))
+        val_size = len(ensemble_dataset) - train_size
+        
+        train_dataset, val_dataset = torch.utils.data.random_split(
+            ensemble_dataset, 
+            [train_size, val_size],
+            generator=torch.Generator().manual_seed(random_seed)
+        )
         
         # Create data loaders with appropriate batch sizes
-        batch_size = min(64, len(train_dataset))
-        train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-        val_loader = torch.utils.data.DataLoader(val_dataset, batch_size=batch_size)
-        
-        # Create or reuse ensemble model
-        from models.reward_models import EnsembleRewardModel
+        train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=min(64, len(train_dataset)), shuffle=True)
+        val_loader = torch.utils.data.DataLoader(val_dataset, batch_size=min(64, len(val_dataset)))
         
         if cfg.active_learning.fine_tune and prev_ensemble is not None:
             print("Fine-tuning from previous ensemble model")
@@ -376,16 +355,7 @@ def active_preference_learning(cfg):
         print(f"Computing uncertainty scores using {cfg.active_learning.uncertainty_method} method...")
 
         # Use the unified function for uncertainty-based selection
-        candidate_pairs = []
-        candidate_indices = []
-        
-        # Map unlabeled pairs to their segment indices for the unified function
-        for idx, pair_idx in enumerate(unlabeled_indices):
-            i, j = unlabeled_pairs[idx]
-            candidate_pairs.append((i, j))
-            candidate_indices.append(idx)
-        
-        # Use the unified approach with comprehensive scoring
+        # Instead of passing all unlabeled pairs, we'll directly use them
         ranked_pairs = select_uncertain_pairs_comprehensive(
             ensemble,
             segments,
@@ -395,31 +365,29 @@ def active_preference_learning(cfg):
             uncertainty_method=cfg.active_learning.uncertainty_method,
             max_pairs=batch_size,
             use_random_candidate_sampling=cfg.active_learning.use_random_sampling, 
-            n_candidates=cfg.active_learning.n_candidates
+            n_candidates=cfg.active_learning.n_candidates,
+            candidate_pairs=unlabeled_pairs  # Pass unlabeled_pairs directly
         )
         
-        # Extract the selected pairs and their indices
+        # Extract the selected pairs
         selected_pairs = ranked_pairs[:batch_size]
-        selected_indices = []
-        
-        # Find the indices of selected pairs in the unlabeled set
-        for selected_pair in selected_pairs:
-            for idx, pair in enumerate(unlabeled_pairs):
-                if pair == selected_pair:
-                    selected_indices.append(idx)
-                    break
         
         # Check if we were able to select any pairs
         if len(selected_pairs) == 0:
             print("No pairs were selected. Ending active learning loop.")
             break
         
+        print(f"Selected {len(selected_pairs)} pairs based on uncertainty")
+        
         # Get ground truth preferences for selected pairs
         # In a real system, this would be where we query the human
-        selected_unlabeled_indices = [unlabeled_indices[i] for i in selected_indices]
-        selected_preferences = [gt_preferences[i] for i in selected_unlabeled_indices]
-        
-        print(f"Selected {len(selected_pairs)} new pairs to label")
+        selected_preferences = []
+        for pair in selected_pairs:
+            # Find the original index of this pair in all_segment_pairs
+            for i, orig_pair in enumerate(all_segment_pairs):
+                if pair[0] == orig_pair[0] and pair[1] == orig_pair[1]:
+                    selected_preferences.append(gt_preferences[i])
+                    break
         
         # Add newly labeled pairs to labeled set
         labeled_pairs.extend(selected_pairs)
@@ -427,8 +395,9 @@ def active_preference_learning(cfg):
         total_labeled += len(selected_pairs)
         
         # Remove selected pairs from unlabeled set
-        unlabeled_pairs = [p for i, p in enumerate(unlabeled_pairs) if i not in selected_indices]
-        unlabeled_indices = [idx for i, idx in enumerate(unlabeled_indices) if i not in selected_indices]
+        # Create a set of pairs to remove for faster lookup
+        pairs_to_remove = set(tuple(p) for p in selected_pairs)
+        unlabeled_pairs = [p for p in unlabeled_pairs if tuple(p) not in pairs_to_remove]
         
         print(f"Now have {len(labeled_pairs)} labeled and {len(unlabeled_pairs)} unlabeled pairs")
     

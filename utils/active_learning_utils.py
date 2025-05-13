@@ -281,7 +281,8 @@ def select_active_preference_query(segments, segment_indices, data, reward_model
 
 def select_uncertain_pairs_comprehensive(reward_model, segments, segment_indices, data, device, 
                                        uncertainty_method="entropy", max_pairs=None,
-                                       use_random_candidate_sampling=True, n_candidates=100):
+                                       use_random_candidate_sampling=True, n_candidates=100,
+                                       candidate_pairs=None):
     """Unified approach for uncertainty-based pair selection.
     
     This function provides two approaches:
@@ -298,6 +299,7 @@ def select_uncertain_pairs_comprehensive(reward_model, segments, segment_indices
         max_pairs: Maximum number of pairs to select (None = select all pairs)
         use_random_candidate_sampling: If True, sample random candidates; if False, evaluate all pairs
         n_candidates: Number of random candidate pairs to consider if using sampling
+        candidate_pairs: Optional list of candidate pairs to evaluate directly
         
     Returns:
         all_pairs_ranked: List of all segment pairs ranked by uncertainty (highest to lowest)
@@ -305,7 +307,11 @@ def select_uncertain_pairs_comprehensive(reward_model, segments, segment_indices
     n_segments = len(segments)
     
     # Determine approach based on parameters
-    if use_random_candidate_sampling:
+    if candidate_pairs is not None:
+        # Use provided candidate pairs directly
+        print(f"Using {len(candidate_pairs)} provided candidate pairs")
+        candidate_pairs = candidate_pairs
+    elif use_random_candidate_sampling:
         # Approach 1: Sample random candidates (more efficient)
         print(f"Using random candidate sampling with {n_candidates} candidate pairs")
         candidate_pairs = []
