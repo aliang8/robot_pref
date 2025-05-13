@@ -31,6 +31,46 @@ from utils import (
     train_reward_model
 )
 
+
+def run_reward_analysis(model_path, data_path, output_dir, num_episodes=9, device=None, random_seed=42, wandb_run=None):
+    """Run reward analysis on the trained model and log results to wandb.
+    
+    Args:
+        model_path: Path to the trained reward model
+        data_path: Path to the dataset
+        output_dir: Directory to save the analysis plots
+        num_episodes: Number of episodes to analyze
+        device: Device to run the analysis on
+        random_seed: Random seed for reproducibility
+        wandb_run: Wandb run object for logging
+    """
+    # Import analyze_rewards here to avoid circular imports
+    from analyze_rewards import analyze_rewards
+    
+    print("\n--- Running Reward Analysis ---")
+    
+    # Run the analysis
+    analyze_rewards(
+        data_path=data_path,
+        model_path=model_path,
+        output_dir=output_dir,
+        num_episodes=num_episodes,
+        device=device,
+        random_seed=random_seed
+    )
+    
+    # Log the analysis results to wandb
+    if wandb_run is not None and wandb_run.run:
+        reward_grid_path = os.path.join(output_dir, "reward_grid.png")
+        if os.path.exists(reward_grid_path):
+            print(f"Logging reward analysis grid to wandb")
+            wandb_run.log({"reward_analysis/grid": wandb.Image(reward_grid_path)})
+        else:
+            print(f"Warning: Could not find reward grid image at {reward_grid_path}")
+    
+    print("Reward analysis completed successfully")
+
+
 @hydra.main(config_path="config", config_name="reward_model", version_base=None)
 def main(cfg: DictConfig):
     """Train a state-action reward model using BT loss with Hydra config."""
@@ -260,12 +300,26 @@ def main(cfg: DictConfig):
     # Start timing the training
     start_time = time.time()
     
+    # Create a descriptive model filename
+    dataset_name = Path(cfg.data.data_path).stem
+    hidden_dims_str = "_".join(map(str, cfg.model.hidden_dims))
+    
+    # Also save a version with more detailed filename for versioning
+    sub_dir = f"{dataset_name}{pref_dataset_info}_model_seg{cfg.data.segment_length}_hidden{hidden_dims_str}_epochs{cfg.training.num_epochs}_pairs{cfg.data.num_pairs}"
+    
+    os.makedirs(os.path.join(model_dir, sub_dir), exist_ok=True)
+    model_path = os.path.join(model_dir, sub_dir, "model.pt")
+    
+    # Set path for training curve
+    training_curve_path = os.path.join(model_dir, sub_dir, "training_curve.png")
+    
     # Train the model
     print("\nTraining reward model...")
     model, train_losses, val_losses = train_reward_model(
         model, train_loader, val_loader, device, 
         num_epochs=cfg.training.num_epochs, lr=cfg.model.lr,
-        wandb=wandb if cfg.wandb.use_wandb else None
+        wandb=wandb if cfg.wandb.use_wandb else None,
+        output_path=training_curve_path
     )
     
     # Calculate and print training time
@@ -283,15 +337,7 @@ def main(cfg: DictConfig):
     if cfg.wandb.use_wandb:
         log_to_wandb(test_metrics, prefix="test")
     
-    # Create a descriptive model filename
-    dataset_name = Path(cfg.data.data_path).stem
-    hidden_dims_str = "_".join(map(str, cfg.model.hidden_dims))
-    
-    # Also save a version with more detailed filename for versioning
-    sub_dir = f"{dataset_name}{pref_dataset_info}_model_seg{cfg.data.segment_length}_hidden{hidden_dims_str}_epochs{cfg.training.num_epochs}_pairs{cfg.data.num_pairs}"
-    
-    os.makedirs(os.path.join(model_dir, sub_dir), exist_ok=True)
-    model_path = os.path.join(model_dir, sub_dir, "model.pt")
+    # Save the model
     torch.save(model.state_dict(), model_path)
     print(f"Model saved with detailed name: {model_path}")
     
@@ -342,6 +388,27 @@ def main(cfg: DictConfig):
         pickle.dump(segment_info, f)
     
     print(f"Model information saved to {info_path}")
+    
+    # Run reward analysis
+    analysis_dir = os.path.join(model_dir, sub_dir, "analysis")
+    os.makedirs(analysis_dir, exist_ok=True)
+    
+    # Check if reward analysis is enabled (default to True)
+    run_analysis = cfg.get('run_reward_analysis', True)
+    
+    if run_analysis:
+        try:
+            run_reward_analysis(
+                model_path=model_path,
+                data_path=cfg.data.data_path,
+                output_dir=analysis_dir,
+                num_episodes=cfg.get('analysis_episodes', 9),
+                device=device,
+                random_seed=random_seed,
+                wandb_run=wandb if cfg.wandb.use_wandb else None
+            )
+        except Exception as e:
+            print(f"Warning: Error during reward analysis: {e}")
     
     # Finish wandb run
     if cfg.wandb.use_wandb and wandb.run:

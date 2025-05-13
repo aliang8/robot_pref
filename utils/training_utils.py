@@ -29,7 +29,7 @@ def log_wandb_metrics(train_loss, val_loss, epoch, lr=None, wandb=None):
     wandb.log(metrics)
 
 
-def train_model(model, train_loader, val_loader, device, num_epochs=50, lr=1e-4, wandb=None, is_ensemble=False):
+def train_model(model, train_loader, val_loader, device, num_epochs=50, lr=1e-4, wandb=None, is_ensemble=False, output_path=None):
     """Unified training function for both single reward models and ensembles.
     
     Args:
@@ -41,6 +41,7 @@ def train_model(model, train_loader, val_loader, device, num_epochs=50, lr=1e-4,
         lr: Learning rate
         wandb: Optional wandb instance for logging
         is_ensemble: Whether the model is an ensemble (for logging purposes only)
+        output_path: Path to save the training curve plot (if None, uses default filename)
     
     Returns:
         Tuple of (trained_model, train_losses, val_losses)
@@ -196,11 +197,15 @@ def train_model(model, train_loader, val_loader, device, num_epochs=50, lr=1e-4,
         plt.ylabel('Loss')
         plt.title('Reward Model Training')
         plt.legend()
-        plt.savefig('reward_model_training.png', dpi=300, bbox_inches='tight')
+        
+        # Use the provided output path or default
+        plot_path = output_path if output_path else 'reward_model_training.png'
+        plt.savefig(plot_path, dpi=300, bbox_inches='tight')
+        print(f"Training curve saved to {plot_path}")
         
         # Log the plot to wandb
         if wandb and wandb.run:
-            wandb.log({"training_curve": wandb.Image('reward_model_training.png')})
+            wandb.log({"training_curve": wandb.Image(plot_path)})
             
         plt.close()
     
@@ -212,6 +217,6 @@ def train_model(model, train_loader, val_loader, device, num_epochs=50, lr=1e-4,
 
 
 # For backwards compatibility
-def train_reward_model(model, train_loader, val_loader, device, num_epochs=50, lr=1e-4, wandb=None):
+def train_reward_model(model, train_loader, val_loader, device, num_epochs=50, lr=1e-4, wandb=None, output_path=None):
     """Wrapper around train_model for single reward models."""
-    return train_model(model, train_loader, val_loader, device, num_epochs, lr, wandb, is_ensemble=False) 
+    return train_model(model, train_loader, val_loader, device, num_epochs, lr, wandb, is_ensemble=False, output_path=output_path) 

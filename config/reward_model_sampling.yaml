@@ -10,12 +10,13 @@ defaults:
 active_learning:
   enabled: true
   retrain_interval: 1  # Retrain every iteration
+
 # Override data parameters
 data:
   data_path: "/scr/shared/clam/datasets/metaworld/assembly-v2/buffer_assembly-v2.pt"
   segment_length: 32
-  num_segments: 5000
-  num_pairs: 1000
+  num_segments: 10000
+  num_pairs: 5000
 
 # Model architecture
 model:
@@ -24,7 +25,7 @@ model:
 
 # Training parameters
 training:
-  batch_size: 128
+  batch_size: 256
   num_epochs: 50
   num_workers: 4
   pin_memory: true
