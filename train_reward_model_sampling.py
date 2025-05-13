@@ -7,9 +7,6 @@ import matplotlib.pyplot as plt
 import pickle
 import time
 from pathlib import Path
-from torch import optim
-from torch.utils.data import Dataset, DataLoader, random_split, Subset
-import torch.nn as nn
 import hydra
 from omegaconf import DictConfig, OmegaConf
 import wandb
@@ -23,418 +20,18 @@ from trajectory_utils import (
 )
 from utils.wandb_utils import log_to_wandb, log_artifact
 
-# Import reward model components from train_reward_model.py
-from train_reward_model import (
-    StateActionRewardModel,
-    SegmentRewardModel,
-    PreferenceDataset,
+# Import shared models and utilities
+from models import SegmentRewardModel, EnsembleRewardModel
+from utils import (
+    PreferenceDataset, 
     bradley_terry_loss,
-    train_reward_model,
-    evaluate_model_on_test_set
+    evaluate_model_on_test_set,
+    compute_uncertainty_scores,
+    select_uncertain_pairs, 
+    get_ground_truth_preferences,
+    create_initial_dataset,
+    train_ensemble_model
 )
-
-class EnsembleRewardModel(nn.Module):
-    """Ensemble of reward models for uncertainty estimation."""
-    def __init__(self, state_dim, action_dim, hidden_dims=[256, 256], num_models=5):
-        super(EnsembleRewardModel, self).__init__()
-        self.models = nn.ModuleList([
-            SegmentRewardModel(state_dim, action_dim, hidden_dims)
-            for _ in range(num_models)
-        ])
-        self.num_models = num_models
-    
-    def forward(self, observations, actions):
-        """Return rewards from all models in the ensemble."""
-        rewards = []
-        for model in self.models:
-            rewards.append(model(observations, actions))
-        
-        # Stack rewards from all models
-        if isinstance(rewards[0], torch.Tensor) and rewards[0].dim() == 0:
-            # Handle single segment case
-            return torch.stack(rewards)
-        else:
-            # Handle batch case
-            return torch.stack(rewards, dim=0)
-    
-    def mean_reward(self, observations, actions):
-        """Return mean reward across all models."""
-        rewards = self(observations, actions)
-        return rewards.mean(dim=0)
-    
-    def std_reward(self, observations, actions):
-        """Return standard deviation of rewards across all models."""
-        rewards = self(observations, actions)
-        return rewards.std(dim=0)
-    
-    def disagreement(self, observations, actions):
-        """Return disagreement (variance) across models."""
-        rewards = self(observations, actions)
-        return rewards.var(dim=0)
-
-def compute_entropy(probs):
-    """Compute entropy of preference probabilities."""
-    # Add small epsilon to avoid log(0)
-    eps = 1e-8
-    probs = torch.clamp(probs, min=eps, max=1-eps)
-    return -torch.sum(probs * torch.log(probs), dim=-1)
-
-def compute_uncertainty_scores(model, segment_pairs, segment_indices, data, device, method="entropy"):
-    """Compute uncertainty scores for segment pairs using specified method.
-    
-    Args:
-        model: Reward model (either single model or ensemble)
-        segment_pairs: List of segment pair indices
-        segment_indices: List of (start_idx, end_idx) tuples for each segment
-        data: Data dictionary containing observations and actions
-        device: Device to run computation on
-        method: Uncertainty estimation method ("entropy", "disagreement", or "random")
-        
-    Returns:
-        uncertainty_scores: List of uncertainty scores for each segment pair
-    """
-    # Extract observation and action fields
-    obs_key = "obs" if "obs" in data else "state"
-    action_key = "action"
-    
-    # Ensure data is on CPU for indexing operations
-    data_cpu = {k: v.cpu() if isinstance(v, torch.Tensor) else v for k, v in data.items()}
-    
-    uncertainty_scores = []
-    
-    # Process in batches to avoid memory issues
-    batch_size = 32
-    num_batches = (len(segment_pairs) + batch_size - 1) // batch_size
-    
-    with torch.no_grad():
-        for i in tqdm(range(num_batches), desc=f"Computing {method} scores"):
-            batch_start = i * batch_size
-            batch_end = min((i + 1) * batch_size, len(segment_pairs))
-            batch_pairs = segment_pairs[batch_start:batch_end]
-            
-            batch_scores = []
-            
-            for pair_idx, (seg_idx1, seg_idx2) in enumerate(batch_pairs):
-                # Get segment indices
-                start1, end1 = segment_indices[seg_idx1]
-                start2, end2 = segment_indices[seg_idx2]
-                
-                # Extract observations and actions from CPU data
-                obs1 = data_cpu[obs_key][start1:end1].clone()
-                actions1 = data_cpu[action_key][start1:end1-1].clone()
-                obs2 = data_cpu[obs_key][start2:end2].clone()
-                actions2 = data_cpu[action_key][start2:end2-1].clone()
-                
-                # Ensure observations and actions have same length
-                min_len1 = min(obs1.shape[0]-1, actions1.shape[0])
-                min_len2 = min(obs2.shape[0]-1, actions2.shape[0])
-                
-                obs1 = obs1[:min_len1]
-                actions1 = actions1[:min_len1]
-                obs2 = obs2[:min_len2]
-                actions2 = actions2[:min_len2]
-                
-                # Move to device only after slicing
-                obs1 = obs1.to(device)
-                actions1 = actions1.to(device)
-                obs2 = obs2.to(device)
-                actions2 = actions2.to(device)
-                
-                if method == "random":
-                    # Random sampling - just assign random score
-                    score = random.random()
-                
-                elif method == "entropy":
-                    # Entropy-based uncertainty
-                    if isinstance(model, EnsembleRewardModel):
-                        # Use mean prediction from ensemble
-                        reward1 = model.mean_reward(obs1, actions1)
-                        reward2 = model.mean_reward(obs2, actions2)
-                    else:
-                        # Single model
-                        reward1 = model(obs1, actions1)
-                        reward2 = model(obs2, actions2)
-                    
-                    # Compute preference probability
-                    logits = reward1 - reward2
-                    probs = torch.sigmoid(logits)
-                    
-                    # Compute entropy of binary prediction
-                    probs_2d = torch.stack([probs, 1 - probs], dim=0)
-                    score = compute_entropy(probs_2d).item()
-                
-                elif method == "disagreement":
-                    # Disagreement-based uncertainty (requires ensemble)
-                    if not isinstance(model, EnsembleRewardModel):
-                        raise ValueError("Disagreement method requires an ensemble model")
-                    
-                    # Get reward predictions from all models
-                    rewards1 = model(obs1, actions1)  # Shape: [num_models]
-                    rewards2 = model(obs2, actions2)  # Shape: [num_models]
-                    
-                    # Compute preference probability for each model
-                    logits = rewards1 - rewards2  # Shape: [num_models]
-                    probs = torch.sigmoid(logits)  # Shape: [num_models]
-                    
-                    # Disagreement is variance in preference probabilities
-                    score = probs.var().item()
-                
-                batch_scores.append(score)
-            
-            uncertainty_scores.extend(batch_scores)
-    
-    return uncertainty_scores
-
-def select_uncertain_pairs(uncertainty_scores, segment_pairs, k):
-    """Select top-k most uncertain segment pairs.
-    
-    Args:
-        uncertainty_scores: List of uncertainty scores for each segment pair
-        segment_pairs: List of segment pair indices
-        k: Number of pairs to select
-        
-    Returns:
-        selected_pairs: List of selected segment pairs
-        selected_indices: Indices of selected pairs in the original list
-    """
-    # Convert to numpy for easier manipulation
-    scores = np.array(uncertainty_scores)
-    
-    # Ensure k is not larger than the number of available pairs
-    k = min(k, len(segment_pairs))
-    
-    if k == 0:
-        print("Warning: No pairs available to select")
-        return [], []
-    
-    # Get indices of top-k highest uncertainty scores
-    selected_indices = np.argsort(scores)[-k:]
-    
-    # Get corresponding segment pairs
-    selected_pairs = [segment_pairs[i] for i in selected_indices]
-    
-    return selected_pairs, selected_indices.tolist()
-
-def get_ground_truth_preferences(segment_pairs, segment_indices, rewards):
-    """Generate ground truth preferences based on cumulative rewards.
-    
-    Args:
-        segment_pairs: List of segment pair indices
-        segment_indices: List of (start_idx, end_idx) tuples for each segment
-        rewards: Tensor of reward values for all transitions
-        
-    Returns:
-        preferences: List of preferences (1 = first segment preferred, 2 = second segment preferred)
-    """
-    preferences = []
-    
-    # Ensure rewards is on CPU for indexing
-    rewards_cpu = rewards.cpu() if isinstance(rewards, torch.Tensor) else rewards
-    
-    for seg_idx1, seg_idx2 in segment_pairs:
-        # Get segment indices
-        start1, end1 = segment_indices[seg_idx1]
-        start2, end2 = segment_indices[seg_idx2]
-        
-        # Calculate cumulative rewards for each segment
-        reward1 = rewards_cpu[start1:end1].sum().item()
-        reward2 = rewards_cpu[start2:end2].sum().item()
-        
-        # Determine preference (1 = first segment preferred, 2 = second segment preferred)
-        if reward1 > reward2:
-            preferences.append(1)
-        else:
-            preferences.append(2)
-    
-    return preferences
-
-def create_initial_dataset(segment_pairs, segment_indices, preferences, data, initial_size):
-    """Create initial dataset with a small number of labeled pairs.
-    
-    Args:
-        segment_pairs: List of segment pair indices
-        segment_indices: List of (start_idx, end_idx) tuples for each segment
-        preferences: List of preferences (1 = first segment preferred, 2 = second segment preferred)
-        data: Data dictionary containing observations and actions
-        initial_size: Initial number of labeled pairs
-        
-    Returns:
-        labeled_pairs: List of initially labeled segment pairs
-        labeled_preferences: List of preferences for initially labeled pairs
-        unlabeled_pairs: List of remaining unlabeled segment pairs
-        unlabeled_indices: Indices of unlabeled pairs in the original list
-    """
-    # Ensure initial_size is not larger than the number of available pairs
-    initial_size = min(initial_size, len(segment_pairs))
-    
-    if initial_size == 0:
-        print("Warning: No pairs available for initial dataset")
-        return [], [], [], []
-    
-    # Randomly select initial pairs
-    all_indices = list(range(len(segment_pairs)))
-    labeled_indices = random.sample(all_indices, initial_size)
-    unlabeled_indices = [i for i in all_indices if i not in labeled_indices]
-    
-    # Get labeled pairs and preferences
-    labeled_pairs = [segment_pairs[i] for i in labeled_indices]
-    labeled_preferences = [preferences[i] for i in labeled_indices]
-    
-    # Get unlabeled pairs
-    unlabeled_pairs = [segment_pairs[i] for i in unlabeled_indices]
-    
-    return labeled_pairs, labeled_preferences, unlabeled_pairs, unlabeled_indices
-
-def train_ensemble_model(state_dim, action_dim, labeled_pairs, segment_indices, labeled_preferences, 
-                        data, device, num_models=5, hidden_dims=[256, 256], num_epochs=20, 
-                        fine_tune=False, prev_ensemble=None, fine_tune_lr=5e-5):
-    """Train an ensemble of reward models on the labeled data.
-    
-    Args:
-        state_dim: Dimension of state space
-        action_dim: Dimension of action space
-        labeled_pairs: List of labeled segment pairs
-        segment_indices: List of (start_idx, end_idx) tuples for each segment
-        labeled_preferences: List of preferences for labeled pairs
-        data: Data dictionary containing observations and actions (should be on CPU)
-        device: Device to run training on
-        num_models: Number of models in the ensemble
-        hidden_dims: Hidden dimensions for each model
-        num_epochs: Number of epochs to train each model
-        fine_tune: Whether to fine-tune from previous model
-        prev_ensemble: Previous ensemble model to fine-tune from
-        fine_tune_lr: Learning rate for fine-tuning
-        
-    Returns:
-        ensemble: Trained ensemble model
-    """
-    # Ensure data is on CPU for dataset creation
-    if not isinstance(data, dict) or any(isinstance(v, torch.Tensor) and v.device.type != 'cpu' for v in data.values()):
-        print("Warning: Data should be on CPU for indexing in PreferenceDataset. Converting to CPU...")
-        data = {k: v.cpu() if isinstance(v, torch.Tensor) else v for k, v in data.items()}
-    
-    # Create dataset from labeled pairs
-    dataset = PreferenceDataset(data, labeled_pairs, segment_indices, labeled_preferences)
-    
-    # Create or reuse ensemble model
-    if fine_tune and prev_ensemble is not None:
-        print("Fine-tuning from previous ensemble model")
-        ensemble = prev_ensemble
-        # Ensure the ensemble has the right number of models
-        if len(ensemble.models) != num_models:
-            print(f"Warning: Previous ensemble has {len(ensemble.models)} models, but {num_models} requested. Creating new ensemble.")
-            ensemble = EnsembleRewardModel(state_dim, action_dim, hidden_dims, num_models)
-        lr = fine_tune_lr  # Use lower learning rate for fine-tuning
-    else:
-        print("Training new ensemble model from scratch")
-        ensemble = EnsembleRewardModel(state_dim, action_dim, hidden_dims, num_models)
-        lr = 1e-4  # Use standard learning rate for training from scratch
-    
-    # Move entire ensemble to device at once
-    ensemble = ensemble.to(device)
-    
-    # Create a combined optimizer for all models in the ensemble
-    combined_params = list(ensemble.parameters())
-    optimizer = optim.Adam(combined_params, lr=lr, weight_decay=1e-4)
-    
-    # Create train/val split for the dataset
-    train_size = int(0.8 * len(dataset))
-    val_size = len(dataset) - train_size
-    
-    train_dataset, val_dataset = random_split(
-        dataset, 
-        [train_size, val_size],
-        generator=torch.Generator().manual_seed(42)
-    )
-    
-    train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=64)
-    
-    print(f"Training ensemble of {num_models} models for {num_epochs} epochs (lr={lr})")
-    
-    # Training loop
-    for epoch in range(num_epochs):
-        # Training phase
-        ensemble.train()
-        train_loss = 0.0
-        
-        for batch_idx, (obs1, actions1, obs2, actions2, pref) in enumerate(train_loader):
-            # Move data to device
-            obs1, actions1 = obs1.to(device), actions1.to(device)
-            obs2, actions2 = obs2.to(device), actions2.to(device)
-            pref = pref.to(device)
-            
-            optimizer.zero_grad(set_to_none=True)
-            
-            # Forward pass through all models
-            batch_loss = 0.0
-            for i in range(num_models):
-                model = ensemble.models[i]
-                
-                # Compute rewards
-                reward1 = model(obs1, actions1)
-                reward2 = model(obs2, actions2)
-                
-                # Compute loss
-                loss = bradley_terry_loss(reward1, reward2, pref)
-                batch_loss += loss
-            
-            # Average loss across models
-            batch_loss /= num_models
-            
-            # Backward pass
-            batch_loss.backward()
-            
-            # Clip gradients
-            torch.nn.utils.clip_grad_norm_(combined_params, max_norm=1.0)
-            
-            # Update parameters
-            optimizer.step()
-            
-            train_loss += batch_loss.item()
-        
-        avg_train_loss = train_loss / len(train_loader)
-        
-        # Validation phase
-        ensemble.eval()
-        val_loss = 0.0
-        
-        with torch.no_grad():
-            for batch_idx, (obs1, actions1, obs2, actions2, pref) in enumerate(val_loader):
-                # Move data to device
-                obs1, actions1 = obs1.to(device), actions1.to(device)
-                obs2, actions2 = obs2.to(device), actions2.to(device)
-                pref = pref.to(device)
-                
-                # Forward pass through all models
-                batch_loss = 0.0
-                for i in range(num_models):
-                    model = ensemble.models[i]
-                    
-                    # Compute rewards
-                    reward1 = model(obs1, actions1)
-                    reward2 = model(obs2, actions2)
-                    
-                    # Compute loss
-                    loss = bradley_terry_loss(reward1, reward2, pref)
-                    batch_loss += loss
-                
-                # Average loss across models
-                batch_loss /= num_models
-                
-                val_loss += batch_loss.item()
-        
-        avg_val_loss = val_loss / len(val_loader)
-        
-        # Print progress
-        if (epoch + 1) % 5 == 0 or epoch == 0:
-            print(f"Epoch {epoch+1}/{num_epochs}: train_loss={avg_train_loss:.4f}, val_loss={avg_val_loss:.4f}")
-    
-    # Move ensemble back to CPU if using CUDA to save memory
-    if device.type == 'cuda':
-        ensemble = ensemble.cpu()
-    
-    return ensemble
 
 def active_preference_learning(cfg):
     """Main function for active preference learning.
@@ -449,6 +46,18 @@ def active_preference_learning(cfg):
     # Print config
     print("\nConfiguration:")
     print(OmegaConf.to_yaml(cfg))
+    
+    # Print a summary of active learning parameters
+    print("\nActive Learning Parameters:")
+    print(f"  Uncertainty method: {cfg.active_learning.uncertainty_method}")
+    print(f"  Initial labeled pairs: {cfg.active_learning.initial_size}")
+    print(f"  Maximum queries: {cfg.active_learning.max_queries}")
+    print(f"  Batch size: {cfg.active_learning.batch_size}")
+    print(f"  Fine-tuning: {'Enabled' if cfg.active_learning.fine_tune else 'Disabled'}")
+    if cfg.active_learning.fine_tune:
+        print(f"  Fine-tuning learning rate: {cfg.active_learning.fine_tune_lr}")
+    print(f"  Ensemble models: {cfg.active_learning.num_models}")
+    print(f"  Training epochs per iteration: {cfg.active_learning.train_epochs}")
     
     # Set random seed for reproducibility
     random_seed = cfg.get('random_seed', 42)
@@ -567,13 +176,13 @@ def active_preference_learning(cfg):
     # Create test dataset if we have test pairs
     if test_size > 0:
         test_dataset = PreferenceDataset(data_cpu, test_pairs, segment_indices, test_preferences)
-        test_loader = DataLoader(test_dataset, batch_size=64)
+        test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=64)
         print(f"Created test dataset with {len(test_dataset)} pairs")
     else:
         # Create a small dummy test dataset from the labeled data if no separate test set
         test_dataset = PreferenceDataset(data_cpu, labeled_pairs[:min(10, len(labeled_pairs))], 
                                         segment_indices, labeled_preferences[:min(10, len(labeled_preferences))])
-        test_loader = DataLoader(test_dataset, batch_size=64)
+        test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=64)
         print(f"Created dummy test dataset with {len(test_dataset)} pairs from labeled data")
     
     print(f"Starting with {len(labeled_pairs)} labeled and {len(unlabeled_pairs)} unlabeled pairs")
@@ -703,25 +312,28 @@ def active_preference_learning(cfg):
     val_size = int(0.1 * len(final_dataset))
     test_size = len(final_dataset) - train_size - val_size
     
-    train_dataset, val_dataset, final_test_dataset = random_split(
+    train_dataset, val_dataset, final_test_dataset = torch.utils.data.random_split(
         final_dataset, 
         [train_size, val_size, test_size],
         generator=torch.Generator().manual_seed(random_seed)
     )
     
-    train_loader = DataLoader(train_dataset, batch_size=cfg.training.batch_size, shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=cfg.training.batch_size)
-    final_test_loader = DataLoader(final_test_dataset, batch_size=cfg.training.batch_size)
+    train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=cfg.training.batch_size, shuffle=True)
+    val_loader = torch.utils.data.DataLoader(val_dataset, batch_size=cfg.training.batch_size)
+    final_test_loader = torch.utils.data.DataLoader(final_test_dataset, batch_size=cfg.training.batch_size)
     
     # Train final model
     final_model = SegmentRewardModel(state_dim, action_dim, hidden_dims=cfg.model.hidden_dims)
+    
+    from utils.training_utils import train_reward_model
     final_model, train_losses, val_losses = train_reward_model(
         final_model,
         train_loader,
         val_loader,
         device,
         num_epochs=cfg.training.num_epochs,
-        lr=cfg.model.lr
+        lr=cfg.model.lr,
+        wandb=wandb if cfg.wandb.use_wandb else None
     )
     
     # Evaluate final model
@@ -753,18 +365,23 @@ def active_preference_learning(cfg):
     plt.title(f"Active Learning Curve ({cfg.active_learning.uncertainty_method})")
     plt.grid(True)
     
-    # Save plot
-    plot_path = os.path.join(cfg.output.output_dir, f"active_learning_curve_{cfg.active_learning.uncertainty_method}.png")
+    # Create descriptive output directory structure
+    dataset_name = Path(cfg.data.data_path).stem
+    uncertainty_method = cfg.active_learning.uncertainty_method
+    fine_tune_str = "finetune" if cfg.active_learning.fine_tune else "scratch"
+    
+    # Create descriptive subdirectory
+    output_subdir = f"{dataset_name}_active_{uncertainty_method}_init{cfg.active_learning.initial_size}_max{cfg.active_learning.max_queries}_batch{cfg.active_learning.batch_size}_{fine_tune_str}"
+    
+    # Save plot with descriptive name
+    plot_path = os.path.join(cfg.output.output_dir, f"{output_subdir}_learning_curve.png")
     plt.savefig(plot_path)
     
     if cfg.wandb.use_wandb:
         wandb.log({"learning_curve": wandb.Image(plot_path)})
     
-    # Save final model
-    model_dir = os.path.join(
-        cfg.output.output_dir, 
-        f"active_{Path(cfg.data.data_path).stem}_{cfg.active_learning.uncertainty_method}"
-    )
+    # Save final model in descriptive directory
+    model_dir = os.path.join(cfg.output.output_dir, output_subdir)
     os.makedirs(model_dir, exist_ok=True)
     
     model_path = os.path.join(model_dir, "final_model.pt")
@@ -789,6 +406,10 @@ def active_preference_learning(cfg):
             artifact_type="model",
             metadata={
                 "method": cfg.active_learning.uncertainty_method,
+                "fine_tune": cfg.active_learning.fine_tune,
+                "initial_size": cfg.active_learning.initial_size,
+                "max_queries": cfg.active_learning.max_queries,
+                "batch_size": cfg.active_learning.batch_size,
                 "num_queries": total_labeled,
                 "final_accuracy": final_metrics["test_accuracy"],
                 "consistent_accuracy": consistent_metrics["test_accuracy"]

@@ -999,12 +999,12 @@ def main(cfg: DictConfig):
         )
     else:
         print("\nCollecting user preferences")
-        user_preferences = collect_cluster_preferences(
-            data, cluster_representatives, 
-            num_comparisons=max_comparisons,
-            skip_videos=skip_videos,
-            no_auto_open=no_auto_open
-        )
+    user_preferences = collect_cluster_preferences(
+        data, cluster_representatives, 
+        num_comparisons=max_comparisons,
+        skip_videos=skip_videos,
+        no_auto_open=no_auto_open
+    )
     
     # Calculate preference accuracy statistics
     preference_stats = {

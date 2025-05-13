@@ -10,7 +10,7 @@ active_learning:
   # Initial number of labeled pairs
   initial_size: 5
   # Maximum number of queries (labels) to collect
-  max_queries: 100
+  max_queries: 50
   # Number of pairs to select in each iteration
   batch_size: 5
   # Uncertainty estimation method: "entropy", "disagreement", or "random"
@@ -28,7 +28,7 @@ active_learning:
 data:
   data_path: "/scr/shared/clam/datasets/metaworld/assembly-v2/buffer_assembly-v2.pt"
   segment_length: 32
-  num_segments: 2000
+  num_segments: 5000
   num_pairs: 1000
 
 # Model architecture

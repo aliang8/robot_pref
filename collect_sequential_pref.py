@@ -40,6 +40,18 @@ from eef_clustering import (
     perform_hierarchical_clustering
 )
 
+# Import models from the modular structure
+from models.reward_models import SegmentRewardModel, EnsembleRewardModel
+
+# Import utility functions from the modular structure
+from utils.dataset_utils import PreferenceDataset, bradley_terry_loss
+from utils.training_utils import train_ensemble_model
+from utils.active_learning_utils import (
+    compute_uncertainty_scores, 
+    select_uncertain_pairs,
+    select_active_preference_query
+)
+
 def get_reward_based_preference(data, segment1, segment2):
     """Determine ground truth preference based on cumulative reward.
     
@@ -138,7 +150,86 @@ def find_similar_segments(segments, query_idx, k=5, distance_matrix=None):
     
     return similar_indices.tolist()
 
-def collect_sequential_preferences(data, segments, segment_indices, n_queries=100, k_augment=5, use_ground_truth=True, distance_matrix=None):
+def train_reward_model_from_preferences(preferences, segment_indices, data, device, 
+                                       state_dim, action_dim, hidden_dims=[256, 256],
+                                       num_epochs=20, use_ensemble=False, num_models=5):
+    """Train a reward model from collected preferences.
+    
+    Args:
+        preferences: List of (i, j, pref) preference tuples
+        segment_indices: List of (start_idx, end_idx) for each segment
+        data: TensorDict with observations and actions
+        device: Device to run training on
+        state_dim: Dimension of state space
+        action_dim: Dimension of action space
+        hidden_dims: Hidden dimensions for the model
+        num_epochs: Number of epochs to train
+        use_ensemble: Whether to train an ensemble of models
+        num_models: Number of models in the ensemble
+        
+    Returns:
+        Trained reward model (either SegmentRewardModel or EnsembleRewardModel)
+    """
+    print(f"Training {'ensemble' if use_ensemble else 'single'} reward model on {len(preferences)} preferences...")
+    
+    # Create segment pairs and preferences for training
+    segment_pairs = [(i, j) for i, j, _ in preferences]
+    preference_labels = [pref for _, _, pref in preferences]
+    
+    # Create dataset
+    from torch.utils.data import Dataset, DataLoader, random_split
+    
+    # Create a preference dataset
+    dataset = PreferenceDataset(data, segment_pairs, segment_indices, preference_labels)
+    
+    # Create train/val split
+    train_size = int(0.8 * len(dataset))
+    val_size = len(dataset) - train_size
+    
+    train_dataset, val_dataset = random_split(
+        dataset, 
+        [train_size, val_size],
+        generator=torch.Generator().manual_seed(42)
+    )
+    
+    train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=32)
+    
+    if use_ensemble:
+        # Train an ensemble of models using the new utility function
+        model = train_ensemble_model(
+            state_dim,
+            action_dim,
+            segment_pairs,
+            segment_indices,
+            preference_labels,
+            data,
+            device,
+            num_models=num_models,
+            hidden_dims=hidden_dims,
+            num_epochs=num_epochs
+        )
+    else:
+        # Train a single model
+        model = SegmentRewardModel(state_dim, action_dim, hidden_dims)
+        
+        # Use the train_reward_model from utils.training_utils
+        from utils.training_utils import train_reward_model
+        model, _, _ = train_reward_model(
+            model, 
+            train_loader, 
+            val_loader, 
+            device, 
+            num_epochs=num_epochs, 
+            lr=1e-4
+        )
+    
+    return model
+
+def collect_sequential_preferences(data, segments, segment_indices, n_queries=100, k_augment=5, 
+                                 use_ground_truth=True, distance_matrix=None, 
+                                 active_selection=False, uncertainty_method="entropy",
+                                 reward_model_path=None, device=None, retrain_interval=10):
     """Collect sequential preferences with similarity-based augmentation.
     
     Args:
@@ -149,6 +240,11 @@ def collect_sequential_preferences(data, segments, segment_indices, n_queries=10
         k_augment: Number of similar segments to use for augmentation
         use_ground_truth: If True, use ground truth rewards for preferences
         distance_matrix: Pre-computed distance matrix (optional)
+        active_selection: If True, use active learning to select queries
+        uncertainty_method: Method for uncertainty estimation ("entropy", "disagreement", "random")
+        reward_model_path: Path to pre-trained reward model for active selection
+        device: Device to run computation on
+        retrain_interval: How often to retrain the model (in number of preferences)
         
     Returns:
         tuple: (all_preferences, distance_matrix, similar_segments_info)
@@ -175,6 +271,38 @@ def collect_sequential_preferences(data, segments, segment_indices, n_queries=10
     else:
         print("Using provided distance matrix")
     
+    # Initialize reward model for active selection if requested
+    reward_model = None
+    if active_selection:
+        if device is None:
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        
+        # Get observation and action dimensions for model initialization
+        obs_key = "obs" if "obs" in data else "state"
+        state_dim = data[obs_key].shape[1]
+        action_dim = data["action"].shape[1]
+        
+        # Determine if we should use an ensemble
+        use_ensemble = uncertainty_method == "disagreement"
+        num_models = 5 if use_ensemble else 1
+        
+        if reward_model_path:
+            print(f"Loading initial reward model from {reward_model_path} for active selection")
+            
+            # Load the reward model based on uncertainty method
+            if use_ensemble:
+                reward_model = EnsembleRewardModel(state_dim, action_dim, num_models=num_models)
+                # TODO: Implement proper loading of ensemble model if needed
+                print("Warning: Loading ensemble models from file not implemented. Initializing new ensemble.")
+            else:
+                reward_model = SegmentRewardModel(state_dim, action_dim)
+                reward_model.load_state_dict(torch.load(reward_model_path, map_location=device))
+            
+            reward_model = reward_model.to(device)
+            reward_model.eval()
+        else:
+            print(f"No reward model provided. Will train from scratch after collecting initial preferences.")
+    
     # Collect preferences
     preferences = []
     augmented_preferences = []
@@ -183,10 +311,29 @@ def collect_sequential_preferences(data, segments, segment_indices, n_queries=10
     # Keep track of compared pairs to avoid duplicates
     compared_pairs = set()
     
+    # For active learning, we need an initial set of preferences before training the model
+    initial_random_queries = min(retrain_interval, n_queries) if active_selection else 0
+    
     with tqdm(total=n_queries, desc="Collecting preferences") as pbar:
         while len(preferences) < n_queries:
-            # Sample two different random segments
-            i, j = random.sample(range(n_segments), 2)
+            # Determine if we should use active selection for this query
+            use_active = active_selection and len(preferences) >= initial_random_queries and reward_model is not None
+            
+            # Select segment pair based on active selection or random sampling
+            if use_active:
+                # Use active selection to choose the next pair
+                i, j = select_active_preference_query(
+                    segments, 
+                    segment_indices, 
+                    data, 
+                    reward_model, 
+                    device,
+                    n_candidates=min(100, n_segments * (n_segments - 1) // 2),
+                    uncertainty_method=uncertainty_method
+                )
+            else:
+                # Sample two different random segments
+                i, j = random.sample(range(n_segments), 2)
             
             # Skip if this pair has already been compared
             if (i, j) in compared_pairs or (j, i) in compared_pairs:
@@ -275,6 +422,36 @@ def collect_sequential_preferences(data, segments, segment_indices, n_queries=10
             
             # Store similar segments info
             similar_segments_info.append(similar_info)
+            
+            # Retrain the reward model periodically if using active selection
+            if active_selection and len(preferences) % retrain_interval == 0:
+                print(f"\nRetraining reward model with {len(preferences)} preferences...")
+                
+                # Get observation and action dimensions
+                obs_key = "obs" if "obs" in data else "state"
+                state_dim = data[obs_key].shape[1]
+                action_dim = data["action"].shape[1]
+                
+                # Train a new model using all collected preferences
+                use_ensemble = uncertainty_method == "disagreement"
+                num_models = 5 if use_ensemble else 1
+                
+                # Train the model
+                reward_model = train_reward_model_from_preferences(
+                    preferences,
+                    segment_indices,
+                    data,
+                    device,
+                    state_dim,
+                    action_dim,
+                    hidden_dims=[256, 256],
+                    num_epochs=10,  # Use fewer epochs for faster retraining
+                    use_ensemble=use_ensemble,
+                    num_models=num_models
+                )
+                
+                # Make sure the model is in evaluation mode
+                reward_model.eval()
     
     print(f"Collected {len(preferences)} direct preferences")
     print(f"Generated {len(augmented_preferences)} augmented preferences")
@@ -842,6 +1019,18 @@ def main(cfg: DictConfig):
     use_dtw_distance = cfg.preferences.use_dtw_distance
     max_dtw_segments = cfg.preferences.max_dtw_segments
     
+    # Extract active selection parameters
+    active_selection = cfg.preferences.get('active_selection', False)
+    uncertainty_method = cfg.preferences.get('uncertainty_method', 'entropy')
+    reward_model_path = cfg.preferences.get('reward_model_path', None)
+    retrain_interval = cfg.preferences.get('retrain_interval', 10)
+    
+    # Setup device
+    device = None
+    if active_selection:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        print(f"Using device: {device} for active selection")
+    
     # Extract visualization parameters
     visualize = cfg.visualize
     visualize_augmented = cfg.visualize_augmented
@@ -853,6 +1042,8 @@ def main(cfg: DictConfig):
     
     # Create a more specific output directory with parameters
     dir_name = f"n{n_queries}_k{k_augment}_seed{random_seed}"
+    if active_selection:
+        dir_name += f"_active_{uncertainty_method}"
     if max_dtw_segments is not None:
         dir_name += f"_dtw{max_dtw_segments}"
     output_dir = os.path.join(base_output_dir, dir_name)
@@ -964,7 +1155,12 @@ def main(cfg: DictConfig):
         n_queries=n_queries, 
         k_augment=k_augment,
         use_ground_truth=use_ground_truth,
-        distance_matrix=distance_matrix
+        distance_matrix=distance_matrix,
+        active_selection=active_selection,
+        uncertainty_method=uncertainty_method,
+        reward_model_path=reward_model_path,
+        device=device,
+        retrain_interval=retrain_interval
     )
     
     # Separate direct and augmented preferences
