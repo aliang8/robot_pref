@@ -17,6 +17,8 @@ import hydra
 from omegaconf import DictConfig, OmegaConf
 import matplotlib.animation as animation
 
+from utils.dataset_utils import create_data_loaders
+
 # For running in interactive environments
 is_notebook = 'ipykernel' in sys.modules
 if is_notebook:
@@ -157,20 +159,31 @@ def train_reward_model_from_preferences(preferences, segment_indices, data, devi
     from torch.utils.data import Dataset, DataLoader, random_split
     
     # Create a preference dataset
-    dataset = PreferenceDataset(data, segment_pairs, segment_indices, preference_labels)
-    
-    # Create train/val split
-    train_size = int(0.8 * len(dataset))
-    val_size = len(dataset) - train_size
-    
-    train_dataset, val_dataset = random_split(
-        dataset, 
-        [train_size, val_size],
-        generator=torch.Generator().manual_seed(42)
+    data_cpu = {k: v.cpu() if isinstance(v, torch.Tensor) else v for k, v in data.items()}
+    dataset = PreferenceDataset(data_cpu, segment_pairs, segment_indices, preference_labels)
+
+    # Adjust batch size and workers for small datasets
+    effective_batch_size = min(cfg.training.batch_size, len(dataset))
+    if effective_batch_size <= 1:
+        effective_batch_size = 1
+        
+    effective_workers = cfg.training.get('num_workers', 4)
+    if effective_batch_size < 4 and effective_workers > 0:
+        effective_workers = 0
+        print("Reducing worker count to 0 for small batch size")
+
+    # Use utility function to create data loaders with all data for training
+    data_loaders = create_data_loaders(
+        dataset,
+        train_ratio=1.0,  # Use all data for training
+        val_ratio=0.0,    # No validation set
+        batch_size=effective_batch_size,
+        num_workers=effective_workers,
+        pin_memory=False,
+        seed=cfg.random_seed
     )
-    
-    train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=32)
+    train_loader = data_loaders['train']
+    val_loader = data_loaders['val']
     
     if use_ensemble:
         # Initialize ensemble model
@@ -293,7 +306,15 @@ def collect_sequential_preferences(data, segments, segment_indices, n_queries=10
     augmented_preferences = []
     similar_segments_info = []  # Store info about similar segments for visualization
     
-    # Keep track of compared pairs to avoid duplicates
+    # Initialize all possible pairs that can be compared
+    remaining_pairs = []
+    for i in range(n_segments):
+        for j in range(i+1, n_segments):
+            remaining_pairs.append((i, j))
+    
+    print(f"Created initial pool of {len(remaining_pairs)} pairs to compare")
+    
+    # Keep track of compared pairs to avoid duplicates (for safety checks)
     compared_pairs = set()
     
     # For active learning, we need an initial set of preferences before training the model
@@ -302,16 +323,21 @@ def collect_sequential_preferences(data, segments, segment_indices, n_queries=10
     
     with tqdm(total=n_queries, desc="Collecting preferences") as pbar:
         while len(preferences) < n_queries:
-            # Determine if we should use active selection for this query
+            if not remaining_pairs:
+                print("All possible pairs have been compared! No more pairs available.")
+                print(f"Total compared pairs: {len(compared_pairs)}/{n_segments * (n_segments - 1) // 2}")
+                break  # Exit the loop since we're done
+            
+            # Choose a pair based on active learning or random selection
             use_active = active_learning_enabled and len(preferences) >= initial_random_queries and reward_model is not None
             
-            # Select segment pair based on active selection or random sampling
             if use_active:
-                # Get the number of candidates to consider
-                n_candidates = cfg.active_learning.n_candidates
-                use_random_sampling = cfg.active_learning.use_random_sampling
+                # Sample a subset of remaining pairs for efficiency
+                n_candidates = min(cfg.active_learning.n_candidates, len(remaining_pairs))
+                sample_candidates = random.sample(remaining_pairs, n_candidates)
                 
-                # Use the unified function for active selection
+                # Use active learning to select the most uncertain pair
+                print(f"Using active selection with {n_candidates} candidates")
                 ranked_pairs = select_active_pref_query(
                     reward_model,
                     segments,
@@ -320,26 +346,31 @@ def collect_sequential_preferences(data, segments, segment_indices, n_queries=10
                     device,
                     uncertainty_method=uncertainty_method,
                     max_pairs=1,
-                    use_random_candidate_sampling=use_random_sampling,
-                    n_candidates=n_candidates
+                    use_random_candidate_sampling=False,
+                    candidate_pairs=sample_candidates
                 )
                 
                 # Get the most uncertain pair
                 if ranked_pairs:
                     i, j = ranked_pairs[0]
                 else:
-                    # Fallback to random selection if no pairs were selected
-                    i, j = random.sample(range(n_segments), 2)
+                    # Fallback to random selection
+                    print("No pairs were selected, falling back to random selection")
+                    i, j = random.choice(remaining_pairs)
             else:
-                # Sample two different random segments
-                i, j = random.sample(range(n_segments), 2)
-            
-            # Skip if this pair has already been compared
-            if (i, j) in compared_pairs or (j, i) in compared_pairs:
-                continue
+                # Just pick a random pair from remaining pairs
+                print(f"Randomly selecting from {len(remaining_pairs)} remaining pairs")
+                i, j = random.choice(remaining_pairs)
             
             # Mark this pair as compared
             compared_pairs.add((i, j))
+            compared_pairs.add((j, i))  # Also add the reverse pair to avoid both orderings
+            
+            # Remove this pair from remaining_pairs
+            # Since we only store pairs with i < j in remaining_pairs, ensure correct order
+            pair_to_remove = (i, j) if i < j else (j, i)
+            if pair_to_remove in remaining_pairs:
+                remaining_pairs.remove(pair_to_remove)
             
             # Get segment indices
             seg_i = segment_indices[i]
@@ -349,16 +380,19 @@ def collect_sequential_preferences(data, segments, segment_indices, n_queries=10
             if use_ground_truth:
                 pref = get_reward_based_preference(data, seg_i, seg_j)
                 
-                # Skip if no clear preference
+                # Skip if no clear preference, but DON'T add back to remaining_pairs
+                # This way we won't keep choosing pairs with no clear preference
                 if pref == 0 or pref is None:
+                    print(f"Skipping pair ({i}, {j}) due to no clear preference")
                     continue
             else:
                 # For future implementation: collect user preference here
                 # For now, just use ground truth
                 pref = get_reward_based_preference(data, seg_i, seg_j)
                 
-                # Skip if no clear preference
+                # Skip if no clear preference, but DON'T add back to remaining_pairs
                 if pref == 0 or pref is None:
+                    print(f"Skipping pair ({i}, {j}) due to no clear preference")
                     continue
             
             # Add preference to collected preferences
