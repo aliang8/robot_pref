@@ -7,11 +7,10 @@ from utils.dataset_utils import (
     PreferenceDataset,
     bradley_terry_loss,
     create_data_loaders,
-    evaluate_model_on_test_set,
     load_preferences_data
 )
 
-from utils.training_utils import train_model
+from utils.training_utils import train_model, evaluate_model_on_test_set
 
 from utils.active_learning_utils import (
     compute_uncertainty_scores,
@@ -29,12 +28,11 @@ __all__ = [
     'PreferenceDataset',
     'bradley_terry_loss',
     'create_data_loaders',
-    'evaluate_model_on_test_set',
     'load_preferences_data',
     
     # training_utils
     'train_model',
-    
+    'evaluate_model_on_test_set',
     # active_learning_utils
     'compute_uncertainty_scores',
     'select_uncertain_pairs',

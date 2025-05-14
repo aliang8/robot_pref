@@ -28,6 +28,71 @@ def log_wandb_metrics(train_loss, val_loss, epoch, lr=None, wandb=None):
     # Log metrics to wandb
     wandb.log(metrics)
 
+def evaluate_model_on_test_set(model, test_loader, device):
+    """Evaluate model performance on the test set.
+    
+    Args:
+        model: Trained reward model (single model or ensemble)
+        test_loader: DataLoader for test data
+        device: Device to run evaluation on
+        
+    Returns:
+        Dictionary containing evaluation metrics
+    """
+    print("\nEvaluating on test set...")
+    model.eval()
+    test_loss = 0
+    test_acc = 0
+    test_total = 0
+    logpdf_values = []
+    
+    with torch.no_grad():
+        for obs1, actions1, obs2, actions2, pref in tqdm(test_loader, desc="Testing"):
+            # Move to device
+            obs1, actions1 = obs1.to(device), actions1.to(device)
+            obs2, actions2 = obs2.to(device), actions2.to(device)
+            pref = pref.to(device)
+            
+            # Get reward predictions
+            reward1 = model(obs1, actions1)
+            reward2 = model(obs2, actions2)
+            
+            return1 = reward1.sum(dim=1)
+            return2 = reward2.sum(dim=1)
+            
+            # Compute loss
+            loss = bradley_terry_loss(return1, return2, pref)
+            test_loss += loss.mean().item()
+                
+            # Get model predictions
+            pred_pref = torch.where(return1 > return2, 
+                                    torch.ones_like(pref), 
+                                    torch.ones_like(pref) * 2)
+            
+            # Compute accuracy (prediction matches ground truth preference)
+            correct = (pred_pref == pref).sum().item()
+            test_acc += correct
+            test_total += pref.size(0)
+            
+            # Compute logpdf
+            # log of bradley terry 
+            bt_logits = return1 - return2
+            bt_probs = torch.sigmoid(bt_logits)
+            logpdf_values.append(torch.log(bt_probs).mean().item())
+    
+    avg_test_loss = test_loss / len(test_loader) if len(test_loader) > 0 else float('nan')
+    test_accuracy = test_acc / test_total if test_total > 0 else 0
+    avg_logpdf = np.mean(logpdf_values) if logpdf_values else float('nan')
+    
+    print(f"Test Loss: {avg_test_loss:.4f}, Accuracy: {test_accuracy:.4f}, Avg LogPDF: {avg_logpdf:.4f}")
+    print(f"Correctly predicted {test_acc} out of {test_total} preference pairs ({test_accuracy:.2%})")
+    
+    return {
+        "test_loss": avg_test_loss,
+        "test_accuracy": test_accuracy,
+        "avg_logpdf": avg_logpdf,
+        "num_test_samples": test_total
+    }
 
 def train_model(model, train_loader, val_loader, device, num_epochs=50, lr=1e-4, wandb=None, is_ensemble=False, output_path=None):
     """Unified training function for both single reward models and ensembles.
