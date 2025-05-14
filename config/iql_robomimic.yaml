@@ -37,7 +37,7 @@ iql:
 # Training parameters specific to IQL
 training:
   n_epochs: 100
-  n_steps_per_epoch: 1
+  n_steps_per_epoch: 1000
   eval_interval: 10
   eval_episodes: 10
   save_interval: 10
@@ -50,7 +50,6 @@ evaluation:
 # Output parameters
 output:
   output_dir: "iql_model"
-  video_dir: null
 
 # Wandb configuration specific to IQL
 wandb:

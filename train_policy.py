@@ -549,6 +549,7 @@ def main(cfg: DictConfig):
         eval_metrics_with_best = wandb_callback.update_eval_metrics(metrics, epoch)
         evaluation_results.append((epoch, eval_metrics_with_best))
         
+        import ipdb; ipdb.set_trace()
         # Log to wandb if enabled
         if cfg.wandb.use_wandb:
             log_to_wandb(eval_metrics_with_best, epoch=epoch, prefix="eval")
