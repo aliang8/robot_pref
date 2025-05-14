@@ -17,8 +17,7 @@ python train_policy.py --config-name=iql_robomimic \
     iql.weight_temp=1.0
 
 
-# active offline learning
+# active offline learning [random, entropy, disagreement]
 python train_reward_model_sampling.py \
     data.data_path="/scr2/shared/pref/datasets/robomimic/lift/mg_image_dense.pt" \
-    active_learning.fine_tune=true \
     active_learning.uncertainty_method=random
