@@ -34,4 +34,11 @@ wandb:
   entity: "clvr"
   name: null  # Will be auto-generated
   tags: ["reward_model", "preference_learning", "active_learning"]
-  notes: "Active preference learning with uncertainty sampling" 
+  notes: "Active preference learning with uncertainty sampling"
+
+# DTW augmentation parameters
+dtw_augmentation:
+  enabled: false              # Set to true to enable DTW augmentation
+  k_augment: 5                # Number of similar segments to find for each part of a pair
+  max_dtw_segments: 5000      # Max segments for computing DTW matrix (null or remove for all).
+                              # Using a subset can speed up matrix computation for very large segment sets. 

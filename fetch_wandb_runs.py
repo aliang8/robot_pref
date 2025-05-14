@@ -488,6 +488,8 @@ def plot_reward_model_comparisons(df, output_dir="reward_model_plots"):
     
     # Filter out rows with missing data
     df_filtered = df.dropna(subset=["top3_avg_eval_success_rate"])
+
+    
     
     # Process reward model paths for better display
     if "reward_model" in df_filtered.columns:
@@ -541,6 +543,10 @@ def plot_reward_model_comparisons(df, output_dir="reward_model_plots"):
             dataset_algo_df = df_filtered[(df_filtered["dataset"] == dataset) & 
                                          (df_filtered["algorithm"] == algorithm)]
             
+            # Plot BC as a baseline
+            dataset_bc_df = df_filtered[(df_filtered["dataset"] == dataset) & 
+                                         (df_filtered["algorithm"] == "bc")]
+            
             # Skip if no data for this combination
             if len(dataset_algo_df) == 0:
                 continue
@@ -564,8 +570,13 @@ def plot_reward_model_comparisons(df, output_dir="reward_model_plots"):
                 if metric_column not in dataset_algo_df.columns:
                     continue
                 
+                # Clean up reward model names by removing dataset prefix
+                dataset_algo_df["reward_model_name_short"] = dataset_algo_df["reward_model_name"].apply(
+                    lambda x: x.replace(f"{dataset}_", "") if isinstance(x, str) and x.startswith(f"{dataset}_") else x
+                )
+                
                 # Group and analyze by reward model
-                grouped = dataset_algo_df.groupby(["reward_model_name"])
+                grouped = dataset_algo_df.groupby(["reward_model_name_short"])
                 
                 # Calculate statistics for the current metric
                 stats = grouped[metric_column].agg([
@@ -588,13 +599,13 @@ def plot_reward_model_comparisons(df, output_dir="reward_model_plots"):
                 stats = stats.sort_values("mean", ascending=False)
                 
                 # Set up the figure - adjust height based on number of reward models for better x-label spacing
-                fig_width = max(12, len(reward_models)*1.5)
+                fig_width = max(12, (len(reward_models) + 1) *1.5)
                 fig_height = 8  # Increased height to accommodate x-labels
                 plt.figure(figsize=(fig_width, fig_height))
                 
                 # Create bar plot with error bars
                 ax = sns.barplot(
-                    x="reward_model_name", 
+                    x="reward_model_name_short", 
                     y="mean", 
                     data=stats,
                     palette="viridis",
@@ -618,11 +629,35 @@ def plot_reward_model_comparisons(df, output_dir="reward_model_plots"):
                         f"{row.mean:.3f}±{row.std:.3f}\nn={row.count}", 
                         ha='center', 
                         va='bottom',
-                        fontsize=10
+                        fontsize=12
                     )
                 
+                # Add BC baseline if available
+                if len(dataset_bc_df) > 0 and metric_column in dataset_bc_df.columns:
+                    bc_values = dataset_bc_df[metric_column].dropna()
+                    if len(bc_values) > 0:
+                        bc_mean = bc_values.mean()
+                        bc_std = bc_values.std()
+                        bc_count = len(bc_values)
+                        
+                        # Add horizontal line for BC baseline
+                        plt.axhline(y=bc_mean, color='r', linestyle='--', alpha=0.7, 
+                                   label=f"BC: {bc_mean:.3f}±{bc_std:.3f} (n={bc_count})")
+                        
+                        # Add shaded area for BC standard deviation
+                        plt.fill_between(
+                            [-0.5, len(stats) - 0.5], 
+                            bc_mean - bc_std, 
+                            bc_mean + bc_std, 
+                            color='r', 
+                            alpha=0.1
+                        )
+                        
+                        # Add legend
+                        plt.legend(loc='upper right', fontsize=12)
+                
                 # Add a title and labels
-                plt.title(f"Reward Model Comparison for {algorithm} on {dataset}\n({metric_title})")
+                plt.title(f"Reward Model Comparison: {algorithm} on {dataset}", fontsize=12)
                 plt.ylabel("Success Rate")
                 plt.xlabel("Reward Model")
                 

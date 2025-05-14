@@ -418,7 +418,7 @@ def collect_sequential_preferences(data, segments, segment_indices, n_queries=10
                 # If segment i is preferred
                 if pref == 1:
                     # Find segments similar to segment i
-                    similar_to_i = find_similar_segments(segments, i, k=k_augment, distance_matrix=distance_matrix)
+                similar_to_i = find_similar_segments(segments, i, k=k_augment, distance_matrix=distance_matrix)
                     similar_info['similar_to_i'] = similar_to_i
                     
                     # All segments similar to i are also preferred over j

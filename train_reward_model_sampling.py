@@ -16,7 +16,8 @@ from copy import deepcopy
 from trajectory_utils import (
     load_tensordict,
     create_segments,
-    sample_segment_pairs
+    sample_segment_pairs,
+    compute_dtw_distance_matrix
 )
 from utils.wandb_utils import log_to_wandb, log_artifact
 
@@ -31,6 +32,33 @@ from utils.training_utils import train_model
 from utils import evaluate_model_on_test_set
 from utils.dataset_utils import create_data_loaders
 from utils.seed_utils import set_seed
+
+
+def find_similar_segments_dtw(query_idx, k, distance_matrix):
+    """Find the k most similar segments to the query segment using a pre-computed distance matrix.
+    
+    Args:
+        query_idx: Index of the query segment in the distance_matrix.
+        k: Number of similar segments to find.
+        distance_matrix: Pre-computed DTW distance matrix.
+        
+    Returns:
+        list: Indices of the k most similar segments (relative to the distance_matrix).
+    """
+    if query_idx < 0 or query_idx >= distance_matrix.shape[0]:
+        # Query index is out of bounds for the distance matrix (e.g., segment not in subsample)
+        return []
+        
+    distances = distance_matrix[query_idx].copy()
+    distances[query_idx] = float('inf')  # Exclude self
+    
+    # Ensure k is not larger than the number of available other segments
+    k = min(k, len(distances) -1) 
+    if k < 0: # handles case where distances has only 1 element after excluding self
+        return []
+
+    similar_indices = np.argsort(distances)[:k]
+    return similar_indices.tolist()
 
 
 def run_reward_analysis(model_path, data_path, output_dir, num_episodes=9, device=None, random_seed=42, wandb_run=None):
@@ -112,7 +140,6 @@ def train_final_reward_model(labeled_pairs, segment_indices, labeled_preferences
     train_loader = data_loaders['train']
     val_loader = data_loaders['val']
     print(f"Using all {data_loaders['train_size']} labeled samples for training the final model (no validation split)")
-    
     # Train final model
     final_model = RewardModel(state_dim, action_dim, hidden_dims=cfg.model.hidden_dims)
     
@@ -121,8 +148,11 @@ def train_final_reward_model(labeled_pairs, segment_indices, labeled_preferences
     uncertainty_method = cfg.active_learning.uncertainty_method
     fine_tune_str = "finetune" if cfg.active_learning.fine_tune else "scratch"
     
+    # Add augmentation tag if enabled
+    aug_str = "_aug" if cfg.dtw_augmentation.enabled else ""
+    
     # Create descriptive subdirectory path
-    output_subdir = f"{dataset_name}_active_{uncertainty_method}_init{cfg.active_learning.initial_size}_max{cfg.active_learning.max_queries}_batch{cfg.active_learning.batch_size}_{fine_tune_str}"
+    output_subdir = f"{dataset_name}_active_{uncertainty_method}_init{cfg.active_learning.initial_size}_max{cfg.active_learning.max_queries}_batch{cfg.active_learning.batch_size}_{fine_tune_str}{aug_str}"
     model_dir = os.path.join(cfg.output.output_dir, output_subdir)
     os.makedirs(model_dir, exist_ok=True)
     
@@ -179,6 +209,16 @@ def active_preference_learning(cfg):
     print(f"  Ensemble models: {cfg.active_learning.num_models}")
     print(f"  Training epochs per iteration: {cfg.training.num_epochs}")
     
+    # DTW Augmentation Parameters
+    print("\nDTW Augmentation Parameters:")
+    dtw_enabled = cfg.dtw_augmentation.enabled
+    dtw_k_augment = cfg.dtw_augmentation.k_augment
+    dtw_max_segments_for_matrix = cfg.dtw_augmentation.max_dtw_segments
+    print(f"  Enabled: {dtw_enabled}")
+    if dtw_enabled:
+        print(f"  K augment (similar segments): {dtw_k_augment}")
+        print(f"  Max segments for DTW matrix computation: {dtw_max_segments_for_matrix if dtw_max_segments_for_matrix is not None else 'All'}")
+
     # Get random seed from config (already set in main)
     random_seed = cfg.get('random_seed', 42)
     
@@ -252,6 +292,31 @@ def active_preference_learning(cfg):
         n_pairs=cfg.data.num_pairs
     )
     
+    # Compute DTW distance matrix if augmentation is enabled
+    distance_matrix = None
+    idx_mapping_dtw = None # Maps new_idx in subsampled_segments (used for DTW matrix) to old_idx in original segments
+    original_to_dtw_idx = None # Maps old_idx to new_idx in subsampled_segments
+
+    if dtw_enabled:
+        print("\nComputing DTW distance matrix for augmentation...")
+        # 'segments' is a list of dicts {'obs': tensor, 'action': tensor}
+        # compute_dtw_distance_matrix from trajectory_utils handles this format.
+        # It uses segment['obs'] for DTW.
+        distance_matrix, idx_mapping_dtw = compute_dtw_distance_matrix(
+            segments, # Original full list of segments
+            max_segments=dtw_max_segments_for_matrix,
+            random_seed=random_seed
+        )
+        if distance_matrix is not None:
+            print(f"DTW distance matrix computed with shape: {distance_matrix.shape}")
+            if idx_mapping_dtw:
+                print(f"DTW matrix computed on a subset of {len(idx_mapping_dtw)} segments.")
+                # Create reverse mapping: original segment index to DTW matrix index
+                original_to_dtw_idx = {old_idx: new_idx for new_idx, old_idx in idx_mapping_dtw.items()}
+        else:
+            print("Warning: DTW distance matrix computation failed or yielded no result. Augmentation will be disabled.")
+            dtw_enabled = False # Disable if matrix computation failed
+
     # Create test dataset from a separate set of pairs for consistent evaluation
     # We use 20% of all pairs for testing
     test_size = min(int(0.2 * len(all_segment_pairs)), len(all_segment_pairs))
@@ -314,13 +379,14 @@ def active_preference_learning(cfg):
     
     # Keep track of the previous ensemble for fine-tuning
     prev_ensemble = None
-    
+
     # Create a mapping from pair to original index for preference lookup
     pair_to_original_idx = {}
-    for i, pair in enumerate(all_segment_pairs):
-        pair_to_original_idx[tuple(pair)] = i
+    for i, pair_val in enumerate(all_segment_pairs): # Renamed pair to pair_val to avoid conflict
+        pair_to_original_idx[tuple(pair_val)] = i
     
     while total_labeled < max_queries and len(unlabeled_pairs) > 0:
+        
         iteration += 1
         print(f"\n--- Active Learning Iteration {iteration} ---")
         print(f"Currently have {total_labeled} labeled pairs")
@@ -424,7 +490,7 @@ def active_preference_learning(cfg):
             n_candidates=cfg.active_learning.n_candidates,
             candidate_pairs=unlabeled_pairs  # Pass unlabeled_pairs directly
         )
-        
+
         # Extract the selected pairs
         selected_pairs = ranked_pairs[:batch_size]
         
@@ -440,13 +506,13 @@ def active_preference_learning(cfg):
         # In a real system, this would be where we query the human
         selected_preferences = []
         valid_selected_pairs = []
-        for pair in selected_pairs:
-            pair_tuple = tuple(pair)
+        for pair_val_loop in selected_pairs: # Renamed pair to pair_val_loop
+            pair_tuple = tuple(pair_val_loop)
             if pair_tuple in pair_to_original_idx:
                 selected_preferences.append(gt_preferences[pair_to_original_idx[pair_tuple]])
-                valid_selected_pairs.append(pair)
+                valid_selected_pairs.append(list(pair_val_loop)) # Ensure it's a list of lists
             else:
-                print(f"Warning: Pair {pair} not found in original pairs mapping")
+                print(f"Warning: Pair {pair_val_loop} not found in original pairs mapping")
         
         # Update selected_pairs to only include valid ones
         selected_pairs = valid_selected_pairs
@@ -455,17 +521,129 @@ def active_preference_learning(cfg):
             print("No valid pairs selected. Ending active learning loop.")
             break
             
-        # Add newly labeled pairs to labeled set
-        labeled_pairs.extend(selected_pairs)
-        labeled_preferences.extend(selected_preferences)
-        total_labeled += len(selected_pairs)
+        # --- DTW Augmentation Start ---
+        current_iter_augmented_pairs = []
+        current_iter_augmented_preferences = []
+
+        if dtw_enabled and distance_matrix is not None and len(selected_pairs) > 0:
+            print(f"Augmenting {len(selected_pairs)} selected pairs using DTW (k={dtw_k_augment})...")
+            
+            for pair_original_indices, preference_val in zip(selected_pairs, selected_preferences):
+                original_i, original_j = pair_original_indices # These are original segment indices
+                
+                dtw_i, dtw_j = -1, -1
+                can_augment_this_pair = True
+
+                if idx_mapping_dtw: # Using a subsampled matrix
+                    if original_to_dtw_idx is None: # Should not happen if idx_mapping_dtw exists
+                         print("Error: original_to_dtw_idx not created despite idx_mapping_dtw. Skipping augmentation.")
+                         can_augment_this_pair = False
+                    else:
+                        dtw_i = original_to_dtw_idx.get(original_i, -1)
+                        dtw_j = original_to_dtw_idx.get(original_j, -1)
+                        if dtw_i == -1 or dtw_j == -1:
+                            # print(f"Warning: Pair ({original_i}, {original_j}) involves segments not in DTW subset. Skipping augmentation for this pair.")
+                            can_augment_this_pair = False
+                else: # No subsampling, direct mapping for distance_matrix indices
+                    dtw_i, dtw_j = original_i, original_j
+
+                if not can_augment_this_pair:
+                    continue
+                
+                # Ensure dtw_i and dtw_j are valid indices for distance_matrix
+                if not (0 <= dtw_i < distance_matrix.shape[0] and 0 <= dtw_j < distance_matrix.shape[0]):
+                    # print(f"Warning: Invalid DTW indices {dtw_i}, {dtw_j} for pair ({original_i}, {original_j}) derived. Skipping augmentation.")
+                    continue
+                
+                # preference_val == 1 means original_i is preferred over original_j
+                if preference_val == 1:
+                    similar_to_dtw_i_indices = find_similar_segments_dtw(dtw_i, dtw_k_augment, distance_matrix)
+                    for sim_dtw_idx in similar_to_dtw_i_indices:
+                        sim_original_idx = idx_mapping_dtw[sim_dtw_idx] if idx_mapping_dtw else sim_dtw_idx
+                        if sim_original_idx != original_j and sim_original_idx != original_i : # Avoid (x,x) and already queried original_j
+                            current_iter_augmented_pairs.append([sim_original_idx, original_j])
+                            current_iter_augmented_preferences.append(1)
+
+                    similar_to_dtw_j_indices = find_similar_segments_dtw(dtw_j, dtw_k_augment, distance_matrix)
+                    for sim_dtw_idx in similar_to_dtw_j_indices:
+                        sim_original_idx = idx_mapping_dtw[sim_dtw_idx] if idx_mapping_dtw else sim_dtw_idx
+                        if sim_original_idx != original_i and sim_original_idx != original_j: # Avoid (x,x) and already queried original_i
+                            current_iter_augmented_pairs.append([original_i, sim_original_idx])
+                            current_iter_augmented_preferences.append(1)
+                
+                elif preference_val == 2: # original_j is preferred over original_i
+                    similar_to_dtw_j_indices = find_similar_segments_dtw(dtw_j, dtw_k_augment, distance_matrix)
+                    for sim_dtw_idx in similar_to_dtw_j_indices:
+                        sim_original_idx = idx_mapping_dtw[sim_dtw_idx] if idx_mapping_dtw else sim_dtw_idx
+                        if sim_original_idx != original_i and sim_original_idx != original_j:
+                            current_iter_augmented_pairs.append([original_i, sim_original_idx])
+                            current_iter_augmented_preferences.append(2)
+
+                    similar_to_dtw_i_indices = find_similar_segments_dtw(dtw_i, dtw_k_augment, distance_matrix)
+                    for sim_dtw_idx in similar_to_dtw_i_indices:
+                        sim_original_idx = idx_mapping_dtw[sim_dtw_idx] if idx_mapping_dtw else sim_dtw_idx
+                        if sim_original_idx != original_j and sim_original_idx != original_i:
+                            current_iter_augmented_pairs.append([sim_original_idx, original_j])
+                            current_iter_augmented_preferences.append(2)
+        # --- DTW Augmentation End ---
+
+        # Combine human-queried and augmented pairs, then add uniquely to labeled_pairs
+        all_new_pairs_this_iteration = []
+        all_new_preferences_this_iteration = []
+
+        all_new_pairs_this_iteration.extend(selected_pairs) # Human-queried
+        all_new_preferences_this_iteration.extend(selected_preferences)
+
+        if current_iter_augmented_pairs:
+            all_new_pairs_this_iteration.extend(current_iter_augmented_pairs) # Augmented
+            all_new_preferences_this_iteration.extend(current_iter_augmented_preferences)
+            print(f"Generated {len(current_iter_augmented_pairs)} raw augmented pairs this iteration.")
+
         
-        # Remove selected pairs from unlabeled set
-        # Create a set of pairs to remove for faster lookup
-        pairs_to_remove = set(tuple(p) for p in selected_pairs)
-        unlabeled_pairs = [p for p in unlabeled_pairs if tuple(p) not in pairs_to_remove]
+        # Filter all new pairs to ensure they are unique and not already labeled
+        uniquely_added_to_labeled_pairs = []
+        uniquely_added_to_labeled_preferences = []
         
-        print(f"Now have {len(labeled_pairs)} labeled and {len(unlabeled_pairs)} unlabeled pairs")
+        # Set of (sorted_tuple_of_pair_indices) already in the main labeled_pairs list
+        current_global_labeled_pairs_tuples = set(tuple(sorted(p)) for p in labeled_pairs)
+
+        for new_pair, new_pref in zip(all_new_pairs_this_iteration, all_new_preferences_this_iteration):
+            if new_pair[0] == new_pair[1]: # Skip self-loops
+                continue
+            
+            pair_tuple_sorted = tuple(sorted(new_pair))
+            if pair_tuple_sorted not in current_global_labeled_pairs_tuples:
+                uniquely_added_to_labeled_pairs.append(new_pair)
+                uniquely_added_to_labeled_preferences.append(new_pref)
+                current_global_labeled_pairs_tuples.add(pair_tuple_sorted) # Add to set to ensure uniqueness within this batch
+
+        if uniquely_added_to_labeled_pairs:
+            labeled_pairs.extend(uniquely_added_to_labeled_pairs)
+            labeled_preferences.extend(uniquely_added_to_labeled_preferences)
+            
+            # Count how many were original human queries vs augmented, among those *actually added*
+            num_human_added_this_iter = 0
+            selected_pairs_tuples = set(tuple(sorted(p)) for p in selected_pairs)
+            for added_p in uniquely_added_to_labeled_pairs:
+                if tuple(sorted(added_p)) in selected_pairs_tuples:
+                     num_human_added_this_iter +=1
+            num_aug_added_this_iter = len(uniquely_added_to_labeled_pairs) - num_human_added_this_iter
+            print(f"Added {num_human_added_this_iter} unique human-queried and {num_aug_added_this_iter} unique augmented pairs to labeled set.")
+
+        # total_labeled tracks number of *human queries attempted* in this iteration
+        total_labeled += len(selected_pairs) 
+        
+        # Remove selected pairs (human-queried ones) and any newly labeled (augmented) pairs from the unlabeled set
+        # Rebuild the set of all labeled pairs for efficient filtering of unlabeled_pairs
+        final_labeled_tuples_for_unlabeled_filtering = set(tuple(sorted(p)) for p in labeled_pairs)
+        
+        new_unlabeled_pairs_list = []
+        for p_unlabeled in unlabeled_pairs:
+            if tuple(sorted(p_unlabeled)) not in final_labeled_tuples_for_unlabeled_filtering:
+                new_unlabeled_pairs_list.append(p_unlabeled)
+        unlabeled_pairs = new_unlabeled_pairs_list
+        
+        print(f"Now have {len(labeled_pairs)} labeled (human + augmented) and {len(unlabeled_pairs)} unlabeled pairs")
     
     # Train final model on all labeled data
     final_model, final_metrics, train_losses, val_losses = train_final_reward_model(
@@ -505,7 +683,8 @@ def active_preference_learning(cfg):
     fine_tune_str = "finetune" if cfg.active_learning.fine_tune else "scratch"
     
     # Create descriptive subdirectory
-    output_subdir = f"{dataset_name}_active_{uncertainty_method}_init{cfg.active_learning.initial_size}_max{cfg.active_learning.max_queries}_batch{cfg.active_learning.batch_size}_{fine_tune_str}"
+    aug_str = "_aug" if cfg.dtw_augmentation.enabled else ""
+    output_subdir = f"{dataset_name}_active_{uncertainty_method}_init{cfg.active_learning.initial_size}_max{cfg.active_learning.max_queries}_batch{cfg.active_learning.batch_size}_{fine_tune_str}{aug_str}"
     
     # Create model directory
     model_dir = os.path.join(cfg.output.output_dir, output_subdir)

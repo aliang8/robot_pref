@@ -32,7 +32,7 @@ iql:
   tau: 0.005
   n_critics: 2
   expectile: 0.7
-  weight_temp: 3.0
+  weight_temp: 1.0
 
 # Training parameters specific to IQL
 training:
