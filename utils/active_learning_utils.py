@@ -58,13 +58,8 @@ def compute_uncertainty_scores(model, segment_pairs, segment_indices, data, devi
         
         # Extract observations and actions
         obs = data_cpu[obs_key][start:end].clone()
-        actions = data_cpu[action_key][start:end-1].clone()
-        
-        # Ensure observations and actions have same length
-        min_len = min(obs.shape[0]-1, actions.shape[0])
-        obs = obs[:min_len]
-        actions = actions[:min_len]
-        
+        actions = data_cpu[action_key][start:end].clone()
+
         batch_obs.append(obs)
         batch_actions.append(actions)
     
@@ -130,12 +125,6 @@ def compute_uncertainty_scores(model, segment_pairs, segment_indices, data, devi
             eps = 1e-8
             p = torch.clamp(probs, min=eps, max=1-eps)
             entropy = -p * torch.log(p) - (1-p) * torch.log(1-p)
-            
-            # Take mean if we have a batch
-            if entropy.dim() > 0:
-                score = entropy.mean().item()
-            else:
-                score = entropy.item()
             
         elif method == "disagreement":
             # Compute preference probability for each model

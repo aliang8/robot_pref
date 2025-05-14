@@ -26,8 +26,8 @@ from utils.wandb_utils import log_to_wandb
 from utils.eval_utils import evaluate_policy_manual, custom_evaluate_on_environment
 from utils.data_utils import AttrDict
 from utils.viz import create_video_grid
-from train_reward_model import SegmentRewardModel
 from utils.seed_utils import set_seed
+from models import RewardModel
 
 def is_valid_video_file(file_path):
     """Simple check if a video file exists and is valid."""
@@ -148,12 +148,7 @@ def load_dataset(data, reward_model=None, device=None, use_ground_truth=False, m
                 batch_actions = valid_actions[start_idx:end_idx].to(device)
                 
                 # Compute rewards, need the per step reward not the summed reward
-                batch_rewards = reward_model.reward_model(batch_obs, batch_actions).cpu().numpy()
-                
-                # Ensure proper shape for concatenation
-                if np.isscalar(batch_rewards) or (hasattr(batch_rewards, 'shape') and batch_rewards.shape == ()):
-                    batch_rewards = np.array([batch_rewards])
-                    
+                batch_rewards = reward_model(batch_obs, batch_actions).cpu().numpy()        
                 all_rewards.append(batch_rewards)
         
         # Combine all rewards
@@ -296,7 +291,7 @@ def main(cfg: DictConfig):
     if algorithm_name.lower() == "iql":
         # For IQL, we need a reward model
         # Load reward model
-        reward_model = SegmentRewardModel(state_dim, action_dim, hidden_dims=cfg.model.hidden_dims)
+        reward_model = RewardModel(state_dim, action_dim, hidden_dims=cfg.model.hidden_dims)
         reward_model.load_state_dict(torch.load(cfg.data.reward_model_path))
         reward_model = reward_model.to(device)
         reward_model.eval()
