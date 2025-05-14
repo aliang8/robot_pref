@@ -196,18 +196,29 @@ def train_final_reward_model(labeled_pairs, segment_indices, labeled_preferences
 @hydra.main(config_path="config", config_name="reward_model_active", version_base=None)
 def main(cfg: DictConfig):
     """Main entry point for active preference learning."""
+    # Get the dataset name
+    dataset_name = Path(cfg.data.data_path).stem
+    
+    # Replace only the dataset name placeholder in the template strings
+    if hasattr(cfg.output, "model_dir_name"):
+        cfg.output.model_dir_name = cfg.output.model_dir_name.replace("DATASET_NAME", dataset_name)
+    
+    if hasattr(cfg.output, "artifact_name"):
+        cfg.output.artifact_name = cfg.output.artifact_name.replace("DATASET_NAME", dataset_name)
+    
     # Set random seed for reproducibility at the beginning
     random_seed = cfg.get('random_seed', 42)
     set_seed(random_seed)
     print(f"Global random seed set to {random_seed}")
     
-    active_preference_learning(cfg)
+    active_preference_learning(cfg, dataset_name)
 
-def active_preference_learning(cfg):
+def active_preference_learning(cfg, dataset_name=None):
     """Main function for active preference learning.
     
     Args:
         cfg: Configuration object from Hydra
+        dataset_name: Name of the dataset (extracted from path)
     """
     print("\n" + "=" * 50)
     print("Active Preference Learning with Uncertainty Sampling")
@@ -253,9 +264,10 @@ def active_preference_learning(cfg):
     
     # Initialize wandb
     if cfg.wandb.use_wandb:
-        # Generate experiment name based on data path
-        dataset_name = Path(cfg.data.data_path).stem
-        
+        # Use dataset_name passed from main, or extract if not provided
+        if dataset_name is None:
+            dataset_name = Path(cfg.data.data_path).stem
+            
         # Set up a run name if not specified
         run_name = cfg.wandb.name
         if run_name is None:
