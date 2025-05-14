@@ -7,7 +7,7 @@ python collect_cluster_preferences.py --preprocessed_data preprocessed/assembly_
 # train reward model without active learning
 python train_reward_model.py \
     data.data_path=/scr/aliang80/robot_pref/labeled_datasets/buffer_assembly-v2_balanced.pt \
-    data.num_pairs=500 
+    data.num_pairs=100 
 
 # train reward model with active offline learning
 python train_reward_model_active.py \
@@ -18,6 +18,10 @@ python train_reward_model_active.py \
 python train_policy.py \
     --config-name=iql \
     data.data_path=/scr/aliang80/robot_pref/labeled_datasets/buffer_assembly-v2_balanced.pt \
-    wandb.use_wandb=false \
-    random_seed=521 \
+    wandb.use_wandb=true \
+    random_seed=521,522,523 \
     data.reward_model_path=/scr/aliang80/robot_pref/results/active_reward_model/
+
+# pbrl with augmentations
+python collect_sequential_pref.py \
+    data.data_path=/scr/aliang80/robot_pref/labeled_datasets/buffer_assembly-v2_balanced.pt \

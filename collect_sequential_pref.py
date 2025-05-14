@@ -45,18 +45,18 @@ from models.reward_models import RewardModel, EnsembleRewardModel
 
 # Import utility functions from the modular structure
 from utils.dataset_utils import PreferenceDataset, bradley_terry_loss
-from utils.training_utils import train_ensemble_model
 from utils.active_learning_utils import (
     compute_uncertainty_scores, 
     select_uncertain_pairs,
-    select_active_pref_query
+    select_active_pref_query,
+    get_ground_truth_preferences
 )
 
 # Import seed utility
 from utils.seed_utils import set_seed
 
 def get_reward_based_preference(data, segment1, segment2):
-    """Determine ground truth preference based on cumulative reward.
+    """Wrapper for get_ground_truth_preferences that maintains the original signature.
     
     Args:
         data: TensorDict with observations and rewards
@@ -88,33 +88,6 @@ def get_reward_based_preference(data, segment1, segment2):
         return 1  # First segment preferred
     else:
         return 2  # Second segment preferred
-
-def extract_segments(data, segment_length=20, max_segments=None, use_relative_differences=False):
-    """Extract segments from the data.
-    
-    Args:
-        data: TensorDict with observations and episode IDs
-        segment_length: Length of segments to extract
-        max_segments: Maximum number of segments to extract
-        use_relative_differences: If True, extract frame-to-frame differences
-        
-    Returns:
-        segments: List of trajectory segments
-        segment_indices: List of (start_idx, end_idx) for each segment
-        original_segments: List of original position segments
-    """
-    print(f"Extracting segments with length {segment_length}...")
-    
-    # Reuse the extract_eef_trajectories function from eef_clustering.py
-    segments, segment_indices, original_segments = extract_eef_trajectories(
-        data, 
-        segment_length=segment_length, 
-        max_segments=max_segments,
-        use_relative_differences=use_relative_differences
-    )
-    
-    print(f"Extracted {len(segments)} segments")
-    return segments, segment_indices, original_segments
 
 def find_similar_segments(segments, query_idx, k=5, distance_matrix=None):
     """Find the k most similar segments to the query segment.
@@ -277,16 +250,11 @@ def collect_sequential_preferences(data, segments, segment_indices, n_queries=10
         print("Using provided distance matrix")
     
     # Get active learning parameters from config
-    active_learning_enabled = False
-    uncertainty_method = "entropy"
-    reward_model_path = None
-    retrain_interval = 10
-    
-    if cfg and hasattr(cfg, 'active_learning'):
-        active_learning_enabled = getattr(cfg.active_learning, 'enabled', False)
-        uncertainty_method = getattr(cfg.active_learning, 'uncertainty_method', "entropy")
-        reward_model_path = getattr(cfg.active_learning, 'reward_model_path', None)
-        retrain_interval = getattr(cfg.active_learning, 'retrain_interval', 10)
+    active_learning_enabled = cfg.active_learning.enabled
+    uncertainty_method = cfg.active_learning.uncertainty_method
+    retrain_interval = cfg.active_learning.retrain_interval
+    reward_model_path = cfg.active_learning.reward_model_path
+    num_models = cfg.active_learning.num_models
     
     # Initialize reward model for active selection if requested
     reward_model = None
@@ -340,15 +308,8 @@ def collect_sequential_preferences(data, segments, segment_indices, n_queries=10
             # Select segment pair based on active selection or random sampling
             if use_active:
                 # Get the number of candidates to consider
-                n_candidates = 100
-                use_random_sampling = True
-                
-                # Extract configuration parameters if available
-                if cfg and hasattr(cfg, 'active_learning'):
-                    if hasattr(cfg.active_learning, 'n_candidates'):
-                        n_candidates = cfg.active_learning.n_candidates
-                    if hasattr(cfg.active_learning, 'use_random_sampling'):
-                        use_random_sampling = cfg.active_learning.use_random_sampling
+                n_candidates = cfg.active_learning.n_candidates
+                use_random_sampling = cfg.active_learning.use_random_sampling
                 
                 # Use the unified function for active selection
                 ranked_pairs = select_active_pref_query(
@@ -471,7 +432,7 @@ def collect_sequential_preferences(data, segments, segment_indices, n_queries=10
                 action_dim = data["action"].shape[1]
                 
                 # Train a new model using all collected preferences
-                use_ensemble = uncertainty_method == "disagreement"
+                use_ensemble = uncertainty_method == "disagreement" or uncertainty_method == "entropy"
                 num_models = 5 if use_ensemble else 1
                 
                 # Train the model
@@ -1074,22 +1035,38 @@ def main(cfg: DictConfig):
     # Output parameters
     base_output_dir = cfg.output.output_dir
     
-    # Create a more specific output directory with parameters
-    dir_name = f"n{n_queries}_k{k_augment}_seed{random_seed}"
-    
     # Check if active learning is enabled
     active_learning_enabled = False
     uncertainty_method = "entropy"
     if hasattr(cfg, 'active_learning'):
         active_learning_enabled = getattr(cfg.active_learning, 'enabled', False)
         uncertainty_method = getattr(cfg.active_learning, 'uncertainty_method', "entropy")
+    
+    # Get dataset name for the subdirectory
+    dataset_name = Path(data_path).stem
+    
+    # Replace dataset name placeholder in the model_dir_name if it exists
+    if hasattr(cfg.output, "model_dir_name"):
+        model_dir_name = cfg.output.model_dir_name.replace("DATASET_NAME", dataset_name)
         
-    if active_learning_enabled:
-        dir_name += f"_active_{uncertainty_method}"
+        # Add active learning method if enabled
+        if active_learning_enabled:
+            model_dir_name += f"_active_{uncertainty_method}"
+            
+        # Add DTW info if using limited segments
+        if max_dtw_segments is not None:
+            model_dir_name += f"_dtw{max_dtw_segments}"
+    else:
+        # Fallback to the old naming scheme if model_dir_name is not defined
+        model_dir_name = f"n{n_queries}_k{k_augment}_seed{random_seed}"
         
-    if max_dtw_segments is not None:
-        dir_name += f"_dtw{max_dtw_segments}"
-    output_dir = os.path.join(base_output_dir, dir_name)
+        if active_learning_enabled:
+            model_dir_name += f"_active_{uncertainty_method}"
+            
+        if max_dtw_segments is not None:
+            model_dir_name += f"_dtw{max_dtw_segments}"
+    
+    output_dir = os.path.join(base_output_dir, model_dir_name)
     os.makedirs(output_dir, exist_ok=True)
     
     print(f"Results will be saved to: {output_dir}")
@@ -1150,12 +1127,13 @@ def main(cfg: DictConfig):
                 print("Using precomputed distance matrix from preprocessed data")
         else:
             print("Extracting segments from data...")
-            segments, segment_indices, original_segments = extract_segments(
+            segments, segment_indices, original_segments = extract_eef_trajectories(
                 data, 
                 segment_length=segment_length,
                 max_segments=max_segments,
                 use_relative_differences=use_relative_differences
             )
+            print(f"Extracted {len(segments)} segments")
             distance_matrix = None
     else:
         print(f"Loading data from {data_path}")
@@ -1163,12 +1141,13 @@ def main(cfg: DictConfig):
         data['_source_path'] = data_path
         
         # Extract segments
-        segments, segment_indices, original_segments = extract_segments(
+        segments, segment_indices, original_segments = extract_eef_trajectories(
             data, 
             segment_length=segment_length,
             max_segments=max_segments,
             use_relative_differences=use_relative_differences
         )
+        print(f"Extracted {len(segments)} segments")
         distance_matrix = None
     
     # Check if we should use DTW distance matrix from clustering

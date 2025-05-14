@@ -74,6 +74,16 @@ def run_reward_analysis(model_path, data_path, output_dir, num_episodes=9, devic
 @hydra.main(config_path="config", config_name="reward_model", version_base=None)
 def main(cfg: DictConfig):
     """Train a state-action reward model using BT loss with Hydra config."""
+    # Get the dataset name
+    dataset_name = Path(cfg.data.data_path).stem
+    
+    # Replace only the dataset name placeholder in the template strings
+    if hasattr(cfg.output, "model_dir_name"):
+        cfg.output.model_dir_name = cfg.output.model_dir_name.replace("DATASET_NAME", dataset_name)
+    
+    if hasattr(cfg.output, "artifact_name"):
+        cfg.output.artifact_name = cfg.output.artifact_name.replace("DATASET_NAME", dataset_name)
+    
     print("\n" + "=" * 50)
     print("Training reward model with Bradley-Terry preference learning")
     print("=" * 50)
@@ -114,7 +124,7 @@ def main(cfg: DictConfig):
     # Get dataset name for the subdirectory
     dataset_name = Path(cfg.data.data_path).stem
     
-    # If using preference data, include that in the output directory path
+    # If using preference data, include that info
     pref_dataset_info = ""
     if hasattr(cfg.data, 'preferences_data_path') and cfg.data.preferences_data_path:
         # Extract key parameters from the preference dataset path
@@ -133,6 +143,12 @@ def main(cfg: DictConfig):
         else:
             # If we can't extract parameters, just use the parent directory name
             pref_dataset_info = f"_{pref_dir.name}"
+    
+    # Get model directory name from config, with pref_dataset_info added if present
+    model_dir_name = cfg.output.model_dir_name
+    # Insert pref_dataset_info after the dataset name if present
+    if pref_dataset_info:
+        model_dir_name = model_dir_name.replace(dataset_name, f"{dataset_name}{pref_dataset_info}")
     
     os.makedirs(output_dir, exist_ok=True)
     model_dir = output_dir
@@ -357,11 +373,16 @@ def main(cfg: DictConfig):
                 "preference_data": cfg.data.preferences_data_path if hasattr(cfg.data, 'preferences_data_path') else None
             }
             
+            # Get artifact name from config, with pref_dataset_info added if present
+            artifact_name = cfg.output.artifact_name
+            if pref_dataset_info:
+                artifact_name = artifact_name.replace(dataset_name, f"{dataset_name}{pref_dataset_info}")
+            
             # Create and log artifact
             artifact = log_artifact(
                 model_path, 
                 artifact_type="reward_model", 
-                name=f"{dataset_name}{pref_dataset_info}_seg{cfg.data.segment_length}_pairs{cfg.data.num_pairs}_epochs{cfg.training.num_epochs}", 
+                name=artifact_name, 
                 metadata=metadata
             )
             if artifact:

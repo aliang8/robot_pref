@@ -157,12 +157,13 @@ def train_model(model, train_loader, val_loader, device, num_epochs=50, lr=1e-4,
             reward2 = model(obs2, actions2)
             
             if is_ensemble:
-                # take mean over ensemble
-                reward1 = reward1.mean(dim=0)
-                reward2 = reward2.mean(dim=0)
-
-            return1 = reward1.sum(dim=1)
-            return2 = reward2.sum(dim=1)
+                # [B, N, T] -> [B, N]
+                return1 = reward1.sum(dim=-1)
+                return2 = reward2.sum(dim=-1)
+                pref = pref.unsqueeze(0).repeat(model.num_models, 1)
+            else:
+                return1 = reward1.sum(dim=1)
+                return2 = reward2.sum(dim=1)
 
             loss = bradley_terry_loss(return1, return2, pref)
 
@@ -202,11 +203,13 @@ def train_model(model, train_loader, val_loader, device, num_epochs=50, lr=1e-4,
                     reward2 = model(obs2, actions2)
 
                     if is_ensemble:
-                        reward1 = reward1.mean(dim=0)
-                        reward2 = reward2.mean(dim=0)
-
-                    return1 = reward1.sum(dim=1)
-                    return2 = reward2.sum(dim=1)
+                        # [B, N, T] -> [B, N]
+                        return1 = reward1.sum(dim=-1)
+                        return2 = reward2.sum(dim=-1)
+                        pref = pref.unsqueeze(0).repeat(model.num_models, 1)
+                    else:
+                        return1 = reward1.sum(dim=1)
+                        return2 = reward2.sum(dim=1)
 
                     batch_loss = bradley_terry_loss(return1, return2, pref)
                     batch_loss = batch_loss.mean()

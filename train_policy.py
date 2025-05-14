@@ -71,7 +71,7 @@ def get_d3rlpy_experiment_path(base_logdir, experiment_name, with_timestamp=True
     return None
 
 def load_dataset(data, reward_model=None, device=None, use_ground_truth=False, max_segments=None, reward_batch_size=32, 
-               scale_rewards=False, reward_min=None, reward_max=None):
+               scale_rewards=False, reward_min=None, reward_max=None, use_zero_rewards=False):
     """Load and process dataset for either IQL or BC training.
     
     Args:
@@ -84,6 +84,7 @@ def load_dataset(data, reward_model=None, device=None, use_ground_truth=False, m
         scale_rewards: If True, scales rewards to specified min/max range
         reward_min: Minimum value for scaled rewards (default: -1)
         reward_max: Maximum value for scaled rewards (default: 1)
+        use_zero_rewards: If True, replace all rewards with zeros (sanity check)
         
     Returns:
         d3rlpy MDPDataset with observations, actions, rewards, and terminals
@@ -160,6 +161,17 @@ def load_dataset(data, reward_model=None, device=None, use_ground_truth=False, m
         # BC or IQL with ground truth - use the extracted rewards
         rewards_np = valid_rewards
     
+    # Apply zero rewards if requested (sanity check)
+    if use_zero_rewards:
+        print("\n" + "=" * 60)
+        print("⚠️ SANITY CHECK MODE: USING ZERO REWARDS FOR ALL TRANSITIONS ⚠️")
+        print("This mode replaces all rewards with zeros to test if policy learning depends on rewards.")
+        print("=" * 60 + "\n")
+        original_rewards = rewards_np.copy()
+        rewards_np = np.zeros_like(rewards_np)
+        print(f"Reward stats before zeroing - Mean: {np.mean(original_rewards):.4f}, Min: {np.min(original_rewards):.4f}, Max: {np.max(original_rewards):.4f}")
+        print(f"Reward stats after zeroing - Mean: {np.mean(rewards_np):.4f}, Min: {np.min(rewards_np):.4f}, Max: {np.max(rewards_np):.4f}")
+    
     # Scale rewards if requested
     if scale_rewards:
         original_min = np.min(rewards_np)
@@ -221,12 +233,25 @@ def print_model_architecture(algo):
 @hydra.main(config_path="config", config_name="iql")
 def main(cfg: DictConfig):
     """Train a policy using specified algorithm with Hydra config."""
+    # Register custom resolvers for path operations
+    OmegaConf.register_resolver("basename", lambda path: Path(path).stem)
+    
     # Convert OmegaConf config to AttrDict for easier access and serialization
     cfg_dict = OmegaConf.to_container(cfg, resolve=True)
     cfg = AttrDict.from_nested_dict(cfg_dict)
     
     # Get algorithm name
     algorithm_name = cfg.algorithm
+    
+    # Get the dataset name and update templates
+    dataset_name = Path(cfg.data.data_path).stem
+    
+    # Replace dataset name placeholder in template strings
+    if hasattr(cfg.output, "model_dir_name"):
+        cfg.output.model_dir_name = cfg.output.model_dir_name.replace("DATASET_NAME", dataset_name)
+    
+    if hasattr(cfg.output, "artifact_name"):
+        cfg.output.artifact_name = cfg.output.artifact_name.replace("DATASET_NAME", dataset_name)
     
     print("\n" + "=" * 50)
     print(f"Training {algorithm_name.upper()} policy")
@@ -243,9 +268,6 @@ def main(cfg: DictConfig):
     
     # Initialize wandb
     if cfg.wandb.use_wandb:
-        # Generate experiment name based on data path
-        dataset_name = Path(cfg.data.data_path).stem
-        
         # Set up a run name if not specified
         run_name = cfg.wandb.name
         if run_name is None:
@@ -271,7 +293,6 @@ def main(cfg: DictConfig):
     print(f"Using device: {device}")
     
     # Get experiment name based on data path
-    dataset_name = Path(cfg.data.data_path).stem
     experiment_name = f"{algorithm_name.upper()}_{dataset_name}"
     
     # Set up d3rlpy log directory
@@ -291,12 +312,16 @@ def main(cfg: DictConfig):
     if algorithm_name.lower() == "iql":
         # For IQL, we need a reward model
         # Load reward model
-        reward_model = RewardModel(state_dim, action_dim, hidden_dims=cfg.model.hidden_dims)
-        reward_model.load_state_dict(torch.load(cfg.data.reward_model_path))
-        reward_model = reward_model.to(device)
-        reward_model.eval()
-        print(f"Loaded reward model from {cfg.data.reward_model_path}")
+        if not cfg.data.use_zero_rewards:
+            reward_model = RewardModel(state_dim, action_dim, hidden_dims=cfg.model.hidden_dims)
+            reward_model.load_state_dict(torch.load(cfg.data.reward_model_path))
+            reward_model = reward_model.to(device)
+            reward_model.eval()
+            print(f"Loaded reward model from {cfg.data.reward_model_path}")
         
+        else:
+            reward_model = None
+
         # Check if we should use ground truth rewards
         use_ground_truth = cfg.data.get('use_ground_truth', False)
         if use_ground_truth:
@@ -320,7 +345,8 @@ def main(cfg: DictConfig):
             reward_batch_size=cfg.data.reward_batch_size,
             scale_rewards=scale_rewards,
             reward_min=reward_min,
-            reward_max=reward_max
+            reward_max=reward_max,
+            use_zero_rewards=cfg.data.get('use_zero_rewards', False)
         )
     else:  # BC or other algorithms that don't need a reward model
         # For BC, we can directly use the demonstrations
@@ -337,7 +363,8 @@ def main(cfg: DictConfig):
             data,
             scale_rewards=scale_rewards,
             reward_min=reward_min,
-            reward_max=reward_max
+            reward_max=reward_max,
+            use_zero_rewards=cfg.data.get('use_zero_rewards', False)
         )
     
     # Create environment for evaluation
@@ -608,8 +635,22 @@ def main(cfg: DictConfig):
             except Exception as e:
                 print(f"Warning: Could not create training loss plot: {e}")
 
-    # Save the model
-    model_path = f"{cfg.output.output_dir}/{algorithm_name.lower()}_{Path(cfg.data.data_path).stem}.pt"
+    # Get the model directory name from config if available, or fall back to default
+    if hasattr(cfg.output, 'model_dir_name'):
+        model_dir_name = cfg.output.model_dir_name
+        # Add zero reward indicator if using that mode
+        if cfg.data.get('use_zero_rewards', False):
+            model_dir_name += "_zero_rewards"
+        
+        # Create subdirectory based on the name template
+        model_dir = os.path.join(cfg.output.output_dir, model_dir_name)
+        os.makedirs(model_dir, exist_ok=True)
+        model_path = os.path.join(model_dir, f"{algorithm_name.lower()}.pt")
+    else:
+        # Fall back to the original naming scheme
+        zero_suffix = "_zero_rewards" if cfg.data.get('use_zero_rewards', False) else ""
+        model_path = f"{cfg.output.output_dir}/{algorithm_name.lower()}_{Path(cfg.data.data_path).stem}{zero_suffix}.pt"
+
     algo.save_model(model_path)
     print(f"Model saved to {model_path}")
 
@@ -631,8 +672,19 @@ def main(cfg: DictConfig):
                     if isinstance(v, (int, float, np.int64, np.float32, np.float64, np.number)):
                         model_metadata[f"best_{k}"] = v
             
+            # Use artifact name from config if available
+            if hasattr(cfg.output, 'artifact_name'):
+                artifact_name = cfg.output.artifact_name
+            else:
+                # Fall back to a default name
+                artifact_name = f"{algorithm_name}_{Path(cfg.data.data_path).stem}"
+            
             # Log the artifact with metadata
-            artifact = wandb_callback.log_model_artifact(model_path, metadata=model_metadata)
+            artifact = wandb_callback.log_model_artifact(
+                model_path, 
+                artifact_name=artifact_name,
+                metadata=model_metadata
+            )
             if artifact:
                 print(f"Model logged to wandb as artifact: {artifact.name}")
         except Exception as e:

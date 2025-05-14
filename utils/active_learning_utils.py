@@ -77,6 +77,10 @@ def compute_uncertainty_scores(model, segment_pairs, segment_indices, data, devi
                     # Single model
                     batch_rewards = model(stacked_obs, stacked_actions)
                 
+                # Store rewards for each segment in the batch
+                for j, seg_idx in enumerate(batch_segments):
+                    segment_rewards[seg_idx] = batch_rewards[j]
+
             elif method == "disagreement":
                 if not hasattr(model, 'models'):
                     raise ValueError("Disagreement method requires an ensemble model")
@@ -84,9 +88,9 @@ def compute_uncertainty_scores(model, segment_pairs, segment_indices, data, devi
                 # Get reward predictions from all models
                 batch_rewards = model(stacked_obs, stacked_actions)
 
-            # Store rewards for each segment in the batch
-            for j, seg_idx in enumerate(batch_segments):
-                segment_rewards[seg_idx] = batch_rewards[:, j]
+                # Store rewards for each segment in the batch
+                for j, seg_idx in enumerate(batch_segments):
+                    segment_rewards[seg_idx] = batch_rewards[:, j]
     
     # Now compute uncertainty scores for each pair using pre-computed rewards
     uncertainty_scores = []
@@ -112,10 +116,14 @@ def compute_uncertainty_scores(model, segment_pairs, segment_indices, data, devi
         elif method == "disagreement":
             # Compute preference probability for each model
             logits = reward1 - reward2  # Shape: [num_models]
-            probs = torch.sigmoid(logits)  # Shape: [num_models]
+            # probs = torch.sigmoid(logits)  # Shape: [num_models]
             
-            # Disagreement is variance in preference probabilities across models
-            score = probs.var().item()
+            # probs = probs.sum(dim=-1) # sum over timesteps
+            # # Disagreement is variance in preference probabilities across models
+            # score = probs.var().item()
+
+            # better to compute variance over raw reward differences
+            score = logits.var().item()
         
         uncertainty_scores.append(score)
     

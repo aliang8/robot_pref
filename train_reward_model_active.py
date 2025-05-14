@@ -11,6 +11,7 @@ import hydra
 from omegaconf import DictConfig, OmegaConf
 import wandb
 from copy import deepcopy
+import gc
 
 # Import utility functions
 from trajectory_utils import (
@@ -32,6 +33,28 @@ from utils import evaluate_model_on_test_set
 from utils.dataset_utils import create_data_loaders
 from utils.seed_utils import set_seed
 
+# Add this at the beginning of the main function, before using any config
+@hydra.main(config_path="config", config_name="reward_model_active", version_base=None)
+def main(cfg: DictConfig):
+    # Register a data_basename resolver that directly accesses data.data_path
+    OmegaConf.register_resolver("data_basename", lambda: Path(cfg.data.data_path).stem)
+    
+    # Set random seed for reproducibility at the beginning
+    random_seed = cfg.get('random_seed', 42)
+    set_seed(random_seed)
+    print(f"Global random seed set to {random_seed}")
+    
+    # Get the dataset name
+    dataset_name = Path(cfg.data.data_path).stem
+    
+    # Replace only the dataset name placeholder in the template strings
+    if hasattr(cfg.output, "model_dir_name"):
+        cfg.output.model_dir_name = cfg.output.model_dir_name.replace("DATASET_NAME", dataset_name)
+    
+    if hasattr(cfg.output, "artifact_name"):
+        cfg.output.artifact_name = cfg.output.artifact_name.replace("DATASET_NAME", dataset_name)
+    
+    active_preference_learning(cfg)
 
 def run_reward_analysis(model_path, data_path, output_dir, num_episodes=9, device=None, random_seed=42, wandb_run=None):
     """Run reward analysis on the trained model and log results to wandb.
@@ -96,16 +119,31 @@ def train_final_reward_model(labeled_pairs, segment_indices, labeled_preferences
     print("\n--- Training Final Model ---")
     print(f"Training on all {len(labeled_pairs)} labeled pairs")
     
+    # Force garbage collection before training final model
+    gc.collect()
+    torch.cuda.empty_cache()
+    
     # Create dataset from all labeled pairs
-    final_dataset = PreferenceDataset(data_cpu, labeled_pairs, segment_indices, labeled_preferences)    
-    # Use the utility function to create data loaders with appropriate splits
+    final_dataset = PreferenceDataset(data_cpu, labeled_pairs, segment_indices, labeled_preferences)
+    
+    # Adjust batch size and workers for small datasets
+    effective_batch_size = min(cfg.training.batch_size, len(final_dataset))
+    if effective_batch_size <= 1:
+        effective_batch_size = 1
+        
+    effective_workers = cfg.training.get('num_workers', 4)
+    if effective_batch_size < 4 and effective_workers > 0:
+        effective_workers = 0
+        print("Reducing worker count to 0 for small batch size")
+    
+    # Use the utility function to create data loaders
     data_loaders = create_data_loaders(
         final_dataset,
         train_ratio=1.0,
         val_ratio=0,
-        batch_size=min(cfg.training.batch_size, len(final_dataset)),
-        num_workers=cfg.training.get('num_workers', 4),
-        pin_memory=cfg.training.get('pin_memory', True),
+        batch_size=effective_batch_size,
+        num_workers=effective_workers,
+        pin_memory=True,
         seed=random_seed
     )
     
@@ -116,14 +154,15 @@ def train_final_reward_model(labeled_pairs, segment_indices, labeled_preferences
     # Train final model
     final_model = RewardModel(state_dim, action_dim, hidden_dims=cfg.model.hidden_dims)
     
-    # Create descriptive output directory structure
-    dataset_name = Path(cfg.data.data_path).stem
-    uncertainty_method = cfg.active_learning.uncertainty_method
-    fine_tune_str = "finetune" if cfg.active_learning.fine_tune else "scratch"
+    # Get the model directory name from config
+    model_dir_name = cfg.output.model_dir_name
     
-    # Create descriptive subdirectory path
-    output_subdir = f"{dataset_name}_active_{uncertainty_method}_init{cfg.active_learning.initial_size}_max{cfg.active_learning.max_queries}_batch{cfg.active_learning.batch_size}_{fine_tune_str}"
-    model_dir = os.path.join(cfg.output.output_dir, output_subdir)
+    # Add fine-tuning information which isn't in the config template
+    fine_tune_str = "_finetune" if cfg.active_learning.fine_tune else "_scratch"
+    model_dir_name += fine_tune_str
+    
+    # Create the model directory
+    model_dir = os.path.join(cfg.output.output_dir, model_dir_name)
     os.makedirs(model_dir, exist_ok=True)
     
     # Path for training curve
@@ -142,16 +181,6 @@ def train_final_reward_model(labeled_pairs, segment_indices, labeled_preferences
         output_path=training_curve_path
     )
     return final_model, None, train_losses, val_losses
-
-@hydra.main(config_path="config", config_name="reward_model_active", version_base=None)
-def main(cfg: DictConfig):
-    """Main entry point for active preference learning."""
-    # Set random seed for reproducibility at the beginning
-    random_seed = cfg.get('random_seed', 42)
-    set_seed(random_seed)
-    print(f"Global random seed set to {random_seed}")
-    
-    active_preference_learning(cfg)
 
 def active_preference_learning(cfg):
     """Main function for active preference learning.
@@ -325,20 +354,32 @@ def active_preference_learning(cfg):
         print(f"\n--- Active Learning Iteration {iteration} ---")
         print(f"Currently have {total_labeled} labeled pairs")
         
-        # Train ensemble model on current labeled dataset
-        print("Training ensemble model...")
+        # Force garbage collection to free memory
+        gc.collect()
+        torch.cuda.empty_cache()  # Clear GPU cache if using CUDA
         
         # Create dataset for training the ensemble
         ensemble_dataset = PreferenceDataset(data_cpu, labeled_pairs, segment_indices, labeled_preferences)
         
-        # Use utility function to create data loaders with all data for training (no validation split)
+        # Reduce batch size if dataset is small to avoid issues
+        effective_batch_size = min(cfg.training.batch_size, len(ensemble_dataset))
+        if effective_batch_size <= 1:
+            effective_batch_size = 1
+            
+        # Reduce worker count if needed
+        effective_workers = cfg.training.get('num_workers', 4)
+        if effective_batch_size < 4 and effective_workers > 0:
+            effective_workers = 0
+            print("Reducing worker count to 0 for small batch size")
+        
+        # Use utility function to create data loaders with all data for training
         data_loaders = create_data_loaders(
             ensemble_dataset,
             train_ratio=1.0,  # Use all data for training
             val_ratio=0.0,    # No validation set
-            batch_size=min(cfg.training.batch_size, len(ensemble_dataset)),
-            num_workers=cfg.training.get('num_workers', 4),
-            pin_memory=cfg.training.get('pin_memory', True),
+            batch_size=effective_batch_size,
+            num_workers=effective_workers,
+            pin_memory=False,
             seed=random_seed
         )
         
@@ -467,6 +508,10 @@ def active_preference_learning(cfg):
         
         print(f"Now have {len(labeled_pairs)} labeled and {len(unlabeled_pairs)} unlabeled pairs")
     
+    # Clean up resources before final model training
+    gc.collect()
+    torch.cuda.empty_cache()
+    
     # Train final model on all labeled data
     final_model, final_metrics, train_losses, val_losses = train_final_reward_model(
         labeled_pairs, 
@@ -499,13 +544,12 @@ def active_preference_learning(cfg):
             "total_iterations": iteration
         })
     
-    # Create descriptive output directory structure
-    dataset_name = Path(cfg.data.data_path).stem
-    uncertainty_method = cfg.active_learning.uncertainty_method
-    fine_tune_str = "finetune" if cfg.active_learning.fine_tune else "scratch"
+    # Use model directory name from config
+    output_subdir = cfg.output.model_dir_name
     
-    # Create descriptive subdirectory
-    output_subdir = f"{dataset_name}_active_{uncertainty_method}_init{cfg.active_learning.initial_size}_max{cfg.active_learning.max_queries}_batch{cfg.active_learning.batch_size}_{fine_tune_str}"
+    # Add fine-tuning information which isn't in the config template
+    fine_tune_str = "_finetune" if cfg.active_learning.fine_tune else "_scratch" 
+    output_subdir += fine_tune_str
     
     # Create model directory
     model_dir = os.path.join(cfg.output.output_dir, output_subdir)
