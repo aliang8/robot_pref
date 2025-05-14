@@ -14,7 +14,7 @@ data:
   data_path: "/scr/shared/clam/datasets/metaworld/assembly-v2/buffer_assembly-v2.pt"
   preprocessed_data: null  # Path to preprocessed data file (skips extraction if provided)
   segment_length: 32
-  max_segments: 5000
+  max_segments: 10000
   use_relative_differences: true
 
 # Preference collection parameters
@@ -49,6 +49,7 @@ max_augmentations: 5      # Maximum number of augmentations to show per preferen
 # Output parameters
 output:
   output_dir: "/scr/aliang80/robot_pref/results/sequential_preferences"
+  model_dir_name: "DATASET_NAME_sequential_n${preferences.n_queries}_k${preferences.k_augment}_seed${random_seed}"
 
 # Wandb configuration
 wandb:

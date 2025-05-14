@@ -33,6 +33,8 @@ hardware:
 # Output parameters
 output:
   output_dir: results/reward_model
+  model_dir_name: "DATASET_NAME_model_seg${data.segment_length}_hidden${model.hidden_dims}_epochs${training.num_epochs}_pairs${data.num_pairs}"
+  artifact_name: "DATASET_NAME_seg${data.segment_length}_pairs${data.num_pairs}_epochs${training.num_epochs}"
   
 # Wandb configuration
 wandb:

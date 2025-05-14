@@ -26,6 +26,10 @@ hardware:
 # Output parameters
 output:
   output_dir: results/active_reward_model
+  # Use fixed placeholder for dataset name that will be replaced in code
+  model_dir_name: "DATASET_NAME_active_${active_learning.uncertainty_method}_init${active_learning.initial_size}_max${active_learning.max_queries}_batch${active_learning.batch_size}"
+  # Artifact name for wandb
+  artifact_name: "DATASET_NAME_active_${active_learning.uncertainty_method}_init${active_learning.initial_size}_max${active_learning.max_queries}"
   
 # Wandb configuration
 wandb:
