@@ -7,10 +7,10 @@ python collect_cluster_preferences.py --preprocessed_data preprocessed/assembly_
 # train reward model without active learning
 python train_reward_model.py \
     data.data_path=/scr/aliang80/robot_pref/labeled_datasets/buffer_assembly-v2_balanced.pt \
-    data.num_pairs=1000 
+    data.num_pairs=500 
 
 # train reward model with active offline learning
-python train_reward_model_sampling.py \
+python train_reward_model_active.py \
     data.data_path=/scr/aliang80/robot_pref/labeled_datasets/buffer_assembly-v2_balanced.pt \
     active_learning.uncertainty_method=random
 

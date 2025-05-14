@@ -17,8 +17,7 @@ from utils.active_learning_utils import (
     select_uncertain_pairs,
     get_ground_truth_preferences,
     create_initial_dataset,
-    select_active_preference_query,
-    select_uncertain_pairs_comprehensive
+    select_active_pref_query
 )
 
 from utils.seed_utils import set_seed
@@ -38,8 +37,7 @@ __all__ = [
     'select_uncertain_pairs',
     'get_ground_truth_preferences',
     'create_initial_dataset',
-    'select_active_preference_query',
-    'select_uncertain_pairs_comprehensive',
+    'select_active_pref_query',
     
     # seed_utils
     'set_seed'

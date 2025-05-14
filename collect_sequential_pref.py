@@ -49,8 +49,7 @@ from utils.training_utils import train_ensemble_model
 from utils.active_learning_utils import (
     compute_uncertainty_scores, 
     select_uncertain_pairs,
-    select_active_preference_query,
-    select_uncertain_pairs_comprehensive
+    select_active_pref_query
 )
 
 # Import seed utility
@@ -352,7 +351,7 @@ def collect_sequential_preferences(data, segments, segment_indices, n_queries=10
                         use_random_sampling = cfg.active_learning.use_random_sampling
                 
                 # Use the unified function for active selection
-                ranked_pairs = select_uncertain_pairs_comprehensive(
+                ranked_pairs = select_active_pref_query(
                     reward_model,
                     segments,
                     segment_indices,
