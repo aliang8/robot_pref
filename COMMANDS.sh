@@ -22,6 +22,9 @@ python train_policy.py \
     random_seed=521,522,523 \
     data.reward_model_path=/scr/aliang80/robot_pref/results/active_reward_model/
 
-# pbrl with augmentations
-python collect_sequential_pref.py \
+# train reward model with active
+python train_reward_model_active.py \
     data.data_path=/scr/aliang80/robot_pref/labeled_datasets/buffer_assembly-v2_balanced.pt \
+    active_learning.uncertainty_method=random \
+    data.segment_length=32 \
+    dtw_augmentation.enabled=true
