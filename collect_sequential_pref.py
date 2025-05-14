@@ -412,7 +412,7 @@ def collect_sequential_preferences(data, segments, segment_indices, n_queries=10
                 # If segment i is preferred
                 if pref == 1:
                     # Find segments similar to segment i
-                similar_to_i = find_similar_segments(segments, i, k=k_augment, distance_matrix=distance_matrix)
+                    similar_to_i = find_similar_segments(segments, i, k=k_augment, distance_matrix=distance_matrix)
                     similar_info['similar_to_i'] = similar_to_i
                     
                     # All segments similar to i are also preferred over j
@@ -1025,6 +1025,16 @@ def visualize_all_augmentations(data, segments, segment_indices, direct_preferen
 @hydra.main(config_path="config", config_name="sequential_preferences", version_base=None)
 def main(cfg: DictConfig):
     """Main function for collecting sequential preferences with similarity-based augmentation."""
+    # Get the dataset name
+    dataset_name = Path(cfg.data.data_path).stem
+    
+    # Replace only the dataset name placeholder in the template strings
+    if hasattr(cfg.output, "model_dir_name"):
+        cfg.output.model_dir_name = cfg.output.model_dir_name.replace("DATASET_NAME", dataset_name)
+    
+    if hasattr(cfg.output, "artifact_name"):
+        cfg.output.artifact_name = cfg.output.artifact_name.replace("DATASET_NAME", dataset_name)
+    
     print("\n" + "="*50)
     print("Collecting sequential preferences with similarity-based augmentation")
     print("="*50)
@@ -1076,12 +1086,9 @@ def main(cfg: DictConfig):
         active_learning_enabled = getattr(cfg.active_learning, 'enabled', False)
         uncertainty_method = getattr(cfg.active_learning, 'uncertainty_method', "entropy")
     
-    # Get dataset name for the subdirectory
-    dataset_name = Path(data_path).stem
-    
-    # Replace dataset name placeholder in the model_dir_name if it exists
+    # Get model_dir_name from config, DATASET_NAME was already replaced above
     if hasattr(cfg.output, "model_dir_name"):
-        model_dir_name = cfg.output.model_dir_name.replace("DATASET_NAME", dataset_name)
+        model_dir_name = cfg.output.model_dir_name
         
         # Add active learning method if enabled
         if active_learning_enabled:

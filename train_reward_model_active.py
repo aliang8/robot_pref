@@ -159,23 +159,18 @@ def train_final_reward_model(labeled_pairs, segment_indices, labeled_preferences
     # Train final model
     final_model = RewardModel(state_dim, action_dim, hidden_dims=cfg.model.hidden_dims)
     
-    # Create descriptive output directory structure
-    dataset_name = Path(cfg.data.data_path).stem
+    # Get model directory name from config
+    model_dir_name = cfg.output.model_dir_name
+    
+    # Add active learning and fine-tuning information 
     uncertainty_method = cfg.active_learning.uncertainty_method
-    fine_tune_str = "finetune" if cfg.active_learning.fine_tune else "scratch"
+    fine_tune_str = "_finetune" if cfg.active_learning.fine_tune else "_scratch"
     
     # Add augmentation tag if enabled
     aug_str = "_aug" if cfg.dtw_augmentation.enabled else ""
     
-    # Create descriptive subdirectory path
-    output_subdir = f"{dataset_name}_active_{uncertainty_method}_init{cfg.active_learning.initial_size}_max{cfg.active_learning.max_queries}_batch{cfg.active_learning.batch_size}_{fine_tune_str}{aug_str}"
-    model_dir = os.path.join(cfg.output.output_dir, output_subdir)
-    # Get the model directory name from config
-    model_dir_name = cfg.output.model_dir_name
-    
-    # Add fine-tuning information which isn't in the config template
-    fine_tune_str = "_finetune" if cfg.active_learning.fine_tune else "_scratch"
-    model_dir_name += fine_tune_str
+    # Add these details to the model_dir_name
+    model_dir_name += f"_active_{uncertainty_method}{fine_tune_str}{aug_str}"
     
     # Create the model directory
     model_dir = os.path.join(cfg.output.output_dir, model_dir_name)
@@ -718,23 +713,21 @@ def active_preference_learning(cfg):
             "total_iterations": iteration
         })
     
-    # Create descriptive output directory structure
-    dataset_name = Path(cfg.data.data_path).stem
+    # Get model directory name from config
+    model_dir_name = cfg.output.model_dir_name
+    
+    # Add active learning and fine-tuning information 
     uncertainty_method = cfg.active_learning.uncertainty_method
-    fine_tune_str = "finetune" if cfg.active_learning.fine_tune else "scratch"
+    fine_tune_str = "_finetune" if cfg.active_learning.fine_tune else "_scratch"
     
-    # Create descriptive subdirectory
+    # Add augmentation tag if enabled
     aug_str = "_aug" if cfg.dtw_augmentation.enabled else ""
-    output_subdir = f"{dataset_name}_active_{uncertainty_method}_init{cfg.active_learning.initial_size}_max{cfg.active_learning.max_queries}_batch{cfg.active_learning.batch_size}_{fine_tune_str}{aug_str}"
-    # Use model directory name from config
-    output_subdir = cfg.output.model_dir_name
     
-    # Add fine-tuning information which isn't in the config template
-    fine_tune_str = "_finetune" if cfg.active_learning.fine_tune else "_scratch" 
-    output_subdir += fine_tune_str
+    # Add these details to the model_dir_name
+    model_dir_name += f"_active_{uncertainty_method}{fine_tune_str}{aug_str}"
     
-    # Create model directory
-    model_dir = os.path.join(cfg.output.output_dir, output_subdir)
+    # Create the model directory
+    model_dir = os.path.join(cfg.output.output_dir, model_dir_name)
     os.makedirs(model_dir, exist_ok=True)
     
     # Plot learning curve with three subplots: accuracy, loss, and logpdf
