@@ -25,7 +25,7 @@ from utils.wandb_utils import log_to_wandb, log_artifact
 from models import EnsembleRewardModel, RewardModel
 from utils.dataset_utils import PreferenceDataset, bradley_terry_loss
 from utils.active_learning_utils import (
-    select_uncertain_pairs_comprehensive,
+    select_active_pref_query,
     create_initial_dataset
 )
 from utils.training_utils import train_model
@@ -173,7 +173,7 @@ def train_final_reward_model(labeled_pairs, segment_indices, labeled_preferences
     )
     return final_model, None, train_losses, val_losses
 
-@hydra.main(config_path="config", config_name="reward_model_sampling", version_base=None)
+@hydra.main(config_path="config", config_name="reward_model_active", version_base=None)
 def main(cfg: DictConfig):
     """Main entry point for active preference learning."""
     # Set random seed for reproducibility at the beginning
@@ -478,7 +478,7 @@ def active_preference_learning(cfg):
 
         # Use the unified function for uncertainty-based selection
         # Instead of passing all unlabeled pairs, we'll directly use them
-        ranked_pairs = select_uncertain_pairs_comprehensive(
+        ranked_pairs = select_active_pref_query(
             ensemble,
             segments,
             segment_indices,

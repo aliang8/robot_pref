@@ -26,96 +26,72 @@ def compute_uncertainty_scores(model, segment_pairs, segment_indices, data, devi
     Returns:
         uncertainty_scores: List of uncertainty scores for each segment pair
     """
-    # Extract observation and action fields
+    # If using random method, we can just return random scores
+    if method == "random":
+        return [random.random() for _ in range(len(segment_pairs))]
+    
+    # Extract observation and action keys
     obs_key = "obs" if "obs" in data else "state"
     action_key = "action"
     
     # Ensure data is on CPU for indexing operations
     data_cpu = {k: v.cpu() if isinstance(v, torch.Tensor) else v for k, v in data.items()}
     
-    # If using random method, we can skip all computation
-    if method == "random":
-        return [random.random() for _ in range(len(segment_pairs))]
-    
-    # Find all unique segments that need evaluation
+    # Extract unique segments to avoid redundant computations
     unique_segments = set()
     for seg_idx1, seg_idx2 in segment_pairs:
         unique_segments.add(seg_idx1)
         unique_segments.add(seg_idx2)
     
     unique_segments = sorted(list(unique_segments))
-    print(f"Pre-computing rewards for {len(unique_segments)} unique segments")
+    print(f"Computing rewards for {len(unique_segments)} unique segments")
     
-    # Create a mapping from segment index to position in our batch
-    segment_to_batch_idx = {seg_idx: i for i, seg_idx in enumerate(unique_segments)}
-    
-    # Prepare batches of observations and actions for all unique segments
-    batch_obs = []
-    batch_actions = []
-    
-    for seg_idx in unique_segments:
-        start, end = segment_indices[seg_idx]
-        
-        # Extract observations and actions
-        obs = data_cpu[obs_key][start:end].clone()
-        actions = data_cpu[action_key][start:end-1].clone()
-        
-        # Ensure observations and actions have same length
-        min_len = min(obs.shape[0]-1, actions.shape[0])
-        obs = obs[:min_len]
-        actions = actions[:min_len]
-        
-        batch_obs.append(obs)
-        batch_actions.append(actions)
-    
-    # Process segments in sub-batches to avoid memory issues
-    sub_batch_size = 128
-    num_sub_batches = (len(unique_segments) + sub_batch_size - 1) // sub_batch_size
-    
-    # Dictionary to store segment rewards
+    # Process segments in batches for more efficient forward passes
+    batch_size = 256  
     segment_rewards = {}
     
     with torch.no_grad():
-        for i in tqdm(range(num_sub_batches), desc=f"Computing segment rewards"):
-            start_idx = i * sub_batch_size
-            end_idx = min((i + 1) * sub_batch_size, len(unique_segments))
+        # Process segments in batches
+        for i in range(0, len(unique_segments), batch_size):
+            batch_segments = unique_segments[i:i + batch_size]
             
-            # Get segment indices for this sub-batch
-            sub_batch_segments = unique_segments[start_idx:end_idx]
+            # Collect observations and actions for this batch
+            batch_obs = []
+            batch_actions = []
             
-            # Process each segment in the sub-batch
-            for batch_idx, seg_idx in enumerate(sub_batch_segments):
-                # Get the observations and actions for this segment
-                obs = batch_obs[segment_to_batch_idx[seg_idx]].to(device)
-                actions = batch_actions[segment_to_batch_idx[seg_idx]].to(device)
+            for seg_idx in batch_segments:
+                start, end = segment_indices[seg_idx]
+                batch_obs.append(data_cpu[obs_key][start:end].clone())
+                batch_actions.append(data_cpu[action_key][start:end].clone())
+            
+            # Stack into batch tensors
+            stacked_obs = torch.stack(batch_obs).to(device)
+            stacked_actions = torch.stack(batch_actions).to(device)
+            
+            # Forward pass through the model
+            if method == "entropy":
+                if hasattr(model, 'mean_reward'):
+                    # Use mean prediction from ensemble
+                    batch_rewards = model.mean_reward(stacked_obs, stacked_actions)
+                else:
+                    # Single model
+                    batch_rewards = model(stacked_obs, stacked_actions)
                 
-                # Compute rewards based on the method
-                if method == "entropy":
-                    if hasattr(model, 'mean_reward'):
-                        # Use mean prediction from ensemble
-                        reward = model.mean_reward(obs, actions)
-                    else:
-                        # Single model
-                        reward = model(obs, actions)
-                    
-                    # Store the scalar reward
-                    segment_rewards[seg_idx] = reward
+            elif method == "disagreement":
+                if not hasattr(model, 'models'):
+                    raise ValueError("Disagreement method requires an ensemble model")
                 
-                elif method == "disagreement":
-                    # For disagreement, we need all model predictions
-                    if not hasattr(model, 'models'):
-                        raise ValueError("Disagreement method requires an ensemble model")
-                    
-                    # Get reward predictions from all models
-                    rewards = model(obs, actions)  # Shape: [num_models]
-                    
-                    # Store all model predictions
-                    segment_rewards[seg_idx] = rewards
+                # Get reward predictions from all models
+                batch_rewards = model(stacked_obs, stacked_actions)
+
+            # Store rewards for each segment in the batch
+            for j, seg_idx in enumerate(batch_segments):
+                segment_rewards[seg_idx] = batch_rewards[:, j]
     
     # Now compute uncertainty scores for each pair using pre-computed rewards
     uncertainty_scores = []
     
-    for seg_idx1, seg_idx2 in tqdm(segment_pairs, desc=f"Computing {method} scores for pairs"):
+    for seg_idx1, seg_idx2 in tqdm(segment_pairs, desc=f"Computing {method} scores"):
         # Get pre-computed rewards
         reward1 = segment_rewards[seg_idx1]
         reward2 = segment_rewards[seg_idx2]
@@ -126,23 +102,19 @@ def compute_uncertainty_scores(model, segment_pairs, segment_indices, data, devi
             probs = torch.sigmoid(logits)
             
             # Compute entropy of binary prediction
-            # Binary entropy: -p*log(p) - (1-p)*log(1-p)
             eps = 1e-8
             p = torch.clamp(probs, min=eps, max=1-eps)
             entropy = -p * torch.log(p) - (1-p) * torch.log(1-p)
             
-            # Take mean if we have a batch
-            if entropy.dim() > 0:
-                score = entropy.mean().item()
-            else:
-                score = entropy.item()
+            # Take mean entropy over timesteps
+            score = entropy.mean().item()
             
         elif method == "disagreement":
             # Compute preference probability for each model
             logits = reward1 - reward2  # Shape: [num_models]
             probs = torch.sigmoid(logits)  # Shape: [num_models]
             
-            # Disagreement is variance in preference probabilities
+            # Disagreement is variance in preference probabilities across models
             score = probs.var().item()
         
         uncertainty_scores.append(score)
@@ -262,55 +234,7 @@ def create_initial_dataset(segment_pairs, segment_indices, preferences, data, in
     
     return labeled_pairs, labeled_preferences, unlabeled_pairs, unlabeled_indices
 
-
-def select_active_preference_query(segments, segment_indices, data, reward_model, device, 
-                                  n_candidates=100, uncertainty_method="entropy"):
-    """Select the next preference query actively based on model uncertainty.
-    
-    Args:
-        segments: List of trajectory segments
-        segment_indices: List of (start_idx, end_idx) for each segment
-        data: TensorDict with observations
-        reward_model: Trained reward model for uncertainty estimation
-        device: Device to run computation on
-        n_candidates: Number of random candidate pairs to consider
-        uncertainty_method: Method for uncertainty estimation ("entropy", "disagreement", "random")
-        
-    Returns:
-        tuple: (i, j) indices of the selected segments for comparison
-    """
-    n_segments = len(segments)
-    
-    # Generate random candidate pairs
-    candidate_pairs = []
-    for _ in range(n_candidates):
-        i, j = random.sample(range(n_segments), 2)
-        candidate_pairs.append((i, j))
-    
-    print(f"Computing uncertainty for {len(candidate_pairs)} candidate pairs...")
-    
-    # Compute uncertainty scores
-    uncertainty_scores = compute_uncertainty_scores(
-        reward_model,
-        candidate_pairs,
-        segment_indices,
-        data,
-        device,
-        method=uncertainty_method
-    )
-    
-    # Select the most uncertain pair
-    selected_pairs, _ = select_uncertain_pairs(uncertainty_scores, candidate_pairs, k=1)
-    
-    if not selected_pairs:
-        # Fallback to random selection if no pairs were selected
-        print("Warning: No pairs selected based on uncertainty. Falling back to random selection.")
-        return random.sample(range(n_segments), 2)
-    
-    return selected_pairs[0]
-
-
-def select_uncertain_pairs_comprehensive(reward_model, segments, segment_indices, data, device, 
+def select_active_pref_query(reward_model, segments, segment_indices, data, device, 
                                        uncertainty_method="entropy", max_pairs=None,
                                        use_random_candidate_sampling=True, n_candidates=100,
                                        candidate_pairs=None):

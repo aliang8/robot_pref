@@ -219,6 +219,9 @@ def train_model(model, train_loader, val_loader, device, num_epochs=50, lr=1e-4,
             avg_val_loss = 0.0
         val_losses.append(avg_val_loss)
 
+        if epoch % 10 == 0:
+            print(f"Epoch {epoch+1}/{num_epochs} - Train Loss: {avg_train_loss:.4f}, Val Loss: {avg_val_loss:.4f}")
+
         # Log to wandb
         if wandb:
             log_wandb_metrics(avg_train_loss, avg_val_loss, epoch, lr, wandb)
