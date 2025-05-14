@@ -41,7 +41,7 @@ from eef_clustering import (
 )
 
 # Import models from the modular structure
-from models.reward_models import SegmentRewardModel, EnsembleRewardModel
+from models.reward_models import RewardModel, EnsembleRewardModel
 
 # Import utility functions from the modular structure
 from utils.dataset_utils import PreferenceDataset, bradley_terry_loss
@@ -173,7 +173,7 @@ def train_reward_model_from_preferences(preferences, segment_indices, data, devi
         num_models: Number of models in the ensemble
         
     Returns:
-        Trained reward model (either SegmentRewardModel or EnsembleRewardModel)
+        Trained reward model (either RewardModel or EnsembleRewardModel)
     """
     print(f"Training {'ensemble' if use_ensemble else 'single'} reward model on {len(preferences)} preferences...")
     
@@ -201,33 +201,34 @@ def train_reward_model_from_preferences(preferences, segment_indices, data, devi
     val_loader = DataLoader(val_dataset, batch_size=32)
     
     if use_ensemble:
-        # Train an ensemble of models using the new utility function
-        model = train_model(
-            state_dim,
-            action_dim,
-            segment_pairs,
-            segment_indices,
-            preference_labels,
-            data,
-            device,
-            num_models=num_models,
-            hidden_dims=hidden_dims,
-            num_epochs=num_epochs,
-            is_ensemble=True
-        )
-    else:
-        # Train a single model
-        model = SegmentRewardModel(state_dim, action_dim, hidden_dims)
+        # Initialize ensemble model
+        model = EnsembleRewardModel(state_dim, action_dim, hidden_dims, num_models=num_models)
         
-        # Use the train_reward_model from utils.training_utils
-        from utils.training_utils import train_reward_model
-        model, _, _ = train_reward_model(
+        # Use the training_utils function
+        from utils.training_utils import train_model
+        model, _, _ = train_model(
             model, 
             train_loader, 
             val_loader, 
             device, 
             num_epochs=num_epochs, 
-            lr=1e-4 if cfg is None or not hasattr(cfg, 'model') else cfg.model.lr
+            lr=1e-4 if cfg is None or not hasattr(cfg, 'model') else cfg.model.lr,
+            is_ensemble=True
+        )
+    else:
+        # Train a single model
+        model = RewardModel(state_dim, action_dim, hidden_dims)
+        
+        # Use the train_reward_model from utils.training_utils
+        from utils.training_utils import train_model
+        model, _, _ = train_model(
+            model, 
+            train_loader, 
+            val_loader, 
+            device, 
+            num_epochs=num_epochs, 
+            lr=1e-4 if cfg is None or not hasattr(cfg, 'model') else cfg.model.lr,
+            is_ensemble=False
         )
     
     return model
@@ -312,7 +313,7 @@ def collect_sequential_preferences(data, segments, segment_indices, n_queries=10
                 # TODO: Implement proper loading of ensemble model if needed
                 print("Warning: Loading ensemble models from file not implemented. Initializing new ensemble.")
             else:
-                reward_model = SegmentRewardModel(state_dim, action_dim)
+                reward_model = RewardModel(state_dim, action_dim)
                 reward_model.load_state_dict(torch.load(reward_model_path, map_location=device))
             
             reward_model = reward_model.to(device)

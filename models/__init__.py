@@ -1,12 +1,10 @@
 # models module
 from models.reward_models import (
-    StateActionRewardModel,
-    SegmentRewardModel,
+    RewardModel,
     EnsembleRewardModel
 )
 
 __all__ = [
-    'StateActionRewardModel',
-    'SegmentRewardModel',
+    'RewardModel',
     'EnsembleRewardModel'
 ] 

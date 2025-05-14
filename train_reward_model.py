@@ -21,13 +21,13 @@ from utils.wandb_utils import log_to_wandb, log_artifact
 from utils.seed_utils import set_seed
 
 # Import shared models and utilities
-from models import SegmentRewardModel
+from models.reward_models import RewardModel
 from utils import (
     PreferenceDataset,
     create_data_loaders,
     evaluate_model_on_test_set,
     load_preferences_data,
-    train_reward_model
+    train_model
 )
 
 
@@ -274,8 +274,8 @@ def main(cfg: DictConfig):
         })
     
     # Initialize reward model
-    model = SegmentRewardModel(state_dim, action_dim, hidden_dims=cfg.model.hidden_dims)
-
+    model = RewardModel(state_dim, action_dim, hidden_dims=cfg.model.hidden_dims)
+    
     # Log model info to wandb
     if cfg.wandb.use_wandb:
         # Use a different key name to avoid conflicts with existing 'model' key
@@ -311,7 +311,7 @@ def main(cfg: DictConfig):
     
     # Train the model
     print("\nTraining reward model...")
-    model, train_losses, val_losses = train_reward_model(
+    model, train_losses, val_losses = train_model(
         model, train_loader, val_loader, device, 
         num_epochs=cfg.training.num_epochs, lr=cfg.model.lr,
         wandb=wandb if cfg.wandb.use_wandb else None,
