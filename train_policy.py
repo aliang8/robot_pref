@@ -404,7 +404,7 @@ def main(cfg: DictConfig):
         if "metaworld" in cfg.data.data_path:
             env_creator = MetaWorldEnvCreator(env_name)
         elif "robomimic" in cfg.data.data_path:
-            env_creator = RobomimicEnvCreator(cfg.data.data_path)
+            env_creator = RobomimicEnvCreator(env_name)
         else:
             raise ValueError(f"No environment creator found for dataset: {cfg.data.data_path}")
         

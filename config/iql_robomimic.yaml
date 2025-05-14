@@ -16,7 +16,7 @@ data:
   scale_rewards: false     # Set to true to scale rewards to min/max range
   reward_min: -1.0         # Minimum value for scaled rewards
   reward_max: 1.0          # Maximum value for scaled rewards
-  env_name: "robomimic-lift"  # Exact name of the RoboMimic environment
+  env_name: "lift"  # Exact name of the RoboMimic environment
 
 # Model architecture
 model:
@@ -37,7 +37,7 @@ iql:
 # Training parameters specific to IQL
 training:
   n_epochs: 100
-  n_steps_per_epoch: 1000
+  n_steps_per_epoch: 1
   eval_interval: 10
   eval_episodes: 10
   save_interval: 10
