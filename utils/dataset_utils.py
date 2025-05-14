@@ -119,37 +119,14 @@ def bradley_terry_loss(rewards1, rewards2, preferences):
     else:
         prefs = (torch.tensor(preferences) == 1).float()
     
-    # Handle both single model and ensemble outputs
-    if rewards1.dim() > 1 and rewards1.shape[0] > 1:
-        # For ensemble output [num_models, batch_size]
-        # We need to compute loss for each model separately
-        
-        # Add a new axis to prefs to enable broadcasting
-        # [batch_size] -> [1, batch_size]
-        prefs = prefs.unsqueeze(0)
-        
-        # Compute probability that segment1 is preferred over segment2 using the Bradley-Terry model
-        # Add a small epsilon for numerical stability
-        eps = 1e-6
-        logits = torch.clamp(rewards1 - rewards2, min=-50.0, max=50.0)  # Clip logits to prevent overflow
-        pred_probs = torch.sigmoid(logits)
-        
-        # Use a more numerically stable binary cross-entropy loss
-        # This will compute loss for each model separately using broadcasting
-        # Result shape: [num_models]
-        loss = -torch.mean(prefs * torch.log(pred_probs + eps) + 
-                          (1 - prefs) * torch.log(1 - pred_probs + eps), 
-                          dim=1)
-    else:
-        # For single model output [batch_size]
-        # Compute probability that segment1 is preferred over segment2 using the Bradley-Terry model
-        # Add a small epsilon for numerical stability
-        eps = 1e-6
-        logits = torch.clamp(rewards1 - rewards2, min=-50.0, max=50.0)  # Clip logits to prevent overflow
-        pred_probs = torch.sigmoid(logits)
-        
-        # Use a more numerically stable binary cross-entropy loss
-        loss = -torch.mean(prefs * torch.log(pred_probs + eps) + (1 - prefs) * torch.log(1 - pred_probs + eps))
+    # Compute probability that segment1 is preferred over segment2 using the Bradley-Terry model
+    # Add a small epsilon for numerical stability
+    eps = 1e-6
+    logits = torch.clamp(rewards1 - rewards2, min=-50.0, max=50.0)  # Clip logits to prevent overflow
+    pred_probs = torch.sigmoid(logits)
+    
+    # Use a more numerically stable binary cross-entropy loss
+    loss = -torch.mean(prefs * torch.log(pred_probs + eps) + (1 - prefs) * torch.log(1 - pred_probs + eps))
     
     return loss
 
@@ -249,9 +226,6 @@ def evaluate_model_on_test_set(model, test_loader, device):
     test_total = 0
     logpdf_values = []
     
-    # Determine if model is an ensemble
-    is_ensemble = hasattr(model, 'models')
-    
     with torch.no_grad():
         for obs1, actions1, obs2, actions2, pref in tqdm(test_loader, desc="Testing"):
             # Move to device
@@ -259,31 +233,20 @@ def evaluate_model_on_test_set(model, test_loader, device):
             obs2, actions2 = obs2.to(device), actions2.to(device)
             pref = pref.to(device)
             
-            # Get reward predictions using the paired rewards interface
-            reward1, reward2 = model.compute_paired_rewards(obs1, actions1, obs2, actions2)
+            # Get reward predictions
+            reward1 = model(obs1, actions1)
+            reward2 = model(obs2, actions2)
+            return1 = reward1.sum(dim=1)
+            return2 = reward2.sum(dim=1)
             
             # Compute loss
-            loss = bradley_terry_loss(reward1, reward2, pref)
-            
-            # For ensemble, use mean loss across models
-            if is_ensemble:
-                test_loss += loss.mean().item()
+            loss = bradley_terry_loss(return1, return2, pref)
+            test_loss += loss.mean().item()
                 
-                # For accuracy, use mean prediction across models
-                reward1_mean = reward1.mean(dim=0)
-                reward2_mean = reward2.mean(dim=0)
-                
-                # Get model predictions based on mean rewards
-                pred_pref = torch.where(reward1_mean > reward2_mean, 
-                                       torch.ones_like(pref), 
-                                       torch.ones_like(pref) * 2)
-            else:
-                test_loss += loss.item()
-                
-                # Get model predictions
-                pred_pref = torch.where(reward1.squeeze(0) > reward2.squeeze(0), 
-                                       torch.ones_like(pref), 
-                                       torch.ones_like(pref) * 2)
+            # Get model predictions
+            pred_pref = torch.where(return1 > return2, 
+                                    torch.ones_like(pref), 
+                                    torch.ones_like(pref) * 2)
             
             # Compute accuracy (prediction matches ground truth preference)
             correct = (pred_pref == pref).sum().item()
@@ -294,39 +257,20 @@ def evaluate_model_on_test_set(model, test_loader, device):
             if hasattr(model, 'logpdf'):
                 batch_size = pref.size(0)
                 for i in range(batch_size):
-                    # Select the correctly preferred segments for this batch item
+                    # Select the correct segment based on preference
                     if pref[i] == 1:
                         # First segment is preferred
-                        segment_obs = obs1[i:i+1]  # Keep batch dimension
+                        segment_obs = obs1[i:i+1]
                         segment_actions = actions1[i:i+1]
-                        segment_reward = reward1.squeeze(0)[i:i+1] if not is_ensemble else reward1.mean(dim=0)[i:i+1]
+                        segment_reward = torch.tanh(reward1[i:i+1])  # Apply tanh to bound to [-1, 1]
                     else:
                         # Second segment is preferred
-                        segment_obs = obs2[i:i+1]  # Keep batch dimension
+                        segment_obs = obs2[i:i+1]
                         segment_actions = actions2[i:i+1]
-                        segment_reward = reward2.squeeze(0)[i:i+1] if not is_ensemble else reward2.mean(dim=0)[i:i+1]
+                        segment_reward = torch.tanh(reward2[i:i+1])  # Apply tanh to bound to [-1, 1]
                     
                     # Calculate logpdf
                     logp = model.logpdf(segment_obs, segment_actions, segment_reward)
-                    logpdf_values.append(logp.mean().item())
-            elif is_ensemble and hasattr(model.models[0], 'logpdf'):
-                # For ensembles, compute logpdf using first model if ensemble doesn't have a logpdf method
-                batch_size = pref.size(0)
-                for i in range(batch_size):
-                    # Select the correctly preferred segments for this batch item
-                    if pref[i] == 1:
-                        # First segment is preferred
-                        segment_obs = obs1[i:i+1]  # Keep batch dimension
-                        segment_actions = actions1[i:i+1]
-                        segment_reward = reward1.mean(dim=0)[i:i+1]  # Use mean reward across ensemble
-                    else:
-                        # Second segment is preferred
-                        segment_obs = obs2[i:i+1]  # Keep batch dimension
-                        segment_actions = actions2[i:i+1]
-                        segment_reward = reward2.mean(dim=0)[i:i+1]  # Use mean reward across ensemble
-                    
-                    # Calculate logpdf using first model
-                    logp = model.models[0].logpdf(segment_obs, segment_actions, segment_reward)
                     logpdf_values.append(logp.mean().item())
     
     avg_test_loss = test_loss / len(test_loader) if len(test_loader) > 0 else float('nan')

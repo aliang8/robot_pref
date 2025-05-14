@@ -11,7 +11,7 @@ from utils.dataset_utils import (
     load_preferences_data
 )
 
-from utils.training_utils import train_reward_model, train_model
+from utils.training_utils import train_model
 
 from utils.active_learning_utils import (
     compute_uncertainty_scores,
@@ -33,7 +33,6 @@ __all__ = [
     'load_preferences_data',
     
     # training_utils
-    'train_reward_model',
     'train_model',
     
     # active_learning_utils

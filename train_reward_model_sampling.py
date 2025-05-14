@@ -21,7 +21,7 @@ from trajectory_utils import (
 from utils.wandb_utils import log_to_wandb, log_artifact
 
 # Import shared models and utilities
-from models import SegmentRewardModel, EnsembleRewardModel
+from models import EnsembleRewardModel, RewardModel
 from utils.dataset_utils import PreferenceDataset, bradley_terry_loss
 from utils.active_learning_utils import (
     select_uncertain_pairs_comprehensive,
@@ -110,10 +110,11 @@ def train_final_reward_model(labeled_pairs, segment_indices, labeled_preferences
     )
     
     train_loader = data_loaders['train']
+    val_loader = data_loaders['val']
     print(f"Using all {data_loaders['train_size']} labeled samples for training the final model (no validation split)")
     
     # Train final model
-    final_model = SegmentRewardModel(state_dim, action_dim, hidden_dims=cfg.model.hidden_dims)
+    final_model = RewardModel(state_dim, action_dim, hidden_dims=cfg.model.hidden_dims)
     
     # Create descriptive output directory structure
     dataset_name = Path(cfg.data.data_path).stem
@@ -132,7 +133,7 @@ def train_final_reward_model(labeled_pairs, segment_indices, labeled_preferences
     final_model, train_losses, val_losses = train_model(
         final_model,
         train_loader,
-        None,
+        val_loader,
         device,
         num_epochs=cfg.training.num_epochs,
         lr=cfg.model.lr,
@@ -342,6 +343,7 @@ def active_preference_learning(cfg):
         )
         
         train_loader = data_loaders['train']
+        val_loader = data_loaders['val']
         print(f"Using all {data_loaders['train_size']} labeled samples for training (no validation split)")
         
         if cfg.active_learning.fine_tune and prev_ensemble is not None:
@@ -362,7 +364,7 @@ def active_preference_learning(cfg):
         ensemble, _, _ = train_model(
             ensemble,
             train_loader,
-            None,           # No validation loader
+            val_loader,
             device,
             num_epochs=cfg.training.num_epochs,
             lr=lr,
@@ -379,6 +381,7 @@ def active_preference_learning(cfg):
         
         # Evaluate ensemble on test set
         print("Evaluating ensemble on test set...")
+        
         # Use the first model in the ensemble for evaluation
         test_metrics = evaluate_model_on_test_set(ensemble.models[0], test_loader, device)
         

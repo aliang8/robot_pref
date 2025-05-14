@@ -18,11 +18,6 @@ data:
   num_segments: 10000
   num_pairs: 5000
 
-# Model architecture
-model:
-  hidden_dims: [256, 256]
-  lr: 1e-4
-
 # Hardware settings
 hardware:
   gpu: 0

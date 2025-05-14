@@ -5,7 +5,7 @@ from tqdm import tqdm
 from torch import optim
 from copy import deepcopy
 
-from utils.dataset_utils import bradley_terry_loss, PreferenceDataset
+from utils.dataset_utils import bradley_terry_loss
 
 
 def log_wandb_metrics(train_loss, val_loss, epoch, lr=None, wandb=None):
@@ -51,19 +51,10 @@ def train_model(model, train_loader, val_loader, device, num_epochs=50, lr=1e-4,
     train_losses = []
     val_losses = []
     best_val_loss = float('inf')
-    best_model_state = None
     max_grad_norm = 1.0  # For gradient clipping
     
     # Check if we have validation data
     has_validation = val_loader is not None and len(val_loader) > 0
-    
-    # Initialize weights properly for single models
-    if not is_ensemble:
-        for m in model.modules():
-            if isinstance(m, torch.nn.Linear):
-                torch.nn.init.orthogonal_(m.weight.data)
-                if m.bias is not None:
-                    m.bias.data.zero_()
     
     print(f"Training {'ensemble' if is_ensemble else 'reward'} model with gradient clipping at {max_grad_norm}...")
     print(f"Using learning rate: {lr}")
@@ -96,17 +87,21 @@ def train_model(model, train_loader, val_loader, device, num_epochs=50, lr=1e-4,
             
             optimizer.zero_grad(set_to_none=True)
             
-            # Compute rewards for both segments using the unified interface
-            reward1, reward2 = model.compute_paired_rewards(obs1, actions1, obs2, actions2)
+            # Compute rewards directly using the forward method
+            reward1 = model(obs1, actions1)
+            reward2 = model(obs2, actions2)
             
-            # Compute losses for all models at once using broadcasting
-            # reward1 and reward2 have shape [num_models, batch_size]
-            # pref has shape [batch_size]
-            losses = bradley_terry_loss(reward1, reward2, pref)
-            
-            # Average loss across all models
-            batch_loss = losses.mean()
-            
+            if is_ensemble:
+                # take mean over ensemble
+                reward1 = reward1.mean(dim=0)
+                reward2 = reward2.mean(dim=0)
+
+            return1 = reward1.sum(dim=1)
+            return2 = reward2.sum(dim=1)
+
+            loss = bradley_terry_loss(return1, return2, pref)
+
+            batch_loss = loss.mean()
             batch_loss.backward()
             
             # Clip gradients
@@ -120,14 +115,13 @@ def train_model(model, train_loader, val_loader, device, num_epochs=50, lr=1e-4,
         avg_train_loss = train_loss / len(train_loader)
         train_losses.append(avg_train_loss)
         
-        # Validation (if we have validation data)
-        avg_val_loss = None
-        if has_validation:
-            model.eval()
-            val_loss = 0
-            
+
+        model.eval()
+        val_loss = 0
+        
+        if len(val_loader) > 0:
             val_progress = tqdm(val_loader, desc=f"Epoch {epoch+1}/{num_epochs} (Val)", 
-                              leave=False, dynamic_ncols=True)
+                                leave=False, dynamic_ncols=True)
             
             with torch.no_grad():
                 for batch_idx, (obs1, actions1, obs2, actions2, pref) in enumerate(val_progress):
@@ -138,61 +132,38 @@ def train_model(model, train_loader, val_loader, device, num_epochs=50, lr=1e-4,
                     actions2 = actions2.to(device, non_blocking=True)
                     pref = pref.to(device, non_blocking=True)
                     
-                    # Compute rewards for both segments
-                    reward1, reward2 = model.compute_paired_rewards(obs1, actions1, obs2, actions2)
-                    
-                    # Compute losses for all models at once
-                    losses = bradley_terry_loss(reward1, reward2, pref)
-                    
-                    # Average loss across all models
-                    batch_loss = losses.mean()
+                    # Compute rewards directly
+                    reward1 = model(obs1, actions1)
+                    reward2 = model(obs2, actions2)
+
+                    if is_ensemble:
+                        reward1 = reward1.mean(dim=0)
+                        reward2 = reward2.mean(dim=0)
+
+                    return1 = reward1.sum(dim=1)
+                    return2 = reward2.sum(dim=1)
+
+                    batch_loss = bradley_terry_loss(return1, return2, pref)
+                    batch_loss = batch_loss.mean()
                     
                     val_loss += batch_loss.item()
                     val_progress.set_postfix({"loss": f"{batch_loss.item():.4f}"})
             
-            avg_val_loss = val_loss / len(val_loader)
-            val_losses.append(avg_val_loss)
-            
-            # Save best model
-            if avg_val_loss < best_val_loss:
-                best_val_loss = avg_val_loss
-                best_model_state = deepcopy(model.state_dict())
+            avg_val_loss = val_loss / len(val_loader) 
         else:
-            # If no validation, just use the training loss for model selection
-            if avg_train_loss < best_val_loss:
-                best_val_loss = avg_train_loss
-                best_model_state = deepcopy(model.state_dict())
-            
-            # Add None to val_losses to maintain epoch alignment
-            val_losses.append(None)
-        
+            avg_val_loss = 0.0
+        val_losses.append(avg_val_loss)
+
         # Log to wandb
         if wandb:
             log_wandb_metrics(avg_train_loss, avg_val_loss, epoch, lr, wandb)
-        
-        # Print progress (for ensemble, only print occasionally)
-        if not is_ensemble or (epoch + 1) % 5 == 0 or epoch == 0:
-            if has_validation:
-                print(f"Epoch {epoch+1}/{num_epochs}: train_loss={avg_train_loss:.4f}, val_loss={avg_val_loss:.4f}, lr={lr:.6f}")
-            else:
-                print(f"Epoch {epoch+1}/{num_epochs}: train_loss={avg_train_loss:.4f}, lr={lr:.6f}")
-    
-    # Load best model if we found one
-    if best_model_state is not None:
-        model.load_state_dict(best_model_state)
-    else:
-        print("WARNING: No best model found (all had NaN losses). Using the final model state.")
-    
-    # Filter out NaN values for plotting
-    train_losses_clean = [loss for loss in train_losses if not np.isnan(loss)]
-    val_losses_clean = [loss for loss in val_losses if loss is not None and not np.isnan(loss)]
-    
-    # Plot training curve if we have non-NaN values and not an ensemble
-    if not is_ensemble and train_losses_clean:
+
+    # Plot training curve
+    if train_losses:
         plt.figure(figsize=(10, 6))
-        plt.plot(train_losses_clean, label='Train Loss')
-        if val_losses_clean:
-            plt.plot(val_losses_clean, label='Validation Loss')
+        plt.plot(train_losses, label='Train Loss')
+        if val_losses:
+            plt.plot(val_losses, label='Validation Loss')
         plt.xlabel('Epoch')
         plt.ylabel('Loss')
         plt.title('Reward Model Training')
@@ -209,14 +180,4 @@ def train_model(model, train_loader, val_loader, device, num_epochs=50, lr=1e-4,
             
         plt.close()
     
-    # Move model back to CPU if using CUDA to save memory for ensembles
-    if is_ensemble and device.type == 'cuda':
-        model = model.cpu()
-    
     return model, train_losses, val_losses
-
-
-# For backwards compatibility
-def train_reward_model(model, train_loader, val_loader, device, num_epochs=50, lr=1e-4, wandb=None, output_path=None):
-    """Wrapper around train_model for single reward models."""
-    return train_model(model, train_loader, val_loader, device, num_epochs, lr, wandb, is_ensemble=False, output_path=output_path) 
