@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
-import os
 import argparse
-import pandas as pd
-import wandb
-import numpy as np
-import matplotlib.pyplot as plt
-import seaborn as sns
-from pathlib import Path
 import json
+import os
 import re
-from datetime import datetime
+from pathlib import Path
+
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+import seaborn as sns
+
+import wandb
+
 
 def fetch_wandb_runs(project="robot_pref", entity="clvr", filters=None, max_runs=None):
     """Fetch runs from wandb.
@@ -511,7 +513,7 @@ def plot_reward_model_comparisons(df, output_dir="reward_model_plots"):
                     method = parts[1].split("_")[0]  # Get the first part after active_
                     
                     # Check if "_aug" is at the end
-                    if parent_dir.endswith("_aug"):
+                    if parent_dir.endswith("_aug") or parent_dir.endswith("_augTrue"):
                         method += "_aug"
                     
                     return method
@@ -892,7 +894,7 @@ def main():
                 print(f"{alg} on {dataset}: {valid_count}/{total_count} runs with valid metrics")
     
     # Save to CSV
-    csv_path = os.path.join(args.output_dir, f"runs_summary.csv")
+    csv_path = os.path.join(args.output_dir, "runs_summary.csv")
     top3_csv_path = save_summary_csv(df, csv_path)
     
     # Generate algorithm comparison plots if requested
