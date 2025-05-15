@@ -1,0 +1,337 @@
+def compute_dtw_distance_matrix(segments, max_segments=None, random_seed=42):
+    """Compute DTW distance matrix between segments using the custom DTW implementation.
+
+    Args:
+        segments: List of segments to compute distances between
+        max_segments: Maximum number of segments to use (will sample if needed)
+        random_seed: Random seed for reproducible sampling
+
+    Returns:
+        distance_matrix: Matrix of DTW distances
+        idx_mapping: Mapping from matrix indices to original segment indices
+    """
+    n_segments = len(segments)
+
+    # If max_segments is specified and less than n_segments, sample a subset
+    if max_segments is not None and max_segments < n_segments:
+        print(
+            f"Sampling {max_segments} segments out of {n_segments} for DTW calculation (random seed: {random_seed})"
+        )
+        # Set seed for reproducible sampling
+        rng_state = random.getstate()
+        random.seed(random_seed)
+
+        # Sample indices
+        segment_indices = random.sample(range(n_segments), max_segments)
+
+        # Restore random state
+        random.setstate(rng_state)
+
+        selected_segments = [segments[i] for i in segment_indices]
+        # Create a mapping from new indices to original indices
+        idx_mapping = {i: segment_indices[i] for i in range(max_segments)}
+        n_segments = max_segments
+    else:
+        selected_segments = segments
+        idx_mapping = {i: i for i in range(n_segments)}
+        print(f"Using all {n_segments} segments for DTW calculation")
+
+    print(f"This will compute {n_segments * (n_segments - 1) // 2} pairwise distances")
+
+    distance_matrix = np.zeros((n_segments, n_segments))
+
+    # Compute descriptive statistics for distances
+    min_dist = float("inf")
+    max_dist = float("-inf")
+    sum_dist = 0
+    count = 0
+    non_finite_count = 0
+
+    # Create tqdm for tracking progress
+    total_comparisons = n_segments * (n_segments - 1) // 2
+    with tqdm(total=total_comparisons, desc="Computing DTW distances") as pbar:
+        for i in range(n_segments):
+            for j in range(i + 1, n_segments):
+                # Convert to numpy for dtw
+                query = selected_segments[i].numpy()
+                reference = selected_segments[j].numpy()
+
+                try:
+                    # Use the custom DTW implementation
+                    cost, _, _ = dtw.get_single_match(query, reference)
+
+                    # Check if the cost is finite
+                    if not np.isfinite(cost):
+                        print(
+                            f"WARNING: Non-finite cost ({cost}) obtained for segments {i} and {j}"
+                        )
+                        # Fall back to a simpler distance metric
+                        cost = np.mean((query.mean(0) - reference.mean(0)) ** 2)
+                        non_finite_count += 1
+
+                    distance_matrix[i, j] = cost
+                    distance_matrix[j, i] = cost
+
+                    # Update statistics only for finite values
+                    if np.isfinite(cost):
+                        min_dist = min(min_dist, cost)
+                        max_dist = max(max_dist, cost)
+                        sum_dist += cost
+                        count += 1
+                except Exception as e:
+                    print(f"Error computing DTW for segments {i} and {j}: {e}")
+                    # Fall back to a simpler distance metric
+                    fallback_cost = np.mean((query.mean(0) - reference.mean(0)) ** 2)
+                    distance_matrix[i, j] = fallback_cost
+                    distance_matrix[j, i] = fallback_cost
+                    non_finite_count += 1
+
+                pbar.update(1)
+
+    # Print statistics about the distance matrix
+    if count > 0:
+        avg_dist = sum_dist / count
+        print(
+            f"Distance statistics - Min: {min_dist:.2f}, Max: {max_dist:.2f}, Avg: {avg_dist:.2f}"
+        )
+    print(f"Distance matrix shape: {distance_matrix.shape}")
+
+    if non_finite_count > 0:
+        print(
+            f"WARNING: {non_finite_count} distances were computed using fallback method due to non-finite DTW values"
+        )
+
+    # Return the distance matrix and the mapping to original indices
+    return distance_matrix, idx_mapping
+
+def compute_dtw_distance(query_segment, reference_segment):
+    """Compute DTW distance between two segments."""
+    try:
+        # Convert to numpy for dtw
+        query = query_segment.numpy()
+        reference = reference_segment.numpy()
+
+        # Use the custom DTW implementation
+        cost, _, _ = dtw.get_single_match(query, reference)
+
+        # Check if the cost is finite
+        if not np.isfinite(cost):
+            # Fall back to a simpler distance metric
+            cost = np.mean((query.mean(0) - reference.mean(0)) ** 2)
+    except Exception:
+        # Fall back to a simpler distance metric
+        query = query_segment.numpy()
+        reference = reference_segment.numpy()
+        cost = np.mean((query.mean(0) - reference.mean(0)) ** 2)
+
+    return cost
+
+
+def sample_segment_pairs(segments, segment_indices, rewards, n_pairs=5000):
+    """Generate synthetic preference pairs based on cumulative rewards.
+
+    Args:
+        segments: List of segment data
+        segment_indices: List of (start_idx, end_idx) tuples for each segment
+        rewards: Tensor of reward values for all transitions
+        n_pairs: Number of preference pairs to generate
+
+    Returns:
+        pairs: List of (idx1, idx2) tuples indicating segment pairs
+        preferences: List of preference labels (1 if first segment preferred, 2 if second)
+    """
+    n_segments = len(segments)
+    print(f"Generating {n_pairs} preference pairs from {n_segments} segments")
+
+    # Ensure rewards is on CPU for indexing
+    rewards_cpu = rewards.cpu() if isinstance(rewards, torch.Tensor) else rewards
+
+    # Sample random pairs of segment indices
+    pairs = []
+    preference_labels = []
+
+    # Keep generating pairs until we have enough or max attempts reached
+    max_attempts = n_pairs * 5  # Allow more attempts to handle cases with equal rewards
+
+    with tqdm(total=n_pairs, desc="Generating preference pairs") as pbar:
+        while len(pairs) < n_pairs and len(pairs) < max_attempts:
+            # Sample two different segments
+            idx1, idx2 = random.sample(range(n_segments), 2)
+
+            # Get segment indices
+            start1, end1 = segment_indices[idx1]
+            start2, end2 = segment_indices[idx2]
+
+            # Calculate cumulative reward for each segment
+            reward1 = rewards_cpu[start1 : end1 + 1].sum().item()
+            reward2 = rewards_cpu[start2 : end2 + 1].sum().item()
+
+            # Skip if rewards are too close (avoid ambiguous preferences)
+            if abs(reward1 - reward2) < 1e-6:
+                continue
+
+            # Add pair to the list
+            pairs.append((idx1, idx2))
+
+            # Assign preference label (1 if segment1 is preferred, 2 if segment2 is preferred)
+            if reward1 > reward2:
+                preference_labels.append(1)
+            else:
+                preference_labels.append(2)
+
+            pbar.update(1)
+
+    print(f"Generated {len(pairs)} preference pairs")
+    return pairs, preference_labels
+
+
+def find_top_matches(query_segment, all_segments, top_k=5, exclude_self=True):
+    """Find top k segments with lowest DTW distance to the query segment."""
+    distances = []
+
+    for i, segment in enumerate(tqdm(all_segments, desc="Computing DTW distances")):
+        # Skip self-comparison if needed
+        if exclude_self and torch.all(query_segment == segment):
+            distances.append(float("inf"))
+            continue
+
+        distance = compute_dtw_distance(query_segment, segment)
+        distances.append(distance)
+
+    # Get indices of top-k lowest distances
+    distances = np.array(distances)
+    top_indices = np.argsort(distances)[:top_k]
+    top_distances = distances[top_indices]
+
+    return top_indices, top_distances
+
+def save_preprocessed_segments(data, output_file, compress=True):
+    """Save preprocessed segments data to a file.
+
+    Args:
+        data: Dictionary containing segments, indices, clusters, etc.
+        output_file: Path to save the data
+        compress: Whether to use compression (default: True)
+    """
+    print(f"Saving preprocessed data to {output_file}")
+    os.makedirs(os.path.dirname(os.path.abspath(output_file)), exist_ok=True)
+
+    # Make sure all tensors are on CPU
+    for key, value in data.items():
+        if isinstance(value, torch.Tensor):
+            data[key] = value.cpu()
+        elif (
+            isinstance(value, list)
+            and len(value) > 0
+            and isinstance(value[0], torch.Tensor)
+        ):
+            data[key] = [v.cpu() for v in value]
+
+    # Add timestamp
+    import datetime
+
+    data["timestamp"] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    # Save data
+    if compress:
+        torch.save(data, output_file, _use_new_zipfile_serialization=True)
+    else:
+        torch.save(data, output_file, _use_new_zipfile_serialization=False)
+
+    print(f"Saved preprocessed data with keys: {list(data.keys())}")
+
+    # Print some statistics about the data
+    if "segments" in data:
+        print(f"Number of segments: {len(data['segments'])}")
+    if "clusters" in data and "segment_indices" in data:
+        print(f"Number of clusters: {len(np.unique(data['clusters']))}")
+        print(f"Number of segment indices: {len(data['segment_indices'])}")
+
+def load_preprocessed_segments(file_path):
+    """Load preprocessed segments data from file.
+
+    Args:
+        file_path: Path to the saved data file
+
+    Returns:
+        Dictionary containing the preprocessed data
+    """
+    print(f"Loading preprocessed data from {file_path}")
+    data = torch.load(file_path, weights_only=False)
+
+    # Print some statistics about the loaded data
+    print(f"Loaded data with keys: {list(data.keys())}")
+    if "segments" in data:
+        print(f"Number of segments: {len(data['segments'])}")
+    if "clusters" in data and "segment_indices" in data:
+        print(f"Number of clusters: {len(np.unique(data['clusters']))}")
+        print(f"Number of segment indices: {len(data['segment_indices'])}")
+    if "timestamp" in data:
+        print(f"Data timestamp: {data['timestamp']}")
+
+    return data
+
+def compute_eef_position_ranges(data_paths):
+    """Compute the global min and max ranges for EEF positions across all datasets.
+
+    Args:
+        data_paths: List of paths to dataset files
+
+    Returns:
+        tuple: (x_min, x_max, y_min, y_max, z_min, z_max) for consistent visualization
+    """
+    all_mins = []
+    all_maxs = []
+
+    print("Computing global EEF position ranges for consistent visualization...")
+
+    for data_path in data_paths:
+        print(f"Processing dataset: {data_path}")
+        # Load data
+        data = load_tensordict(data_path)
+
+        # Extract EEF positions
+        observations = data["obs"] if "obs" in data else data["state"]
+        observations_cpu = observations.cpu()
+        eef_positions = observations_cpu[:, :3].numpy()
+
+        # Remove NaN values
+        eef_positions = eef_positions[~np.isnan(eef_positions).any(axis=1)]
+
+        if len(eef_positions) == 0:
+            print(f"Warning: No valid EEF positions found in {data_path}")
+            continue
+
+        # Compute min and max
+        min_vals = np.min(eef_positions, axis=0)
+        max_vals = np.max(eef_positions, axis=0)
+
+        all_mins.append(min_vals)
+        all_maxs.append(max_vals)
+
+    if not all_mins:
+        print("Warning: No valid ranges found across any datasets")
+        return None
+
+    # Get global min and max across all datasets
+    global_min = np.min(all_mins, axis=0)
+    global_max = np.max(all_maxs, axis=0)
+
+    # Add padding for better visualization
+    padding = 0.1
+    range_vals = global_max - global_min
+
+    # Add padding
+    global_min -= padding * range_vals
+    global_max += padding * range_vals
+
+    # Extract components
+    x_min, y_min, z_min = global_min
+    x_max, y_max, z_max = global_max
+
+    print("Global EEF position ranges across all datasets:")
+    print(f"  X range: [{x_min:.4f}, {x_max:.4f}]")
+    print(f"  Y range: [{y_min:.4f}, {y_max:.4f}]")
+    print(f"  Z range: [{z_min:.4f}, {z_max:.4f}]")
+
+    return x_min, x_max, y_min, y_max, z_min, z_max
