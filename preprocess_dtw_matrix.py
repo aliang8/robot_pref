@@ -128,10 +128,9 @@ def main():
         with open(dtw_matrix_file, "rb") as f:
             data = pickle.load(f)
             if isinstance(data, tuple) and len(data) == 2:
-                dtw_matrix, segment_ids = data
+                dtw_matrix = data
             else:
                 dtw_matrix = data
-                segment_ids = None
                 print("Warning: Loaded DTW matrix does not contain segment IDs")
     else:
         if os.path.exists(dtw_matrix_file) and overwrite:
@@ -158,18 +157,12 @@ def main():
         # Compute DTW distance matrix
         dtw_matrix = compute_dtw_distance_matrix(segments)
 
-        # Store segment IDs
-        segment_ids = [i for i in range(len(segments))]
-
         # Save to cache
         print(f"Saving DTW matrix and segment IDs to cache: {dtw_matrix_file}")
         with open(dtw_matrix_file, "wb") as f:
-            pickle.dump((dtw_matrix, segment_ids), f)
+            pickle.dump((dtw_matrix), f)
 
     print(f"DTW matrix shape: {dtw_matrix.shape}")
-    if segment_ids is not None:
-        print(f"Number of segment IDs: {len(segment_ids)}")
-
 
 if __name__ == "__main__":
     main()
