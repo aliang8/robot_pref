@@ -145,8 +145,8 @@ def train_final_reward_model(labeled_pairs, segment_indices, labeled_preferences
     # Use the utility function to create data loaders
     data_loaders = create_data_loaders(
         final_dataset,
-        train_ratio=1.0,
-        val_ratio=0,
+        train_ratio=0.8,
+        val_ratio=0.2,
         batch_size=effective_batch_size,
         num_workers=effective_workers,
         pin_memory=True,
@@ -201,6 +201,16 @@ def main(cfg: DictConfig):
     set_seed(random_seed)
     print(f"Global random seed set to {random_seed}")
     
+    # Get the dataset name
+    dataset_name = Path(cfg.data.data_path).stem
+    
+    # Replace only the dataset name placeholder in the template strings
+    if hasattr(cfg.output, "model_dir_name"):
+        cfg.output.model_dir_name = cfg.output.model_dir_name.replace("DATASET_NAME", dataset_name)
+    
+    if hasattr(cfg.output, "artifact_name"):
+        cfg.output.artifact_name = cfg.output.artifact_name.replace("DATASET_NAME", dataset_name)
+    
     active_preference_learning(cfg)
 
 def active_preference_learning(cfg):
@@ -234,7 +244,7 @@ def active_preference_learning(cfg):
     dtw_enabled = cfg.dtw_augmentation.enabled
     dtw_k_augment = cfg.dtw_augmentation.k_augment
     dtw_max_segments_for_matrix = cfg.dtw_augmentation.max_dtw_segments
-    print(f"  Enabled: {dtw_enabled}")
+    print(f"  DTW Enabled: {dtw_enabled}")
     if dtw_enabled:
         print(f"  K augment (similar segments): {dtw_k_augment}")
         print(f"  Max segments for DTW matrix computation: {dtw_max_segments_for_matrix if dtw_max_segments_for_matrix is not None else 'All'}")
@@ -308,7 +318,7 @@ def active_preference_learning(cfg):
     all_segment_pairs, gt_preferences = sample_segment_pairs(
         segments, 
         segment_indices, 
-        data_cpu["reward"], 
+        rewards, 
         n_pairs=cfg.data.num_pairs
     )
     
@@ -508,8 +518,23 @@ def active_preference_learning(cfg):
         
         print(f"Computing uncertainty scores using {cfg.active_learning.uncertainty_method} method...")
 
+        # If DTW augmentation is enabled, only sample from pairs that are in the DTW matrix
+        candidate_pairs = unlabeled_pairs
+        if dtw_enabled and distance_matrix is not None and idx_mapping_dtw is not None:
+            # Filter unlabeled pairs to only include those where both segments are in the DTW matrix
+            dtw_candidate_pairs = []
+            for pair in unlabeled_pairs:
+                i, j = pair
+                if (i in original_to_dtw_idx) and (j in original_to_dtw_idx):
+                    dtw_candidate_pairs.append(pair)
+            
+            if len(dtw_candidate_pairs) > 0:
+                print(f"Using {len(dtw_candidate_pairs)} pairs from DTW matrix for uncertainty sampling")
+                candidate_pairs = dtw_candidate_pairs
+            else:
+                print("Warning: No pairs found in DTW matrix. Using all unlabeled pairs.")
+
         # Use the unified function for uncertainty-based selection
-        # Instead of passing all unlabeled pairs, we'll directly use them
         ranked_pairs = select_active_pref_query(
             ensemble,
             segments,
@@ -520,7 +545,7 @@ def active_preference_learning(cfg):
             max_pairs=batch_size,
             use_random_candidate_sampling=cfg.active_learning.use_random_sampling, 
             n_candidates=cfg.active_learning.n_candidates,
-            candidate_pairs=unlabeled_pairs  # Pass unlabeled_pairs directly
+            candidate_pairs=candidate_pairs
         )
 
         # Extract the selected pairs
@@ -552,7 +577,7 @@ def active_preference_learning(cfg):
         if len(selected_pairs) == 0:
             print("No valid pairs selected. Ending active learning loop.")
             break
-            
+        
         # --- DTW Augmentation Start ---
         current_iter_augmented_pairs = []
         current_iter_augmented_preferences = []
