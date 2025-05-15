@@ -1,27 +1,24 @@
 import os
-import torch
-import numpy as np
-import random
-from tqdm import tqdm
-import matplotlib.pyplot as plt
 import pickle
 import time
 from pathlib import Path
-import hydra
-from omegaconf import DictConfig, OmegaConf
-import wandb
 
-# Import utility functions
-from trajectory_utils import (
-    load_tensordict,
-    create_segments,
-    sample_segment_pairs,
-)
-from utils.wandb_utils import log_to_wandb, log_artifact
-from utils.seed_utils import set_seed
+import hydra
+import torch
+from omegaconf import DictConfig, OmegaConf
+from tqdm import tqdm
+
+import wandb
 
 # Import shared models and utilities
 from models.reward_models import RewardModel
+
+# Import utility functions
+from trajectory_utils import (
+    create_segments,
+    load_tensordict,
+    sample_segment_pairs,
+)
 from utils import (
     PreferenceDataset,
     create_data_loaders,
@@ -29,6 +26,8 @@ from utils import (
     load_preferences_data,
     train_model,
 )
+from utils.seed_utils import set_seed
+from utils.wandb_utils import log_artifact, log_to_wandb
 
 
 def run_reward_analysis(
@@ -70,7 +69,7 @@ def run_reward_analysis(
     if wandb_run is not None and wandb_run.run:
         reward_grid_path = os.path.join(output_dir, "reward_grid.png")
         if os.path.exists(reward_grid_path):
-            print(f"Logging reward analysis grid to wandb")
+            print("Logging reward analysis grid to wandb")
             wandb_run.log({"reward_analysis/grid": wandb.Image(reward_grid_path)})
         else:
             print(f"Warning: Could not find reward grid image at {reward_grid_path}")
@@ -314,7 +313,9 @@ def main(cfg: DictConfig):
         batch_size=cfg.training.batch_size,
         num_workers=effective_num_workers,
         pin_memory=effective_pin_memory,
-        seed=random_seed,  # Use the same random seed
+        seed=random_seed,
+        normalize_obs=cfg.data.normalize_obs,
+        norm_method=cfg.data.norm_method
     )
 
     train_loader = dataloaders["train"]
@@ -457,7 +458,7 @@ def main(cfg: DictConfig):
         "config": OmegaConf.to_container(cfg, resolve=True),
     }
 
-    info_filename = f"info.pkl"
+    info_filename = "info.pkl"
     info_path = os.path.join(model_dir, sub_dir, info_filename)
     with open(info_path, "wb") as f:
         pickle.dump(segment_info, f)

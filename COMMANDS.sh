@@ -12,7 +12,8 @@ python train_reward_model.py \
 # train reward model with active offline learning
 python train_reward_model_active.py \
     data.data_path=/scr/aliang80/robot_pref/labeled_datasets/buffer_assembly-v2_balanced.pt \
-    active_learning.uncertainty_method=random
+    active_learning.uncertainty_method=entropy,disagreement \
+    --multirun
 
 # train policy using learned reward model
 python train_policy.py \
@@ -25,6 +26,8 @@ python train_policy.py \
 # train reward model with active
 python train_reward_model_active.py \
     data.data_path=/scr/aliang80/robot_pref/labeled_datasets/buffer_assembly-v2_balanced.pt \
-    active_learning.uncertainty_method=random \
-    data.segment_length=32 \
-    dtw_augmentation.enabled=true
+    active_learning.uncertainty_method=entropy,disagreement \
+    active_learning.max_queries=300 \
+    dtw_augmentation.enabled=true \
+    hydra/launcher=slurm \
+    --multirun

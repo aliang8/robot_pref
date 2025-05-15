@@ -212,11 +212,12 @@ def load_dtw_matrix(data_path, segment_length):
 
 
 
-def active_preference_learning(cfg):
+def active_preference_learning(cfg, dataset_name=None):
     """Main function for active preference learning.
     
     Args:
         cfg: Configuration object from Hydra
+        dataset_name: Name of the dataset (extracted from path)
     """
     print("\n" + "=" * 50)
     print("Active Preference Learning with Uncertainty Sampling")
@@ -260,9 +261,10 @@ def active_preference_learning(cfg):
     
     # Initialize wandb
     if cfg.wandb.use_wandb:
-        # Generate experiment name based on data path
-        dataset_name = Path(cfg.data.data_path).stem
-        
+        # Use dataset_name passed from main, or extract if not provided
+        if dataset_name is None:
+            dataset_name = Path(cfg.data.data_path).stem
+            
         # Set up a run name if not specified
         run_name = cfg.wandb.name
         if run_name is None:
