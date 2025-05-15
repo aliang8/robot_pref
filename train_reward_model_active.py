@@ -192,7 +192,20 @@ def main(cfg: DictConfig):
     print(f"Global random seed set to {random_seed}")
     
     # Get the dataset name
-    dataset_name = Path(cfg.data.data_path).stem
+    dataset_path = Path(cfg.data.data_path)
+    dataset_name = dataset_path.stem
+    
+    if 'robomimic' in str(dataset_path):
+        # Get the task name (like 'can') from the path
+        task_name = dataset_path.parent.name
+        dataset_name = f"{task_name}_{dataset_name}"
+    else:
+        # Get parent directory name if needed for other datasets
+        parent_dir = dataset_path.parent.name
+        if parent_dir and parent_dir not in ['datasets', 'data']:
+            dataset_name = f"{parent_dir}_{dataset_name}"
+
+    print(f"Dataset name: {dataset_name}")
     
     # Replace only the dataset name placeholder in the template strings
     if hasattr(cfg.output, "model_dir_name"):

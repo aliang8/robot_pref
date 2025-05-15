@@ -18,6 +18,12 @@ data:
   num_segments: 10000
   num_pairs: 5000
 
+# DTW augmentation parameters
+dtw_augmentation:
+  enabled: false              # Set to true to enable DTW augmentation
+  k_augment: 5                # Number of similar segments to find for each part of a pair
+  max_dtw_segments: 5000      # Max segments for computing DTW matrix (null or remove for all).
+  
 # Hardware settings
 hardware:
   gpu: 0
@@ -27,9 +33,9 @@ hardware:
 output:
   output_dir: results/active_reward_model
   # Use fixed placeholder for dataset name that will be replaced in code
-  model_dir_name: "DATASET_NAME_active_${active_learning.uncertainty_method}_init${active_learning.initial_size}_max${active_learning.max_queries}_batch${active_learning.batch_size}"
+  model_dir_name: "DATASET_NAME_active_${active_learning.uncertainty_method}_init${active_learning.initial_size}_max${active_learning.max_queries}_batch${active_learning.batch_size}_aug${dtw_augmentation.enabled}"
   # Artifact name for wandb
-  artifact_name: "DATASET_NAME_active_${active_learning.uncertainty_method}_init${active_learning.initial_size}_max${active_learning.max_queries}"
+  artifact_name: "DATASET_NAME_active_${active_learning.uncertainty_method}_init${active_learning.initial_size}_max${active_learning.max_queries}_aug${dtw_augmentation.enabled}"
   
 # Wandb configuration
 wandb:
@@ -40,8 +46,4 @@ wandb:
   tags: ["reward_model", "preference_learning", "active_learning"]
   notes: "Active preference learning with uncertainty sampling"
 
-# DTW augmentation parameters
-dtw_augmentation:
-  enabled: false              # Set to true to enable DTW augmentation
-  k_augment: 5                # Number of similar segments to find for each part of a pair
-  max_dtw_segments: 5000      # Max segments for computing DTW matrix (null or remove for all).
+
