@@ -268,7 +268,9 @@ def main(cfg: DictConfig):
         batch_size=cfg.training.batch_size,
         num_workers=effective_num_workers,
         pin_memory=effective_pin_memory,
-        seed=random_seed  # Use the same random seed
+        seed=random_seed,
+        normalize_obs=cfg.data.normalize_obs,
+        norm_method=cfg.data.norm_method
     )
     
     train_loader = dataloaders['train']

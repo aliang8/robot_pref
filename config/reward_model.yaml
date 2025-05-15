@@ -12,11 +12,13 @@ data:
   num_segments: 10000
   num_pairs: 500
   preferences_data_path: null
+  normalize_obs: false
+  norm_method: "standard"
   
 # Model architecture
 model:
   hidden_dims: [256, 256]
-  lr: 1e-4
+  lr: 3e-4
 
 # Training parameters
 training:

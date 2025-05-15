@@ -46,6 +46,9 @@ def evaluate_model_on_test_set(model, test_loader, device):
     test_total = 0
     logpdf_values = []
     
+    # Check if model is an ensemble
+    is_ensemble = hasattr(model, 'num_models') and model.num_models > 1
+    
     with torch.no_grad():
         for obs1, actions1, obs2, actions2, pref in tqdm(test_loader, desc="Testing"):
             # Move to device
@@ -57,28 +60,62 @@ def evaluate_model_on_test_set(model, test_loader, device):
             reward1 = model(obs1, actions1)
             reward2 = model(obs2, actions2)
             
-            return1 = reward1.sum(dim=1)
-            return2 = reward2.sum(dim=1)
-            
-            # Compute loss
-            loss = bradley_terry_loss(return1, return2, pref)
-            test_loss += loss.mean().item()
+            # Handle ensemble and non-ensemble models consistently with training
+            if is_ensemble:
+                # [B, N, T] -> [B, N] for ensemble 
+                return1 = reward1.sum(dim=-1)  # Sum over time dimension
+                return2 = reward2.sum(dim=-1)
+                # Replicate preferences for ensemble models
+                ensemble_pref = pref.unsqueeze(0).repeat(model.num_models, 1)
                 
-            # Get model predictions
-            pred_pref = torch.where(return1 > return2, 
-                                    torch.ones_like(pref), 
-                                    torch.ones_like(pref) * 2)
+                # Compute loss using ensemble preferences
+                loss = bradley_terry_loss(return1, return2, ensemble_pref)
+                if isinstance(loss, torch.Tensor) and loss.dim() > 0:
+                    loss = loss.mean()  # Average across ensemble models
+                test_loss += loss.item()
+                
+                # For predictions and accuracy, use the mean prediction across ensemble
+                ensemble_return1 = return1.mean(dim=0)  # Average across models
+                ensemble_return2 = return2.mean(dim=0)
+                
+                # Use averaged returns for prediction and accuracy
+                pred_pref = torch.where(ensemble_return1 > ensemble_return2, 
+                                       torch.ones_like(pref), 
+                                       torch.ones_like(pref) * 2)
+                
+                # Compute logpdf using mean predictions for consistency
+                bt_logits = ensemble_return1 - ensemble_return2
+                bt_probs = torch.sigmoid(bt_logits)
+                p = torch.where(pref == 1, bt_probs, 1 - bt_probs)
+                logp = torch.log(p)
+                
+            else:
+                # Standard non-ensemble model
+                return1 = reward1.sum(dim=1)  # Sum over time dimension
+                return2 = reward2.sum(dim=1)
+                
+                # Compute standard loss
+                loss = bradley_terry_loss(return1, return2, pref)
+                test_loss += loss.item()
+                
+                # Get predictions
+                pred_pref = torch.where(return1 > return2, 
+                                        torch.ones_like(pref), 
+                                        torch.ones_like(pref) * 2)
+                
+                # Compute logpdf
+                bt_logits = return1 - return2
+                bt_probs = torch.sigmoid(bt_logits)
+                p = torch.where(pref == 1, bt_probs, 1 - bt_probs)
+                logp = torch.log(p)
             
-            # Compute accuracy (prediction matches ground truth preference)
+            # Compute accuracy (same for both cases)
             correct = (pred_pref == pref).sum().item()
             test_acc += correct
             test_total += pref.size(0)
             
-            # Compute logpdf
-            # log of bradley terry 
-            bt_logits = return1 - return2
-            bt_probs = torch.sigmoid(bt_logits)
-            logpdf_values.append(torch.log(bt_probs).mean().item())
+            # Save logpdf values
+            logpdf_values.append(logp.mean().item())
     
     avg_test_loss = test_loss / len(test_loader) if len(test_loader) > 0 else float('nan')
     test_accuracy = test_acc / test_total if test_total > 0 else 0
@@ -165,9 +202,12 @@ def train_model(model, train_loader, val_loader, device, num_epochs=50, lr=1e-4,
                 return1 = reward1.sum(dim=1)
                 return2 = reward2.sum(dim=1)
 
+            # Bradley-Terry loss already applies mean over batch dimension
+            # For ensemble models, we get one loss per model
             loss = bradley_terry_loss(return1, return2, pref)
-
-            batch_loss = loss.mean()
+            
+            # For ensemble, take mean across models
+            batch_loss = loss.mean() if loss.dim() > 0 else loss
             batch_loss.backward()
             
             # Clip gradients
@@ -181,7 +221,6 @@ def train_model(model, train_loader, val_loader, device, num_epochs=50, lr=1e-4,
         avg_train_loss = train_loss / len(train_loader)
         train_losses.append(avg_train_loss)
         
-
         model.eval()
         val_loss = 0
         
@@ -211,8 +250,11 @@ def train_model(model, train_loader, val_loader, device, num_epochs=50, lr=1e-4,
                         return1 = reward1.sum(dim=1)
                         return2 = reward2.sum(dim=1)
 
+                    # Bradley-Terry loss already applies mean over batch dimension
                     batch_loss = bradley_terry_loss(return1, return2, pref)
-                    batch_loss = batch_loss.mean()
+                    
+                    # For ensemble, take mean across models
+                    batch_loss = batch_loss.mean() if batch_loss.dim() > 0 else batch_loss
                     
                     val_loss += batch_loss.item()
                     val_progress.set_postfix({"loss": f"{batch_loss.item():.4f}"})
