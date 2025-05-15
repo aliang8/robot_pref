@@ -1,11 +1,7 @@
-# Hydra config for reward model training
-
-# Include common settings
 defaults:
   - common
-  - _self_  # Allow this config to override common settings
+  - _self_ 
 
-# Data parameters
 data:
   data_path: "/scr/shared/clam/datasets/metaworld/assembly-v2/buffer_assembly-v2.pt"
   segment_length: 32
@@ -15,30 +11,25 @@ data:
   normalize_obs: false
   norm_method: "standard"
   
-# Model architecture
 model:
   hidden_dims: [256, 256]
   lr: 3e-4
 
-# Training parameters
 training:
   batch_size: 256
   num_epochs: 100
   num_workers: 4
   pin_memory: true
 
-# Hardware settings
 hardware:
   gpu: 0
   use_cpu: false
 
-# Output parameters
 output:
   output_dir: results/reward_model
   model_dir_name: "DATASET_NAME_model_seg${data.segment_length}_hidden${model.hidden_dims}_epochs${training.num_epochs}_pairs${data.num_pairs}"
   artifact_name: "DATASET_NAME_seg${data.segment_length}_pairs${data.num_pairs}_epochs${training.num_epochs}"
   
-# Wandb configuration
 wandb:
-  tags: ["reward_model", "preference_learning"]
+  tags: ["reward_model"]
   notes: "Training reward model with Bradley-Terry preference learning"

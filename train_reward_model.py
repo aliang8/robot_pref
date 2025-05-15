@@ -13,21 +13,18 @@ import wandb
 # Import shared models and utilities
 from models.reward_models import RewardModel
 
-# Import utility functions
-from utils.trajectory_utils import (
-    create_segments,
+from utils.trajectory import (
     load_tensordict,
     sample_segment_pairs,
 )
-from utils import (
+from utils.dataset import (
     PreferenceDataset,
     create_data_loaders,
-    evaluate_model_on_test_set,
     load_preferences_data,
-    train_model,
 )
-from utils.seed_utils import set_seed
-from utils.wandb_utils import log_artifact, log_to_wandb
+from utils.training import train_model, evaluate_model_on_test_set
+from utils.seed import set_seed
+from utils.wandb import log_to_wandb
 
 
 def run_reward_analysis(
@@ -79,7 +76,6 @@ def run_reward_analysis(
 
 @hydra.main(config_path="config", config_name="reward_model", version_base=None)
 def main(cfg: DictConfig):
-    """Train a state-action reward model using BT loss with Hydra config."""
     # Get the dataset name
     dataset_name = Path(cfg.data.data_path).stem
 
@@ -130,168 +126,29 @@ def main(cfg: DictConfig):
         print(f"Wandb initialized: {wandb.run.name}")
 
     output_dir = cfg.output.output_dir
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # Get dataset name for the subdirectory
-    dataset_name = Path(cfg.data.data_path).stem
-
-    # If using preference data, include that info
-    pref_dataset_info = ""
-    if hasattr(cfg.data, "preferences_data_path") and cfg.data.preferences_data_path:
-        # Extract key parameters from the preference dataset path
-        pref_path = Path(cfg.data.preferences_data_path)
-        pref_dir = pref_path.parent
-
-        # Try to extract parameters from directory name (e.g., n50_k10_seed42_dtw500)
-        dir_parts = pref_dir.name.split("_")
-
-        # Extract n_queries and k_augment if present in the directory name
-        n_queries = next(
-            (
-                part[1:]
-                for part in dir_parts
-                if part.startswith("n") and part[1:].isdigit()
-            ),
-            "",
-        )
-        k_augment = next(
-            (
-                part[1:]
-                for part in dir_parts
-                if part.startswith("k") and part[1:].isdigit()
-            ),
-            "",
-        )
-
-        if n_queries and k_augment:
-            pref_dataset_info = f"_n{n_queries}_k{k_augment}"
-        else:
-            # If we can't extract parameters, just use the parent directory name
-            pref_dataset_info = f"_{pref_dir.name}"
-
-    # Get model directory name from config, with pref_dataset_info added if present
-    model_dir_name = cfg.output.model_dir_name
-    # Insert pref_dataset_info after the dataset name if present
-    if pref_dataset_info:
-        model_dir_name = model_dir_name.replace(
-            dataset_name, f"{dataset_name}{pref_dataset_info}"
-        )
-
-    os.makedirs(output_dir, exist_ok=True)
-    model_dir = output_dir
-
-    # Setup CUDA device
-    if cfg.hardware.use_cpu:
-        device = torch.device("cpu")
-    else:
-        cuda_device = f"cuda:{cfg.hardware.gpu}" if torch.cuda.is_available() else "cpu"
-        device = torch.device(cuda_device)
-
-    print(f"Using device: {device}")
-
-    # Determine effective GPU and CPU settings
     effective_num_workers = cfg.training.num_workers
     effective_pin_memory = cfg.training.pin_memory
+    
+    
+    print(f"Loading data from file: {cfg.data.data_path}")
+    data = load_tensordict(cfg.data.data_path)
 
-    # Adjust for CPU-only mode
-    if device.type == "cpu":
-        print("Running in CPU mode")
-        effective_pin_memory = False
+    # Get observation and action dimensions
+    observations = data["obs"] if "obs" in data else data["state"]
+    actions = data["action"]
+    state_dim = observations.shape[1]
+    action_dim = actions.shape[1]
 
-    # Initialize variables
-    data_cpu = None
-    segments = None
-    segment_pairs = None
-    segment_indices = None
-    preferences = None
-    state_dim = None
-    action_dim = None
+    # Ensure data is on CPU for processing
+    data_cpu = {
+        k: v.cpu() if isinstance(v, torch.Tensor) else v for k, v in data.items()
+    }
+    print(f"Loaded data with {len(observations)} observations")
 
-    # First, try to load from preference data if specified
-    if hasattr(cfg.data, "preferences_data_path") and cfg.data.preferences_data_path:
-        print(f"Loading preference data from {cfg.data.preferences_data_path}")
-
-        # Load the preference data
-        segment_pairs, segment_indices, preferences, embedded_data = (
-            load_preferences_data(cfg.data.preferences_data_path)
-        )
-
-        # Use embedded data if available
-        if embedded_data is not None:
-            print("Using embedded data from preference file")
-            data_cpu = embedded_data
-
-            # Get observation and action dimensions from embedded data
-            if "obs" in data_cpu:
-                observations = data_cpu["obs"]
-                state_dim = observations.shape[1]
-            elif "state" in data_cpu:
-                observations = data_cpu["state"]
-                state_dim = observations.shape[1]
-
-            if "action" in data_cpu:
-                actions = data_cpu["action"]
-                action_dim = actions.shape[1]
-
-            print(f"Embedded data contains fields: {list(data_cpu.keys())}")
-            print(
-                f"Observation shape: {observations.shape}, Action shape: {actions.shape if 'action' in data_cpu else 'N/A'}"
-            )
-        else:
-            print(
-                "No embedded data found in preference file. Will load from original data file."
-            )
-
-    # If we don't have data yet, load from the original file
-    if data_cpu is None:
-        print(f"Loading data from original file: {cfg.data.data_path}")
-        data = load_tensordict(cfg.data.data_path)
-
-        # Get observation and action dimensions
-        observations = data["obs"] if "obs" in data else data["state"]
-        actions = data["action"]
-        state_dim = observations.shape[1]
-        action_dim = actions.shape[1]
-
-        # Ensure data is on CPU for processing
-        data_cpu = {
-            k: v.cpu() if isinstance(v, torch.Tensor) else v for k, v in data.items()
-        }
-        print(f"Loaded data with {len(observations)} observations")
-
-    # If we still don't have necessary preference data, generate it
-    if segment_pairs is None or preferences is None:
-        if segment_indices is not None and segments is None:
-            # Extract segments from data using provided indices
-            print("Extracting segments from data using provided segment indices...")
-            segments = []
-            for start_idx, end_idx in tqdm(segment_indices, desc="Extracting segments"):
-                segment_obs = data_cpu["obs"][start_idx : end_idx + 1]
-                segments.append(segment_obs)
-            print(f"Extracted {len(segments)} segments")
-
-        # If we still don't have segments, generate them
-        if segments is None or segment_indices is None:
-            print(f"Creating segments of length {cfg.data.segment_length}...")
-            num_segments = cfg.data.num_segments if cfg.data.num_segments > 0 else None
-            segments, segment_indices = create_segments(
-                data_cpu,
-                segment_length=cfg.data.segment_length,
-                max_segments=num_segments,
-            )
-
-        # If we still don't have pairs or preferences, generate them
-        if segment_pairs is None or preferences is None:
-            print(f"Generating {cfg.data.num_pairs} preference pairs...")
-            segment_pairs, preferences = sample_segment_pairs(
-                segments,
-                segment_indices,
-                data_cpu["reward"],
-                n_pairs=cfg.data.num_pairs,
-            )
-    else:
-        print(
-            f"Using {len(segment_pairs)} preference pairs loaded from preference data file"
-        )
+    trajectories = process_data_trajectories(data_cpu)
+    segments = segment_trajectory(trajectories, cfg.data.segment_length)
 
     print(
         f"Final data stats - Observation dimension: {state_dim}, Action dimension: {action_dim}"
@@ -343,7 +200,6 @@ def main(cfg: DictConfig):
 
     # Log model info to wandb
     if cfg.wandb.use_wandb:
-        # Use a different key name to avoid conflicts with existing 'model' key
         wandb.config.update(
             {
                 "model_info": {
@@ -363,17 +219,16 @@ def main(cfg: DictConfig):
     # Start timing the training
     start_time = time.time()
 
-    # Create a descriptive model filename
+    # Logging
+    os.makedirs(output_dir, exist_ok=True)
+    model_dir = output_dir
     dataset_name = Path(cfg.data.data_path).stem
     hidden_dims_str = "_".join(map(str, cfg.model.hidden_dims))
 
-    # Also save a version with more detailed filename for versioning
     sub_dir = f"{dataset_name}{pref_dataset_info}_model_seg{cfg.data.segment_length}_hidden{hidden_dims_str}_epochs{cfg.training.num_epochs}_pairs{cfg.data.num_pairs}"
-
     os.makedirs(os.path.join(model_dir, sub_dir), exist_ok=True)
     model_path = os.path.join(model_dir, sub_dir, "model.pt")
 
-    # Set path for training curve
     training_curve_path = os.path.join(model_dir, sub_dir, "training_curve.png")
 
     # Train the model
@@ -397,7 +252,6 @@ def main(cfg: DictConfig):
     print(f"\nTraining completed in {int(hours)}h {int(minutes)}m {int(seconds)}s")
 
     # Evaluate on test set
-    model = model.to(device)
     test_metrics = evaluate_model_on_test_set(model, test_loader, device)
 
     # Log final test results to wandb
@@ -407,63 +261,6 @@ def main(cfg: DictConfig):
     # Save the model
     torch.save(model.state_dict(), model_path)
     print(f"Model saved with detailed name: {model_path}")
-
-    # Log as wandb artifact
-    if cfg.wandb.use_wandb:
-        try:
-            # Create metadata about the model
-            metadata = {
-                "observation_dim": state_dim,
-                "action_dim": action_dim,
-                "hidden_dims": cfg.model.hidden_dims,
-                "test_accuracy": test_metrics["test_accuracy"],
-                "test_loss": test_metrics["test_loss"],
-                "num_segments": len(segments) if segments is not None else 0,
-                "num_pairs": len(segment_pairs) if segment_pairs is not None else 0,
-                "segment_length": cfg.data.segment_length,
-                "preference_data": cfg.data.preferences_data_path
-                if hasattr(cfg.data, "preferences_data_path")
-                else None,
-            }
-
-            # Get artifact name from config, with pref_dataset_info added if present
-            artifact_name = cfg.output.artifact_name
-            if pref_dataset_info:
-                artifact_name = artifact_name.replace(
-                    dataset_name, f"{dataset_name}{pref_dataset_info}"
-                )
-
-            # Create and log artifact
-            artifact = log_artifact(
-                model_path,
-                artifact_type="reward_model",
-                name=artifact_name,
-                metadata=metadata,
-            )
-            if artifact:
-                print(f"Model logged to wandb as artifact: {artifact.name}")
-        except Exception as e:
-            print(f"Warning: Could not log model as wandb artifact: {e}")
-
-    # Save segment info
-    segment_info = {
-        "segment_length": cfg.data.segment_length,
-        "num_segments": len(segments) if segments is not None else 0,
-        "num_pairs": len(segment_pairs) if segment_pairs is not None else 0,
-        "observation_dim": state_dim,
-        "action_dim": action_dim,
-        "training_losses": train_losses,
-        "validation_losses": val_losses,
-        "test_metrics": test_metrics,
-        "config": OmegaConf.to_container(cfg, resolve=True),
-    }
-
-    info_filename = "info.pkl"
-    info_path = os.path.join(model_dir, sub_dir, info_filename)
-    with open(info_path, "wb") as f:
-        pickle.dump(segment_info, f)
-
-    print(f"Model information saved to {info_path}")
 
     # Run reward analysis
     analysis_dir = os.path.join(model_dir, sub_dir, "analysis")

@@ -40,34 +40,3 @@ def log_to_wandb(metrics, prefix="", epoch=None):
     # Log scalar metrics
     if log_dict:
         wandb.log(log_dict)
-
-
-def log_artifact(artifact_path, artifact_type="model", metadata=None):
-    """Log an artifact file to wandb.
-
-    Args:
-        artifact_path: Path to the file to log
-        artifact_type: Type of artifact (model, dataset, etc.)
-        metadata: Optional dict of metadata to associate with the artifact
-
-    Returns:
-        wandb.Artifact: The logged artifact object or None if logging failed
-    """
-    if not wandb.run:
-        return None
-
-    # Ensure path is valid
-    artifact_path = Path(artifact_path)
-    if not artifact_path.exists():
-        print(f"Warning: Artifact file {artifact_path} does not exist")
-        return None
-
-    # Create artifact name
-    name = f"{artifact_type}_{artifact_path.stem}_{wandb.run.id}"
-
-    # Create and log artifact
-    artifact = wandb.Artifact(name, type=artifact_type, metadata=metadata)
-    artifact.add_file(str(artifact_path))
-    wandb.log_artifact(artifact)
-
-    return artifact

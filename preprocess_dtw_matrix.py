@@ -9,7 +9,7 @@ import numpy as np
 from tqdm import tqdm
 
 import utils.dtw as dtw
-from utils.trajectory_utils import process_data_trajectories, segment_trajectory
+from utils.trajectory import process_data_trajectories, segment_trajectory
 
 
 def compute_dtw_distance_matrix(segments):

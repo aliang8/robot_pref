@@ -8,7 +8,7 @@ import matplotlib.pyplot as plt
 from tqdm import tqdm
 
 # Import utility functions
-from utils.trajectory_utils import (
+from utils.trajectory import (
     DEFAULT_DATA_PATHS,
     RANDOM_SEED,
     load_tensordict,

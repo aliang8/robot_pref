@@ -18,17 +18,17 @@ import wandb
 from models import EnsembleRewardModel, RewardModel
 
 # Import utility functions
-from utils.trajectory_utils import (
+from utils.trajectory import (
     load_tensordict,
     process_data_trajectories,
     segment_trajectory,
 )
 from utils import evaluate_model_on_test_set
-from utils.active_learning_utils import create_initial_dataset, select_active_pref_query
-from utils.dataset_utils import PreferenceDataset, create_data_loaders
-from utils.seed_utils import set_seed
-from utils.training_utils import train_model
-from utils.wandb_utils import log_artifact, log_to_wandb
+from utils.active_query_selection import create_initial_dataset, select_active_pref_query
+from utils.dataset import PreferenceDataset, create_data_loaders
+from utils.seed import set_seed
+from utils.training import train_model
+from utils.wandb import log_artifact, log_to_wandb
 
 
 def find_similar_segments_dtw(query_idx, k, distance_matrix):

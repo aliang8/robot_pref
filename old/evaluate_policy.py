@@ -12,7 +12,7 @@ import d3rlpy
 from d3rlpy.algos import IQL
 
 # Import utility functions
-from utils.trajectory_utils import RANDOM_SEED
+from utils.trajectory import RANDOM_SEED
 from train_iql_policy import get_metaworld_env
 
 # Set seed for reproducibility

@@ -27,7 +27,7 @@ else:
     from tqdm import tqdm
 
 # Import utility functions
-from utils.trajectory_utils import (
+from utils.trajectory import (
     DEFAULT_DATA_PATHS,
     RANDOM_SEED,
     load_tensordict,
@@ -44,7 +44,7 @@ from eef_segment_matching import (
 )
 
 # Import seed utility
-from utils.seed_utils import set_seed
+from utils.seed import set_seed
 
 # Set random seed for reproducibility
 random.seed(RANDOM_SEED)
