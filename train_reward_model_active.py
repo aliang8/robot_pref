@@ -318,25 +318,8 @@ def active_preference_learning(cfg):
     assert len(segmented_trajectories) == len(trajectories) * segments_per_trajectory, f"Total segments: {len(segmented_trajectories)}, should equal len(trajectories) {len(trajectories)} * segments_per_trajectory {segments_per_trajectory} = {len(trajectories) * segments_per_trajectory}"
 
     # Sample subsamples from all segments
-    subsample_indices = random.sample(range(len(segmented_trajectories)), cfg.subsamples)
+    subsample_indices = random.sample(range(len(segmented_trajectories)), cfg.data.subsamples)
     subsampled_segments = [segmented_trajectories[i] for i in subsample_indices]
-
-    # # Pass CPU data to create_segments to ensure proper indexing
-    # segments, segment_indices = create_segments(
-    #     data_cpu, 
-    #     segment_length=cfg.data.segment_length,
-    #     max_segments=cfg.data.num_segments
-    # )
-    
-    # # Generate all possible segment pairs
-    # print(f"Generating {cfg.data.num_pairs} segment pairs...")
-    # # Pass CPU rewards to sample_segment_pairs
-    # all_segment_pairs, gt_preferences = sample_segment_pairs(
-    #     segments, 
-    #     segment_indices, 
-    #     rewards, 
-    #     n_pairs=cfg.data.num_pairs
-    # )
     
     # Load pre-computed DTW distance matrix if augmentation is enabled
     distance_matrix = None
@@ -346,6 +329,7 @@ def active_preference_learning(cfg):
     if dtw_enabled:
         print("\nLoading pre-computed DTW distance matrix...")
         distance_matrix, idx_mapping_dtw = load_dtw_matrix(cfg.data.data_path, cfg.data.segment_length)
+        import ipdb; ipdb.set_trace()
         
         if distance_matrix is not None:
             print(f"Successfully loaded DTW distance matrix with shape: {distance_matrix.shape}")
