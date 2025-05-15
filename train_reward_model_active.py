@@ -187,28 +187,26 @@ def load_dtw_matrix(data_path, segment_length):
         segment_length: Length of segments used for DTW computation
         
     Returns:
-        tuple: (distance_matrix, idx_mapping_dtw) if successful, (None, None) if failed
+        tuple: distance_matrix if successful, None if failed
     """
     dtw_matrix_file = Path(data_path).parent / f"dtw_matrix_{segment_length}.pkl"
     
     if not os.path.exists(dtw_matrix_file):
         print(f"Warning: DTW matrix file not found at {dtw_matrix_file}")
-        return None, None
+        return None
         
     try:
         with open(dtw_matrix_file, 'rb') as f:
             data = pickle.load(f)
             if isinstance(data, tuple) and len(data) == 2:
-                dtw_matrix, segment_ids = data
-                # Create mapping from original segment index to DTW matrix index
-                idx_mapping_dtw = {old_idx: new_idx for new_idx, old_idx in enumerate(segment_ids)}
-                return dtw_matrix, idx_mapping_dtw
+                dtw_matrix = data
+                return dtw_matrix
             else:
                 print("Warning: Loaded DTW matrix does not contain segment IDs")
-                return data, None
+                return data 
     except Exception as e:
         print(f"Error loading DTW matrix: {e}")
-        return None, None
+        return None
 
 
 
@@ -330,7 +328,7 @@ def active_preference_learning(cfg, dataset_name=None):
 
     if dtw_enabled:
         print("\nLoading pre-computed DTW distance matrix...")
-        distance_matrix, idx_mapping_dtw = load_dtw_matrix(cfg.data.data_path, cfg.data.segment_length)
+        distance_matrix = load_dtw_matrix(cfg.data.data_path, cfg.data.segment_length)
         import ipdb; ipdb.set_trace()
         
         if distance_matrix is not None:
