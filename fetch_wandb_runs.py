@@ -8,6 +8,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from pathlib import Path
 import json
+import re
 from datetime import datetime
 
 def fetch_wandb_runs(project="robot_pref", entity="clvr", filters=None, max_runs=None):
@@ -138,7 +139,8 @@ def create_run_dataframe(run_data):
             # Algorithm and dataset
             row["algorithm"] = config.get("algorithm", "unknown")
             if "data" in config and "data_path" in config["data"]:
-                row["dataset"] = Path(config["data"]["data_path"]).stem
+                path_obj = Path(config["data"]["data_path"])
+                row["dataset"] = f"{path_obj.parent.name}_{path_obj.stem}"
             else:
                 row["dataset"] = "unknown"
                 
@@ -488,8 +490,6 @@ def plot_reward_model_comparisons(df, output_dir="reward_model_plots"):
     
     # Filter out rows with missing data
     df_filtered = df.dropna(subset=["top3_avg_eval_success_rate"])
-
-    
     
     # Process reward model paths for better display
     if "reward_model" in df_filtered.columns:
@@ -501,19 +501,43 @@ def plot_reward_model_comparisons(df, output_dir="reward_model_plots"):
             # Try to extract informative parts of the path
             path_obj = Path(path)
             
-            # Look for directories that might contain model parameters
-            # Check if parent directory contains model parameters
+            # Extract the parent directory name
             parent_dir = path_obj.parent.name
-            if any(param in parent_dir for param in ["n", "k", "seed", "dtw", "model", "seg", "hidden", "epochs"]):
-                return parent_dir
             
-            # Fall back to filename if parent directory not informative
-            return path_obj.name
+            # Extract the part after "active_" and include "_aug" if present
+            if "active_" in parent_dir:
+                parts = parent_dir.split("active_")
+                if len(parts) > 1:
+                    method = parts[1].split("_")[0]  # Get the first part after active_
+                    
+                    # Check if "_aug" is at the end
+                    if parent_dir.endswith("_aug"):
+                        method += "_aug"
+                    
+                    return method
+            
+            # If we can't extract the method, return the full parent directory
+            return parent_dir
         
         df_filtered["reward_model_name"] = df_filtered["reward_model"].apply(extract_reward_model_name)
+        
+        # Extract number of queries from reward model path
+        def extract_num_queries(path):
+            if not isinstance(path, str) or path == "none":
+                return None
+            
+            # Look for "max" followed by a number in the path
+            match = re.search(r'max(\d+)', path)
+            if match:
+                return int(match.group(1))
+            return None
+        
+        df_filtered["num_queries"] = df_filtered["reward_model"].apply(extract_num_queries)
+        print(f"Extracted num_queries from {df_filtered['num_queries'].notna().sum()} reward models")
     else:
-        # If reward_model column doesn't exist, create a dummy one
+        # If reward_model column doesn't exist, create dummy ones
         df_filtered["reward_model_name"] = "unknown"
+        df_filtered["num_queries"] = None
     
     if len(df_filtered) == 0:
         print("No runs with valid success rate metrics found. Cannot generate plots.")
@@ -534,14 +558,19 @@ def plot_reward_model_comparisons(df, output_dir="reward_model_plots"):
     datasets = df_filtered["dataset"].unique()
     algorithms = df_filtered["algorithm"].unique()
     
-    print(f"Found {len(datasets)} datasets and {len(algorithms)} algorithms to plot")
-    
+    print(f"Found {len(datasets)} datasets to plot: {', '.join(datasets)}")
+    print(f"Found {len(algorithms)} algorithms to plot: {', '.join(algorithms)}")
     # For each dataset and algorithm combination, create plots comparing reward models
     for dataset in datasets:
         for algorithm in algorithms:
             # Filter data for this dataset and algorithm
             dataset_algo_df = df_filtered[(df_filtered["dataset"] == dataset) & 
                                          (df_filtered["algorithm"] == algorithm)]
+            
+            # Handle zero_rewards_iql case - if algorithm is iql and num_queries is NaN, it's zero_rewards_iql
+            if algorithm == "iql":
+                dataset_algo_df.loc[dataset_algo_df["num_queries"].isna(), "num_queries"] = 0
+                dataset_algo_df.loc[dataset_algo_df["num_queries"] == 0, "reward_model_name"] = "zero_rewards_iql"
             
             # Plot BC as a baseline
             dataset_bc_df = df_filtered[(df_filtered["dataset"] == dataset) & 
@@ -551,135 +580,158 @@ def plot_reward_model_comparisons(df, output_dir="reward_model_plots"):
             if len(dataset_algo_df) == 0:
                 continue
             
-            # Group by reward model
-            reward_models = dataset_algo_df["reward_model_name"].unique()
+            # Get unique query counts for this dataset/algorithm combination
+            # For IQL, exclude 0 from creating its own plot but include it in other plots
+            if algorithm == "iql":
+                query_counts = [q for q in dataset_algo_df["num_queries"].unique() if q != 0]
+            else:
+                query_counts = dataset_algo_df["num_queries"].unique()
             
-            # Skip if only one or no reward model
-            if len(reward_models) <= 1:
-                print(f"Skipping {algorithm} on {dataset} - only one reward model: {reward_models}")
-                continue
+            # If no query counts found, create a single plot without query count separation
+            if len(query_counts) == 0:
+                query_counts = [None]
                 
-            print(f"Creating plots for {algorithm} on {dataset} with {len(reward_models)} reward models")
+            print(f"Found {len(query_counts)} unique query counts for {algorithm} on {dataset}")
             
-            # For each metric, create a plot
-            for metric in metrics_to_plot:
-                metric_column = metric["column"]
-                metric_title = metric["title"]
+            # For each query count, create a separate plot
+            for num_queries in query_counts:
+                # Filter by query count if it's not None
+                if num_queries is not None:
+                    if algorithm == "iql":
+                        # For IQL, include zero query runs in each plot
+                        current_df = dataset_algo_df[(dataset_algo_df["num_queries"] == num_queries) | 
+                                                    (dataset_algo_df["num_queries"] == 0)]
+                    else:
+                        current_df = dataset_algo_df[dataset_algo_df["num_queries"] == num_queries]
+                    query_label = f"Queries: {num_queries}"
+                else:
+                    current_df = dataset_algo_df
+                    query_label = "Unknown query count"
                 
-                # Skip if metric not available
-                if metric_column not in dataset_algo_df.columns:
+                # Group by reward model
+                reward_models = current_df["reward_model_name"].unique()
+                
+                # Skip if no reward model
+                if len(reward_models) < 1:
+                    print(f"Skipping {algorithm} on {dataset} with {query_label} - no reward model: {reward_models}")
                     continue
+                    
+                print(f"Creating plots for {algorithm} on {dataset} with {query_label} ({len(reward_models)} reward models)")
                 
-                # Clean up reward model names by removing dataset prefix
-                dataset_algo_df["reward_model_name_short"] = dataset_algo_df["reward_model_name"].apply(
-                    lambda x: x.replace(f"{dataset}_", "") if isinstance(x, str) and x.startswith(f"{dataset}_") else x
-                )
-                
-                # Group and analyze by reward model
-                grouped = dataset_algo_df.groupby(["reward_model_name_short"])
-                
-                # Calculate statistics for the current metric
-                stats = grouped[metric_column].agg([
-                    ("mean", np.mean),
-                    ("std", np.std),
-                    ("min", np.min),
-                    ("max", np.max),
-                    ("count", "count"),
-                    ("median", np.median)
-                ]).reset_index()
-                
-                # Add 95% confidence interval
-                stats["ci_95"] = 1.96 * stats["std"] / np.sqrt(stats["count"].clip(1))
-                
-                # Round statistics for readability
-                for col in ["mean", "std", "min", "max", "median", "ci_95"]:
-                    stats[col] = stats[col].round(3)
-                
-                # Sort by mean performance (descending)
-                stats = stats.sort_values("mean", ascending=False)
-                
-                # Set up the figure - adjust height based on number of reward models for better x-label spacing
-                fig_width = max(12, (len(reward_models) + 1) *1.5)
-                fig_height = 8  # Increased height to accommodate x-labels
-                plt.figure(figsize=(fig_width, fig_height))
-                
-                # Create bar plot with error bars
-                ax = sns.barplot(
-                    x="reward_model_name_short", 
-                    y="mean", 
-                    data=stats,
-                    palette="viridis",
-                    alpha=0.8
-                )
-                
-                # Add error bars for standard deviation
-                for i, row in enumerate(stats.itertuples()):
-                    plt.errorbar(
-                        i, row.mean, 
-                        yerr=row.std, 
-                        fmt='none', 
-                        ecolor='black', 
-                        capsize=5
+                # For each metric, create a plot
+                for metric in metrics_to_plot:
+                    metric_column = metric["column"]
+                    metric_title = metric["title"]
+                    
+                    # Skip if metric not available
+                    if metric_column not in current_df.columns:
+                        continue
+                    
+                    # Group and analyze by reward model
+                    grouped = current_df.groupby(["reward_model_name"])
+                    
+                    # Calculate statistics for the current metric
+                    stats = grouped[metric_column].agg([
+                        ("mean", np.mean),
+                        ("std", np.std),
+                        ("min", np.min),
+                        ("max", np.max),
+                        ("count", "count"),
+                        ("median", np.median)
+                    ]).reset_index()
+                    
+                    # Add 95% confidence interval
+                    stats["ci_95"] = 1.96 * stats["std"] / np.sqrt(stats["count"].clip(1))
+                    
+                    # Round statistics for readability
+                    for col in ["mean", "std", "min", "max", "median", "ci_95"]:
+                        stats[col] = stats[col].round(3)
+                    
+                    # Sort by mean performance (descending)
+                    stats = stats.sort_values("mean", ascending=False)
+                    
+                    # Set up the figure - adjust height based on number of reward models for better x-label spacing
+                    fig_width = max(12, (len(reward_models) + 1) *1.5)
+                    fig_height = 8  # Increased height to accommodate x-labels
+                    plt.figure(figsize=(fig_width, fig_height))
+                    
+                    # Create bar plot with error bars
+                    ax = sns.barplot(
+                        x="reward_model_name", 
+                        y="mean", 
+                        data=stats,
+                        palette="viridis",
+                        alpha=0.8
                     )
-                
-                # Add data labels on top of bars
-                for i, row in enumerate(stats.itertuples()):
-                    plt.text(
-                        i, row.mean + 0.02, 
-                        f"{row.mean:.3f}±{row.std:.3f}\nn={row.count}", 
-                        ha='center', 
-                        va='bottom',
-                        fontsize=12
-                    )
-                
-                # Add BC baseline if available
-                if len(dataset_bc_df) > 0 and metric_column in dataset_bc_df.columns:
-                    bc_values = dataset_bc_df[metric_column].dropna()
-                    if len(bc_values) > 0:
-                        bc_mean = bc_values.mean()
-                        bc_std = bc_values.std()
-                        bc_count = len(bc_values)
-                        
-                        # Add horizontal line for BC baseline
-                        plt.axhline(y=bc_mean, color='r', linestyle='--', alpha=0.7, 
-                                   label=f"BC: {bc_mean:.3f}±{bc_std:.3f} (n={bc_count})")
-                        
-                        # Add shaded area for BC standard deviation
-                        plt.fill_between(
-                            [-0.5, len(stats) - 0.5], 
-                            bc_mean - bc_std, 
-                            bc_mean + bc_std, 
-                            color='r', 
-                            alpha=0.1
+                    
+                    # Add error bars for standard deviation
+                    for i, row in enumerate(stats.itertuples()):
+                        plt.errorbar(
+                            i, row.mean, 
+                            yerr=row.std, 
+                            fmt='none', 
+                            ecolor='black', 
+                            capsize=5
                         )
-                        
-                        # Add legend
-                        plt.legend(loc='upper right', fontsize=12)
-                
-                # Add a title and labels
-                plt.title(f"Reward Model Comparison: {algorithm} on {dataset}", fontsize=12)
-                plt.ylabel("Success Rate")
-                plt.xlabel("Reward Model")
-                
-                # Rotate x-axis labels for better readability with long reward model names
-                plt.xticks(rotation=15, ha='right')
-                plt.subplots_adjust(bottom=0.3)
-                
-                # Add gridlines for readability
-                plt.grid(axis='y', linestyle='--', alpha=0.7)
-                
-                # Adjust the y-axis to start at 0 and have some headroom
-                max_value = stats["mean"].max() + stats["std"].max()
-                plt.ylim(0, min(1.0, max_value * 1.2))
-                
-                # Save the figure with tight layout and extra bottom padding
-                safe_dataset = str(dataset).replace("/", "_")
-                safe_algorithm = str(algorithm).replace("/", "_")
-                plt.tight_layout(pad=2.0, rect=[0, 0.15, 1, 0.95])  # Add extra padding at bottom
-                output_path = os.path.join(output_dir, f"{safe_dataset}_{safe_algorithm}_reward_model_comparison.png")
-                plt.savefig(output_path, dpi=300, bbox_inches='tight')
-                print(f"Saved reward model comparison plot to {output_path}")
-                plt.close()
+                    
+                    # Add data labels on top of bars
+                    for i, row in enumerate(stats.itertuples()):
+                        plt.text(
+                            i, row.mean + 0.02, 
+                            f"{row.mean:.3f}±{row.std:.3f}\nn={row.count}", 
+                            ha='center', 
+                            va='bottom',
+                            fontsize=12
+                        )
+                    
+                    # Add BC baseline if available
+                    if len(dataset_bc_df) > 0 and metric_column in dataset_bc_df.columns:
+                        bc_values = dataset_bc_df[metric_column].dropna()
+                        if len(bc_values) > 0:
+                            bc_mean = bc_values.mean()
+                            bc_std = bc_values.std()
+                            bc_count = len(bc_values)
+                            
+                            # Add horizontal line for BC baseline
+                            plt.axhline(y=bc_mean, color='r', linestyle='--', alpha=0.7, 
+                                       label=f"BC: {bc_mean:.3f}±{bc_std:.3f} (n={bc_count})")
+                            
+                            # Add shaded area for BC standard deviation
+                            plt.fill_between(
+                                [-0.5, len(stats) - 0.5], 
+                                bc_mean - bc_std, 
+                                bc_mean + bc_std, 
+                                color='r', 
+                                alpha=0.1
+                            )
+                            
+                            # Add legend
+                            plt.legend(loc='upper right', fontsize=12)
+                    
+                    # Add a title and labels
+                    plt.title(f"Reward Model Comparison: {algorithm} on {dataset}\nQueries: {int(num_queries) if num_queries is not None else 'Unknown'}", fontsize=12)
+                    plt.ylabel("Success Rate")
+                    plt.xlabel("Reward Model")
+                    
+                    # Rotate x-axis labels for better readability with long reward model names
+                    plt.xticks(rotation=15, ha='right')
+                    plt.subplots_adjust(bottom=0.3)
+                    
+                    # Add gridlines for readability
+                    plt.grid(axis='y', linestyle='--', alpha=0.7)
+                    
+                    # Adjust the y-axis to start at 0 and have some headroom
+                    max_value = stats["mean"].max() + stats["std"].max()
+                    plt.ylim(0, min(1.0, max_value * 1.2))
+                    
+                    # Save the figure with tight layout and extra bottom padding
+                    safe_dataset = str(dataset).replace("/", "_")
+                    safe_algorithm = str(algorithm).replace("/", "_")
+                    plt.tight_layout(pad=2.0, rect=[0, 0.15, 1, 0.95])  # Add extra padding at bottom
+                    output_path = os.path.join(output_dir, f"{safe_dataset}_{safe_algorithm}_queries{int(num_queries) if num_queries is not None else 'Unknown'}_reward_model_comparison.png")
+                    plt.savefig(output_path, dpi=300, bbox_inches='tight')
+                    print(f"Saved reward model comparison plot to {output_path}")
+                    plt.close()
     
     # Also create a summary CSV with reward model performance
     create_reward_model_summary_csv(df_filtered, output_dir)

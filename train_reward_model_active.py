@@ -162,16 +162,6 @@ def train_final_reward_model(labeled_pairs, segment_indices, labeled_preferences
     # Get model directory name from config
     model_dir_name = cfg.output.model_dir_name
     
-    # Add active learning and fine-tuning information 
-    uncertainty_method = cfg.active_learning.uncertainty_method
-    fine_tune_str = "_finetune" if cfg.active_learning.fine_tune else "_scratch"
-    
-    # Add augmentation tag if enabled
-    aug_str = "_aug" if cfg.dtw_augmentation.enabled else ""
-    
-    # Add these details to the model_dir_name
-    model_dir_name += f"_active_{uncertainty_method}{fine_tune_str}{aug_str}"
-    
     # Create the model directory
     model_dir = os.path.join(cfg.output.output_dir, model_dir_name)
     os.makedirs(model_dir, exist_ok=True)
@@ -740,16 +730,6 @@ def active_preference_learning(cfg):
     
     # Get model directory name from config
     model_dir_name = cfg.output.model_dir_name
-    
-    # Add active learning and fine-tuning information 
-    uncertainty_method = cfg.active_learning.uncertainty_method
-    fine_tune_str = "_finetune" if cfg.active_learning.fine_tune else "_scratch"
-    
-    # Add augmentation tag if enabled
-    aug_str = "_aug" if cfg.dtw_augmentation.enabled else ""
-    
-    # Add these details to the model_dir_name
-    model_dir_name += f"_active_{uncertainty_method}{fine_tune_str}{aug_str}"
     
     # Create the model directory
     model_dir = os.path.join(cfg.output.output_dir, model_dir_name)

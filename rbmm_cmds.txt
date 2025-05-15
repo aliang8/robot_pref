@@ -29,3 +29,9 @@ python train_reward_model_active.py \
     active_learning.uncertainty_method=random \
     data.segment_length=64 \
     dtw_augmentation.enabled=true
+
+
+# bc
+python train_policy.py --config-name=bc_robomimic \
+    data.data_path=/scr2/shared/pref/datasets/robomimic/can/mg_image_dense.pt \
+    data.env_name=can
