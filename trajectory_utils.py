@@ -117,149 +117,6 @@ def compute_dinov2_embeddings(images, batch_size=32, cache_file=None):
     return all_embeddings
 
 
-def create_segments(data, segment_length=20, max_segments=None):
-    """Create segments from data for reward model training.
-
-    Args:
-        data: TensorDict with observations/actions/rewards/episodes
-        segment_length: Length of segments (H)
-        max_segments: Maximum number of segments to return (None for all)
-
-    Returns:
-        segments: List of segment embeddings
-        segment_indices: List of (start_idx, end_idx) for each segment
-    """
-    # Extract necessary data
-    episode_ids = data["episode"]
-    observations = data["obs"] if "obs" in data else data["state"]
-
-    print(
-        f"Creating segments with window size H={segment_length} from observations of shape {observations.shape}"
-    )
-    segments = []
-    segment_indices = []  # Store start and end indices of each segment
-
-    # Ensure episode_ids is on CPU for indexing operations
-    episode_ids_cpu = episode_ids.cpu()
-
-    # Create mask for NaN values
-    obs_valid = ~torch.isnan(observations).any(dim=1)
-    
-    # Get unique episodes
-    unique_episodes = torch.unique(episode_ids_cpu).tolist()
-    print(f"Found {len(unique_episodes)} unique episodes")
-    
-    # Collect all valid episode data for sampling
-    all_valid_blocks = []
-    
-    print("Finding valid blocks in all episodes...")
-    with tqdm(total=len(unique_episodes), desc="Processing episodes") as pbar:
-        for episode_id in unique_episodes:
-            # Get indices for this episode
-            ep_indices = torch.where(episode_ids_cpu == episode_id)[0]
-
-            # Apply valid mask to this episode
-            ep_valid = obs_valid[ep_indices]
-
-            # Skip if no valid observations
-            if not ep_valid.any():
-                pbar.update(1)
-                continue
-
-            # Get valid indices
-            valid_indices = ep_indices[ep_valid]
-            
-            # Check if we have enough consecutive indices
-            if len(valid_indices) < segment_length:
-                pbar.update(1)
-                continue
-
-            # Find consecutive blocks using diff
-            diffs = torch.diff(valid_indices)
-            breaks = torch.where(diffs > 1)[0].tolist() + [len(valid_indices) - 1]
-            
-            # Process each block
-            start_idx = 0
-            for b in breaks:
-                # Check if block is long enough
-                if b - start_idx + 1 >= segment_length:
-                    # Store this valid block
-                    all_valid_blocks.append({
-                        'episode_id': episode_id,
-                        'start_block': start_idx,
-                        'end_block': b,
-                        'valid_indices': valid_indices,
-                        'length': b - start_idx + 1
-                    })
-                start_idx = b + 1
-            
-            pbar.update(1)
-    
-    print(f"Found {len(all_valid_blocks)} valid blocks across all episodes")
-    
-    # Simple loop: sample blocks until we have enough segments
-    total_attempts = 0
-    max_attempts = 10000  # Safety limit
-    
-    # If no max_segments specified, set a reasonable default based on number of blocks
-    if max_segments is None:
-        max_segments = min(5000, len(all_valid_blocks) * 2)
-        print(f"No max_segments specified, setting to {max_segments}")
-    
-    # Shuffle blocks once at the beginning for variety
-    random.shuffle(all_valid_blocks)
-    
-    with tqdm(total=max_segments, desc="Sampling segments") as pbar:
-        block_idx = 0
-        while len(segments) < max_segments and total_attempts < max_attempts:
-            total_attempts += 1
-            
-            # Get current block and move to next (circle back when reaching the end)
-            block = all_valid_blocks[block_idx]
-            block_idx = (block_idx + 1) % len(all_valid_blocks)
-            
-            valid_indices = block['valid_indices']
-            start_block = block['start_block'] 
-            end_block = block['end_block']
-            
-            # Calculate how many possible segments can be created from this block
-            possible_segments = block['length'] - segment_length + 1
-            if possible_segments <= 0:
-                continue
-                
-            # Choose a position within this block (sequentially if multiple samples from same block)
-            # Use the total_attempts to ensure we pick different positions for the same block
-            segment_offset = total_attempts % possible_segments
-            start_idx = start_block + segment_offset
-            end_idx = start_idx + segment_length - 1
-            
-            # Get start and end indices in the original data
-            start = valid_indices[start_idx].item()
-            end = valid_indices[end_idx].item()
-                        
-            # Get observations for this segment
-            segment_obs = observations[start:end+1]
-            
-            # Double check for NaN values
-            if torch.isnan(segment_obs).any():
-                continue
-                
-            segments.append(segment_obs)
-            segment_indices.append((start, end))
-            pbar.update(1)
-            
-            # Exit early if we're taking too many attempts with little progress
-            if total_attempts >= 10 * max_segments and len(segments) < max_segments / 10:
-                print(f"Warning: Made {total_attempts} attempts but only found {len(segments)} valid segments. Stopping early.")
-                break
-    
-    print(f"Created {len(segments)} segments with {total_attempts} sampling attempts")
-    if segments:
-        print(f"Each segment has shape: {segments[0].shape}")
-
-    return segments, segment_indices
-
-
 def sample_segment_pairs(segments, segment_indices, rewards, n_pairs=5000):
     """Generate synthetic preference pairs based on cumulative rewards.
 
@@ -340,14 +197,15 @@ def compute_dtw_distance(query_segment, reference_segment):
 
     return cost
 
+
 def compute_dtw_distance_matrix(segments, max_segments=None, random_seed=42):
     """Compute DTW distance matrix between segments using the custom DTW implementation.
-    
+
     Args:
         segments: List of segments to compute distances between
         max_segments: Maximum number of segments to use (will sample if needed)
         random_seed: Random seed for reproducible sampling
-        
+
     Returns:
         distance_matrix: Matrix of DTW distances
         idx_mapping: Mapping from matrix indices to original segment indices
@@ -356,17 +214,19 @@ def compute_dtw_distance_matrix(segments, max_segments=None, random_seed=42):
 
     # If max_segments is specified and less than n_segments, sample a subset
     if max_segments is not None and max_segments < n_segments:
-        print(f"Sampling {max_segments} segments out of {n_segments} for DTW calculation (random seed: {random_seed})")
+        print(
+            f"Sampling {max_segments} segments out of {n_segments} for DTW calculation (random seed: {random_seed})"
+        )
         # Set seed for reproducible sampling
         rng_state = random.getstate()
         random.seed(random_seed)
-        
+
         # Sample indices
         segment_indices = random.sample(range(n_segments), max_segments)
-        
+
         # Restore random state
         random.setstate(rng_state)
-        
+
         selected_segments = [segments[i] for i in segment_indices]
         # Create a mapping from new indices to original indices
         idx_mapping = {i: segment_indices[i] for i in range(max_segments)}
@@ -569,70 +429,132 @@ def load_preprocessed_segments(file_path):
         print(f"Number of segment indices: {len(data['segment_indices'])}")
     if "timestamp" in data:
         print(f"Data timestamp: {data['timestamp']}")
-    
+
     return data
+
 
 def compute_eef_position_ranges(data_paths):
     """Compute the global min and max ranges for EEF positions across all datasets.
-    
+
     Args:
         data_paths: List of paths to dataset files
-        
+
     Returns:
         tuple: (x_min, x_max, y_min, y_max, z_min, z_max) for consistent visualization
     """
     all_mins = []
     all_maxs = []
-    
+
     print("Computing global EEF position ranges for consistent visualization...")
-    
+
     for data_path in data_paths:
         print(f"Processing dataset: {data_path}")
         # Load data
         data = load_tensordict(data_path)
-        
+
         # Extract EEF positions
         observations = data["obs"] if "obs" in data else data["state"]
         observations_cpu = observations.cpu()
         eef_positions = observations_cpu[:, :3].numpy()
-        
+
         # Remove NaN values
         eef_positions = eef_positions[~np.isnan(eef_positions).any(axis=1)]
-        
+
         if len(eef_positions) == 0:
             print(f"Warning: No valid EEF positions found in {data_path}")
             continue
-            
+
         # Compute min and max
         min_vals = np.min(eef_positions, axis=0)
         max_vals = np.max(eef_positions, axis=0)
-        
+
         all_mins.append(min_vals)
         all_maxs.append(max_vals)
-    
+
     if not all_mins:
         print("Warning: No valid ranges found across any datasets")
         return None
-    
+
     # Get global min and max across all datasets
     global_min = np.min(all_mins, axis=0)
     global_max = np.max(all_maxs, axis=0)
-    
+
     # Add padding for better visualization
     padding = 0.1
     range_vals = global_max - global_min
-    
+
     # Add padding
     global_min -= padding * range_vals
     global_max += padding * range_vals
-    
+
     # Extract components
     x_min, y_min, z_min = global_min
     x_max, y_max, z_max = global_max
-    
+
     print("Global EEF position ranges across all datasets:")
     print(f"  X range: [{x_min:.4f}, {x_max:.4f}]")
     print(f"  Y range: [{y_min:.4f}, {y_max:.4f}]")
     print(f"  Z range: [{z_min:.4f}, {z_max:.4f}]")
-    
-    return x_min, x_max, y_min, y_max, z_min, z_max 
+
+    return x_min, x_max, y_min, y_max, z_min, z_max
+
+
+def process_data_trajectories(data_path):
+    """
+    Load and process data into trajectories based on "episode" key from a data file.
+
+    Args:
+        data_path (str): Path to the data file.
+
+    Returns:
+        trajectories: List of processed trajectories.
+    """
+    data = load_tensordict(data_path)
+
+    # Group data by episode
+    unique_episodes = data["episode"].unique()
+
+    trajectories = []
+    # Process each unique episode
+    for episode_num in unique_episodes:
+        episode_mask = data["episode"] == episode_num
+
+        trajectory = {}
+        for key in data.keys():
+            trajectory[key] = data[key][episode_mask]
+
+        trajectories.append(trajectory)
+
+    print(f"Loaded {len(trajectories)} trajectories")
+
+    return trajectories
+
+
+def segment_trajectory(trajectory, segment_length, segments_per_trajectory=3):
+    """
+    Segment a trajectory into segments_per_trajectory parts of equal length.
+
+    Args:
+        trajectory (Tensor): The trajectory data.
+        segment_length (int): The length of each segment.
+        segments_per_trajectory (int): Number of segments to extract per trajectory.
+
+    Returns:
+        list: List of segments with length segment_length.
+    """
+    total_length = len(trajectory["obs"])
+
+    segments = []
+    for i in range(segments_per_trajectory):
+        # Calculate evenly spaced starting points across the trajectory
+        start_idx = (
+            i * (total_length - segment_length) // max(1, segments_per_trajectory - 1)
+        )
+        end_idx = start_idx + segment_length
+
+        segment = {}
+        for key in trajectory.keys():
+            segment[key] = trajectory[key][start_idx:end_idx]
+        segments.append(segment)
+
+    return segments

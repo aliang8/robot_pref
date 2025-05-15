@@ -11,6 +11,7 @@ import metaworld
 import d3rlpy
 from d3rlpy.algos import IQL, BC
 from d3rlpy.datasets import MDPDataset
+
 # from d3rlpy.metrics.scorer import evaluate_on_environment
 from d3rlpy.models.encoders import VectorEncoderFactory
 from pathlib import Path
@@ -25,6 +26,7 @@ from sklearn.preprocessing import StandardScaler
 # Import d3rlpy components
 from d3rlpy.dataset import MDPDataset
 from d3rlpy.algos import IQL, DiscreteBC, BC, BCConfig, IQLConfig
+
 # from d3rlpy.metrics.scorer import evaluate_on_environment
 from d3rlpy.models.encoders import VectorEncoderFactory
 
@@ -40,16 +42,10 @@ from utils.seed_utils import set_seed
 from models import RewardModel
 
 # Import evaluation and rendering utilities
-from utils.eval_utils import (
-    evaluate_policy_manual,
-    custom_evaluate_on_environment
-)
+from utils.eval_utils import evaluate_policy_manual, custom_evaluate_on_environment
 
 # Import environment utilities
-from utils.env_utils import (
-    get_metaworld_env,
-    MetaWorldEnvCreator
-)
+from utils.env_utils import get_metaworld_env, MetaWorldEnvCreator
 
 # Import visualization utilities
 from utils.viz import create_video_grid
@@ -68,34 +64,36 @@ torch.manual_seed(RANDOM_SEED)
 np.random.seed(RANDOM_SEED)
 random.seed(RANDOM_SEED)
 
+
 def is_valid_video_file(file_path):
     """Simple check if a video file exists and is valid."""
     return os.path.exists(file_path) and os.path.getsize(file_path) > 0
 
+
 def get_d3rlpy_experiment_path(base_logdir, experiment_name, with_timestamp=True):
     """Find the experiment directory in d3rlpy's logs.
-    
+
     Args:
         base_logdir: Base directory for d3rlpy logs
         experiment_name: Name of the experiment
         with_timestamp: Whether the experiment directories include timestamps
-        
+
     Returns:
         Path: Path to the experiment directory, or None if not found
     """
     base_path = Path(base_logdir)
     if not base_path.exists():
         return None
-    
+
     # Try to find the experiment directory
     experiment_dirs = []
-    
+
     if with_timestamp:
         # Match with timestamp format: {experiment_name}_{timestamp}
         for item in base_path.glob(f"{experiment_name}_*"):
             if item.is_dir():
                 experiment_dirs.append(item)
-        
+
         # If multiple matches, take the most recent one
         if experiment_dirs:
             # Sort by timestamp in directory name (assuming format is name_YYYYMMDD_HHMMSS)
@@ -106,13 +104,24 @@ def get_d3rlpy_experiment_path(base_logdir, experiment_name, with_timestamp=True
         experiment_dir = base_path / experiment_name
         if experiment_dir.exists() and experiment_dir.is_dir():
             return experiment_dir
-    
+
     return None
 
-def load_dataset(data, reward_model=None, device=None, use_ground_truth=False, max_segments=None, reward_batch_size=32, 
-               scale_rewards=False, reward_min=None, reward_max=None, use_zero_rewards=False):
+
+def load_dataset(
+    data,
+    reward_model=None,
+    device=None,
+    use_ground_truth=False,
+    max_segments=None,
+    reward_batch_size=32,
+    scale_rewards=False,
+    reward_min=None,
+    reward_max=None,
+    use_zero_rewards=False,
+):
     """Load and process dataset for either IQL or BC training.
-    
+
     Args:
         data: TensorDict with observations, actions, rewards, and episode IDs
         reward_model: Trained reward model (required for IQL, None for BC)
@@ -124,7 +133,7 @@ def load_dataset(data, reward_model=None, device=None, use_ground_truth=False, m
         reward_min: Minimum value for scaled rewards (default: -1)
         reward_max: Maximum value for scaled rewards (default: 1)
         use_zero_rewards: If True, replace all rewards with zeros (sanity check)
-        
+
     Returns:
         d3rlpy MDPDataset with observations, actions, rewards, and terminals
     """
@@ -133,64 +142,74 @@ def load_dataset(data, reward_model=None, device=None, use_ground_truth=False, m
         reward_min = reward_min if reward_min is not None else -1.0
         reward_max = reward_max if reward_max is not None else 1.0
         print(f"Scaling rewards to range [{reward_min}, {reward_max}]")
-    
+
     # Extract necessary data
     observations = data["obs"] if "obs" in data else data["state"]
     actions = data["action"]
     episode_ids = data["episode"]
-    
+
     # For BC or ground truth rewards, extract original rewards
     if reward_model is None or use_ground_truth:
         if "reward" not in data:
-            raise ValueError("Ground truth rewards requested but 'reward' not found in data.")
+            raise ValueError(
+                "Ground truth rewards requested but 'reward' not found in data."
+            )
         rewards = data["reward"].cpu()
         if use_ground_truth:
-            print("Using ground truth rewards from data instead of reward model predictions.")
-    
+            print(
+                "Using ground truth rewards from data instead of reward model predictions."
+            )
+
     # Make sure data is on CPU for preprocessing
     observations = observations.cpu()
     actions = actions.cpu()
     episode_ids = episode_ids.cpu()
-    
+
     # Filter out observations with NaN values
-    valid_mask = ~torch.isnan(observations).any(dim=1) & ~torch.isnan(actions).any(dim=1)
+    valid_mask = ~torch.isnan(observations).any(dim=1) & ~torch.isnan(actions).any(
+        dim=1
+    )
     if reward_model is None or use_ground_truth:
         valid_mask = valid_mask & ~torch.isnan(rewards)
-    
+
     if not valid_mask.any():
         raise ValueError("No valid observations found in the dataset.")
-    
+
     # Extract valid data
     valid_obs = observations[valid_mask]
     valid_actions = actions[valid_mask]
     valid_episodes = episode_ids[valid_mask]
-    
+
     if reward_model is None or use_ground_truth:
         valid_rewards = rewards[valid_mask].numpy()
-    
-    print(f"Using {valid_obs.shape[0]} valid observations out of {observations.shape[0]} total")
-    
+
+    print(
+        f"Using {valid_obs.shape[0]} valid observations out of {observations.shape[0]} total"
+    )
+
     # Process rewards based on algorithm and options
     if reward_model is not None and not use_ground_truth:
         # IQL with reward model - Process in manageable batches
         process_batch_size = reward_batch_size or 1024
         all_rewards = []
-        
+
         # Compute rewards using the trained reward model
         reward_model.eval()  # Ensure model is in evaluation mode
-        
+
         with torch.no_grad():
-            for start_idx in tqdm(range(0, len(valid_obs), process_batch_size), desc="Computing rewards"):
+            for start_idx in tqdm(
+                range(0, len(valid_obs), process_batch_size), desc="Computing rewards"
+            ):
                 end_idx = min(start_idx + process_batch_size, len(valid_obs))
-                
+
                 # Move batch to device
                 batch_obs = valid_obs[start_idx:end_idx].to(device)
                 batch_actions = valid_actions[start_idx:end_idx].to(device)
-                
+
                 # Compute rewards, need the per step reward not the summed reward
-                batch_rewards = reward_model(batch_obs, batch_actions).cpu().numpy()        
+                batch_rewards = reward_model(batch_obs, batch_actions).cpu().numpy()
                 all_rewards.append(batch_rewards)
-        
+
         # Combine all rewards
         if len(all_rewards) == 1:
             rewards_np = all_rewards[0]
@@ -199,82 +218,100 @@ def load_dataset(data, reward_model=None, device=None, use_ground_truth=False, m
     else:
         # BC or IQL with ground truth - use the extracted rewards
         rewards_np = valid_rewards
-    
+
     # Apply zero rewards if requested (sanity check)
     if use_zero_rewards:
         print("\n" + "=" * 60)
         print("⚠️ SANITY CHECK MODE: USING ZERO REWARDS FOR ALL TRANSITIONS ⚠️")
-        print("This mode replaces all rewards with zeros to test if policy learning depends on rewards.")
+        print(
+            "This mode replaces all rewards with zeros to test if policy learning depends on rewards."
+        )
         print("=" * 60 + "\n")
         original_rewards = rewards_np.copy()
         rewards_np = np.zeros_like(rewards_np)
-        print(f"Reward stats before zeroing - Mean: {np.mean(original_rewards):.4f}, Min: {np.min(original_rewards):.4f}, Max: {np.max(original_rewards):.4f}")
-        print(f"Reward stats after zeroing - Mean: {np.mean(rewards_np):.4f}, Min: {np.min(rewards_np):.4f}, Max: {np.max(rewards_np):.4f}")
-    
+        print(
+            f"Reward stats before zeroing - Mean: {np.mean(original_rewards):.4f}, Min: {np.min(original_rewards):.4f}, Max: {np.max(original_rewards):.4f}"
+        )
+        print(
+            f"Reward stats after zeroing - Mean: {np.mean(rewards_np):.4f}, Min: {np.min(rewards_np):.4f}, Max: {np.max(rewards_np):.4f}"
+        )
+
     # Scale rewards if requested
     if scale_rewards:
         original_min = np.min(rewards_np)
         original_max = np.max(rewards_np)
-        
+
         # Avoid division by zero
         if original_max - original_min > 1e-8:
             # Scale to [0, 1] first, then to target range
             rewards_np = (rewards_np - original_min) / (original_max - original_min)
             rewards_np = rewards_np * (reward_max - reward_min) + reward_min
-            print(f"Scaled rewards from [{original_min:.4f}, {original_max:.4f}] to [{reward_min:.4f}, {reward_max:.4f}]")
+            print(
+                f"Scaled rewards from [{original_min:.4f}, {original_max:.4f}] to [{reward_min:.4f}, {reward_max:.4f}]"
+            )
         else:
             # If all rewards are the same, set to the middle of the target range
             middle_value = (reward_max + reward_min) / 2
             rewards_np = np.ones_like(rewards_np) * middle_value
-            print(f"All rewards have the same value ({original_min:.4f}), setting to {middle_value:.4f}")
-    
+            print(
+                f"All rewards have the same value ({original_min:.4f}), setting to {middle_value:.4f}"
+            )
+
     # Create terminals array (True at the end of each episode)
-    episode_ends = torch.cat([
-        valid_episodes[1:] != valid_episodes[:-1],
-        torch.tensor([True])  # Last observation is always an episode end
-    ])
+    episode_ends = torch.cat(
+        [
+            valid_episodes[1:] != valid_episodes[:-1],
+            torch.tensor([True]),  # Last observation is always an episode end
+        ]
+    )
     terminals_np = episode_ends.numpy()
-    
+
     # Convert to numpy for d3rlpy
     observations_np = valid_obs.numpy()
     actions_np = valid_actions.numpy()
-    
+
     # Create MDPDataset with the rewards
     dataset = MDPDataset(
         observations=observations_np,
         actions=actions_np,
         rewards=rewards_np,
-        terminals=terminals_np
+        terminals=terminals_np,
     )
-    
+
     # Print final dataset statistics
-    print(f"Final dataset size: {dataset.size()} transitions with {dataset.size() - np.sum(terminals_np)} non-terminal transitions")
+    print(
+        f"Final dataset size: {dataset.size()} transitions with {dataset.size() - np.sum(terminals_np)} non-terminal transitions"
+    )
     reward_stats = {
-        'mean': np.mean(rewards_np),
-        'std': np.std(rewards_np),
-        'min': np.min(rewards_np),
-        'max': np.max(rewards_np)
+        "mean": np.mean(rewards_np),
+        "std": np.std(rewards_np),
+        "min": np.min(rewards_np),
+        "max": np.max(rewards_np),
     }
-    print(f"Reward statistics: mean={reward_stats['mean']:.4f}, std={reward_stats['std']:.4f}, min={reward_stats['min']:.4f}, max={reward_stats['max']:.4f}")
-    
+    print(
+        f"Reward statistics: mean={reward_stats['mean']:.4f}, std={reward_stats['std']:.4f}, min={reward_stats['min']:.4f}, max={reward_stats['max']:.4f}"
+    )
+
     return dataset
+
 
 # Add a helper function to print model architecture information
 def print_model_architecture(algo):
     """Print the architecture details of a d3rlpy algorithm.
-    
+
     Args:
         algo: A d3rlpy algorithm instance (IQL, BC, etc.)
     """
     print("\nModel Architecture Details:")
     print("=" * 50)
 
+
 @hydra.main(config_path="config", config_name="iql")
 def main(cfg: DictConfig):
     """Train a policy using specified algorithm with Hydra config."""
     # Register custom resolvers for path operations
     OmegaConf.register_resolver("basename", lambda path: Path(path).stem)
-    
+
     # Convert OmegaConf config to AttrDict for easier access and serialization
     cfg_dict = OmegaConf.to_container(cfg, resolve=True)
     cfg = AttrDict.from_nested_dict(cfg_dict)
@@ -282,140 +319,145 @@ def main(cfg: DictConfig):
     if cfg.debug:
         cfg.training.n_epochs = 10
         cfg.training.n_steps_per_epoch = 100
-    
+
     # Get algorithm name
     algorithm_name = cfg.algorithm
-    
+
     # Get the dataset name and update templates
     dataset_name = Path(cfg.data.data_path).stem
-    
+
     # Replace dataset name placeholder in template strings
     if hasattr(cfg.output, "model_dir_name"):
-        cfg.output.model_dir_name = cfg.output.model_dir_name.replace("DATASET_NAME", dataset_name)
-    
+        cfg.output.model_dir_name = cfg.output.model_dir_name.replace(
+            "DATASET_NAME", dataset_name
+        )
+
     if hasattr(cfg.output, "artifact_name"):
-        cfg.output.artifact_name = cfg.output.artifact_name.replace("DATASET_NAME", dataset_name)
-    
+        cfg.output.artifact_name = cfg.output.artifact_name.replace(
+            "DATASET_NAME", dataset_name
+        )
+
     print("\n" + "=" * 50)
     print(f"Training {algorithm_name.upper()} policy")
     print("=" * 50)
-    
+
     # Print config for visibility (using original OmegaConf for pretty printing)
     print("\nConfiguration:")
     print(OmegaConf.to_yaml(OmegaConf.create(cfg_dict)))
-    
+
     # Set random seed for reproducibility
-    random_seed = cfg.get('random_seed', 42)
+    random_seed = cfg.get("random_seed", 42)
     set_seed(random_seed)
     print(f"Global random seed set to {random_seed}")
-    
+
     # Initialize wandb
     if cfg.wandb.use_wandb:
         # Set up a run name if not specified
         run_name = cfg.wandb.name
         if run_name is None:
             run_name = f"{algorithm_name.upper()}_{dataset_name}_{time.strftime('%Y%m%d_%H%M%S')}"
-        
+
         # Initialize wandb
         wandb.init(
             project=cfg.wandb.project,
             entity=cfg.wandb.entity,
             name=run_name,
             config=cfg_dict,  # Use plain dict for wandb config
-            tags=cfg.wandb.tags if hasattr(cfg.wandb, 'tags') else [algorithm_name],
-            notes=cfg.wandb.notes
+            tags=cfg.wandb.tags if hasattr(cfg.wandb, "tags") else [algorithm_name],
+            notes=cfg.wandb.notes,
         )
-        
-        
+
         print(f"Wandb initialized: {wandb.run.name}")
-    
+
     # Create output directory
     os.makedirs(cfg.output.output_dir, exist_ok=True)
-    
+
     # Setup device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
-    
+
     # Get experiment name based on data path
     experiment_name = f"{algorithm_name.upper()}_{dataset_name}"
-    
+
     # Set up d3rlpy log directory
     d3rlpy_logdir = f"{cfg.output.output_dir}/logs"
-    
+
     # Load data
     print(f"Loading data from {cfg.data.data_path}")
     data = load_tensordict(cfg.data.data_path)
-    
+
     # Get observation and action dimensions
     observations = data["obs"] if "obs" in data else data["state"]
     state_dim = observations.shape[1]
     action_dim = data["action"].shape[1]
     print(f"Observation dimension: {state_dim}, Action dimension: {action_dim}")
-    
+
     # Create MDP dataset based on the algorithm
     if algorithm_name.lower() == "iql":
         # For IQL, we need a reward model
         # Load reward model
         if not cfg.data.use_zero_rewards:
-            reward_model = RewardModel(state_dim, action_dim, hidden_dims=cfg.model.hidden_dims)
+            reward_model = RewardModel(
+                state_dim, action_dim, hidden_dims=cfg.model.hidden_dims
+            )
             reward_model.load_state_dict(torch.load(cfg.data.reward_model_path))
             reward_model = reward_model.to(device)
             reward_model.eval()
             print(f"Loaded reward model from {cfg.data.reward_model_path}")
-        
+
         else:
             reward_model = None
 
         # Check if we should use ground truth rewards
-        use_ground_truth = cfg.data.get('use_ground_truth', False)
+        use_ground_truth = cfg.data.get("use_ground_truth", False)
         if use_ground_truth:
             print("Using ground truth rewards instead of reward model predictions.")
-        
+
         # Get reward scaling options
-        scale_rewards = cfg.data.get('scale_rewards', False)
-        reward_min = cfg.data.get('reward_min', -1.0)
-        reward_max = cfg.data.get('reward_max', 1.0)
+        scale_rewards = cfg.data.get("scale_rewards", False)
+        reward_min = cfg.data.get("reward_min", -1.0)
+        reward_max = cfg.data.get("reward_max", 1.0)
         if scale_rewards:
             print(f"Will scale rewards to range [{reward_min}, {reward_max}]")
-        
+
         # Create MDP dataset
         print("Creating MDP dataset with rewards...")
         dataset = load_dataset(
-            data, 
-            reward_model=reward_model, 
-            device=device, 
+            data,
+            reward_model=reward_model,
+            device=device,
             use_ground_truth=use_ground_truth,
             max_segments=cfg.data.max_segments,
             reward_batch_size=cfg.data.reward_batch_size,
             scale_rewards=scale_rewards,
             reward_min=reward_min,
             reward_max=reward_max,
-            use_zero_rewards=cfg.data.get('use_zero_rewards', False)
+            use_zero_rewards=cfg.data.get("use_zero_rewards", False),
         )
     else:  # BC or other algorithms that don't need a reward model
         # For BC, we can directly use the demonstrations
         print("Creating MDP dataset from demonstrations...")
-        
+
         # Get reward scaling options (also apply to BC for consistency)
-        scale_rewards = cfg.data.get('scale_rewards', False)
-        reward_min = cfg.data.get('reward_min', -1.0)
-        reward_max = cfg.data.get('reward_max', 1.0)
+        scale_rewards = cfg.data.get("scale_rewards", False)
+        reward_min = cfg.data.get("reward_min", -1.0)
+        reward_max = cfg.data.get("reward_max", 1.0)
         if scale_rewards:
             print(f"Will scale rewards to range [{reward_min}, {reward_max}]")
-            
+
         dataset = load_dataset(
             data,
             scale_rewards=scale_rewards,
             reward_min=reward_min,
             reward_max=reward_max,
-            use_zero_rewards=cfg.data.get('use_zero_rewards', False)
+            use_zero_rewards=cfg.data.get("use_zero_rewards", False),
         )
-    
+
     # Create environment for evaluation
     env = None
     if not cfg.evaluation.skip_env_creation:
         # Use the environment name specified in the config
-        if hasattr(cfg.data, 'env_name') and cfg.data.env_name:
+        if hasattr(cfg.data, "env_name") and cfg.data.env_name:
             env_name = cfg.data.env_name
             print(f"Creating environment: {env_name}")
         else:
@@ -428,15 +470,19 @@ def main(cfg: DictConfig):
         elif "robomimic" in cfg.data.data_path:
             env_creator = RobomimicEnvCreator(env_name)
         else:
-            raise ValueError(f"No environment creator found for dataset: {cfg.data.data_path}")
-        
+            raise ValueError(
+                f"No environment creator found for dataset: {cfg.data.data_path}"
+            )
+
         # Create one environment to verify it works
         try:
             test_env = env_creator()
-            
+
             # Print environment information
-            print(f"Successfully created environment with observation space: {test_env.observation_space.shape}, action space: {test_env.action_space.shape}")
-            
+            print(
+                f"Successfully created environment with observation space: {test_env.observation_space.shape}, action space: {test_env.action_space.shape}"
+            )
+
             # Use the environment creator for evaluation
             env = env_creator
         except Exception as e:
@@ -446,7 +492,7 @@ def main(cfg: DictConfig):
 
     # Initialize algorithm based on the algorithm_name
     print(f"Initializing {algorithm_name.upper()} algorithm...")
-    
+
     if algorithm_name.lower() == "iql":
         # Initialize IQL algorithm
         # algo = IQL(
@@ -463,7 +509,7 @@ def main(cfg: DictConfig):
         # )
         iql_config = IQLConfig(**cfg.iql)
         algo = iql_config.create()
-        
+
     elif algorithm_name.lower() == "bc":
         # Initialize BC algorithm
         # TODO: This doesn't work because of version mismatch I think (using d3rlpy 2.8.1)
@@ -475,71 +521,72 @@ def main(cfg: DictConfig):
         # )
         bc_config = BCConfig(**cfg.bc)
         algo = bc_config.create()
-        
+
         # For BC with weight decay
-        if hasattr(cfg.model, 'use_weight_decay') and cfg.model.use_weight_decay:
-            if hasattr(algo, 'create_impl'):
+        if hasattr(cfg.model, "use_weight_decay") and cfg.model.use_weight_decay:
+            if hasattr(algo, "create_impl"):
                 impl = algo.create_impl(
-                    state_dim, 
-                    action_dim, 
-                    algo._encoder_factory, 
-                    algo._optim_factory
+                    state_dim, action_dim, algo._encoder_factory, algo._optim_factory
                 )
                 # Set weight decay if it's used
-                if hasattr(impl.optim, 'param_groups'):
+                if hasattr(impl.optim, "param_groups"):
                     for param_group in impl.optim.param_groups:
-                        param_group['weight_decay'] = cfg.model.weight_decay
-                        
+                        param_group["weight_decay"] = cfg.model.weight_decay
+
             # Fallback for older d3rlpy versions
-            if hasattr(algo, '_impl') and hasattr(algo._impl, 'optim'):
+            if hasattr(algo, "_impl") and hasattr(algo._impl, "optim"):
                 for param_group in algo._impl.optim.param_groups:
-                    param_group['weight_decay'] = cfg.model.weight_decay
-        
+                    param_group["weight_decay"] = cfg.model.weight_decay
+
     else:
         raise ValueError(f"Unsupported algorithm: {algorithm_name}")
-    
+
     # Print model architecture details
     print_model_architecture(algo)
-    
+
     # Get number of training epochs
     n_epochs = cfg.training.n_epochs
-    
+
     print(f"Training for {n_epochs} epochs")
-    
+
     # Initialize wandb callback
     wandb_callback = WandbCallback(use_wandb=cfg.wandb.use_wandb)
-    
+
     # For tracking evaluation metrics
     evaluation_results = []
     last_eval_epoch = -1
-    
+
     # Define callback function for evaluation
     def evaluation_callback(algo, epoch, total_step):
         nonlocal last_eval_epoch
-            
+
         # Only evaluate at specified intervals
-        if epoch <= last_eval_epoch or (epoch % cfg.training.eval_interval != 0 and epoch != n_epochs - 1):
+        if epoch <= last_eval_epoch or (
+            epoch % cfg.training.eval_interval != 0 and epoch != n_epochs - 1
+        ):
             return
-            
+
         # Update last evaluated epoch
         last_eval_epoch = epoch
-            
+
         # Check if environment is available
         if env is None:
             print(f"Epoch {epoch}: Skipping evaluation (no environment available)")
             return
-            
+
         # Evaluate policy
         print(f"Evaluating policy at epoch {epoch}...")
-        
+
         # Set up video recording directory in the d3rlpy results folder
         video_recording = cfg.evaluation.record_video
         video_path = None
-        
+
         if video_recording:
             # Get the current experiment directory
-            experiment_dir = get_d3rlpy_experiment_path(d3rlpy_logdir, experiment_name, with_timestamp=True)
-            
+            experiment_dir = get_d3rlpy_experiment_path(
+                d3rlpy_logdir, experiment_name, with_timestamp=True
+            )
+
             if experiment_dir:
                 # Create a videos directory inside the experiment directory
                 video_dir = experiment_dir / "videos" / f"epoch_{epoch}"
@@ -547,56 +594,70 @@ def main(cfg: DictConfig):
                 video_path = str(video_dir / "eval")
                 print(f"Videos will be saved to: {video_dir}")
             else:
-                print("Warning: Could not find experiment directory for video recording")
+                print(
+                    "Warning: Could not find experiment directory for video recording"
+                )
                 # Fall back to a general videos directory
                 video_dir = Path(cfg.output.output_dir) / "videos" / f"epoch_{epoch}"
                 os.makedirs(video_dir, exist_ok=True)
                 video_path = str(video_dir / "eval")
-            
+
         # Evaluate policy with video recording if enabled
         metrics = evaluate_policy_manual(
-            env, 
-            algo, 
-            n_episodes=cfg.training.eval_episodes, 
+            env,
+            algo,
+            n_episodes=cfg.training.eval_episodes,
             verbose=False,
             parallel=cfg.evaluation.parallel_eval,
             num_workers=cfg.evaluation.eval_workers,
             record_video=video_recording,
             video_path=video_path,
-            video_fps=cfg.evaluation.video_fps
+            video_fps=cfg.evaluation.video_fps,
         )
-        print(f"Epoch {epoch} evaluation: Return={metrics['mean_return']:.2f}, Success={metrics['success_rate']:.2f}")
-        
+        print(
+            f"Epoch {epoch} evaluation: Return={metrics['mean_return']:.2f}, Success={metrics['success_rate']:.2f}"
+        )
+
         # Track best metrics
         eval_metrics_with_best = wandb_callback.update_eval_metrics(metrics, epoch)
         evaluation_results.append((epoch, eval_metrics_with_best))
-        
+
         # Log metrics to wandb if enabled
         if cfg.wandb.use_wandb:
             log_to_wandb(eval_metrics_with_best, prefix="eval", epoch=epoch)
-            
+
             # Log video grid if videos were recorded
             if video_recording and video_path and wandb.run:
                 try:
                     video_files = glob.glob(f"{video_path}*.mp4")
                     # Filter out invalid video files
-                    valid_video_files = [f for f in video_files if is_valid_video_file(f)]
-                    print(f"Found {len(valid_video_files)} valid video files out of {len(video_files)}")
-                    
+                    valid_video_files = [
+                        f for f in video_files if is_valid_video_file(f)
+                    ]
+                    print(
+                        f"Found {len(valid_video_files)} valid video files out of {len(video_files)}"
+                    )
+
                     # Create a grid of videos if we have multiple
                     if len(valid_video_files) > 1:
                         print("Creating video grid from evaluation videos...")
-                        grid_path = f"{os.path.dirname(video_path)}/eval_grid_epoch_{epoch}.mp4"
+                        grid_path = (
+                            f"{os.path.dirname(video_path)}/eval_grid_epoch_{epoch}.mp4"
+                        )
                         try:
                             grid_video = create_video_grid(
-                                valid_video_files, 
-                                grid_path, 
-                                max_videos=6, 
-                                fps=cfg.evaluation.video_fps
+                                valid_video_files,
+                                grid_path,
+                                max_videos=6,
+                                fps=cfg.evaluation.video_fps,
                             )
                             if grid_video and is_valid_video_file(grid_video):
                                 # Log the grid video
-                                video_obj = wandb.Video(grid_video, fps=cfg.evaluation.video_fps, format="mp4")
+                                video_obj = wandb.Video(
+                                    grid_video,
+                                    fps=cfg.evaluation.video_fps,
+                                    format="mp4",
+                                )
                                 log_to_wandb({"video_grid": video_obj}, prefix="eval")
                         except Exception as e:
                             print(f"Error creating video grid: {e}")
@@ -604,20 +665,15 @@ def main(cfg: DictConfig):
                     print(f"Error handling videos: {e}")
 
     # Create a combined callback that handles both wandb logging and evaluation
-    composite_callback = CompositeCallback([
-        wandb_callback,
-        evaluation_callback
-    ])
-    
+    composite_callback = CompositeCallback([wandb_callback, evaluation_callback])
+
     # Train the model
     print(f"Training {algorithm_name.upper()} for {n_epochs} epochs...")
-    
+
     # Define scorers based on environment availability
     if env is not None:
         print("Using environment for evaluation during training")
-        scorers = {
-            'environment': custom_evaluate_on_environment(env)
-        }
+        scorers = {"environment": custom_evaluate_on_environment(env)}
     else:
         print("Training without environment evaluation")
         scorers = {}
@@ -644,20 +700,29 @@ def main(cfg: DictConfig):
         evaluators=scorers,
         experiment_name=experiment_name,
         with_timestamp=True,
-        callback=composite_callback  # Use the composite callback instead of a list
+        callback=composite_callback,  # Use the composite callback instead of a list
     )
-    
+
     # Print the training metrics summary
     print("\nTraining metrics summary:")
-    
+
     # Try to use algorithm's training metrics if available
     try:
-        if training_metrics and isinstance(training_metrics, list) and len(training_metrics) > 0:
+        if (
+            training_metrics
+            and isinstance(training_metrics, list)
+            and len(training_metrics) > 0
+        ):
             # Check if metrics are in expected format
             if isinstance(training_metrics[0], tuple) and len(training_metrics[0]) == 2:
                 for epoch, metrics in training_metrics:
-                    metrics_str = ", ".join([f"{k}: {v:.4f}" for k, v in metrics.items() 
-                                           if isinstance(v, (int, float, np.number))])
+                    metrics_str = ", ".join(
+                        [
+                            f"{k}: {v:.4f}"
+                            for k, v in metrics.items()
+                            if isinstance(v, (int, float, np.number))
+                        ]
+                    )
                     print(f"Epoch {epoch}: {metrics_str}")
             else:
                 print("Training metrics available but in unexpected format")
@@ -665,7 +730,7 @@ def main(cfg: DictConfig):
             print("No training metrics available from algorithm")
     except Exception as e:
         print(f"Error printing metrics: {e}")
-    
+
     # Log final training metrics to wandb
     if cfg.wandb.use_wandb:
         # Log training metrics if available
@@ -674,27 +739,31 @@ def main(cfg: DictConfig):
                 log_to_wandb(training_metrics, prefix="train_final")
             except:
                 print("Warning: Could not log algorithm's training metrics to wandb")
-        
+
         # Get comprehensive training summary from our callback
         training_summary = wandb_callback.get_training_summary()
-        
+
         # Create a complete summary with training and evaluation metrics
         summary_metrics = {
             "total_epochs": n_epochs,
-            "best_eval_epoch": wandb_callback.best_eval_epoch
+            "best_eval_epoch": wandb_callback.best_eval_epoch,
         }
-        
+
         # Add training loss metrics
         for key, val in training_summary.items():
-            if isinstance(val, (int, float, np.int64, np.float32, np.float64, np.number)):
+            if isinstance(
+                val, (int, float, np.int64, np.float32, np.float64, np.number)
+            ):
                 summary_metrics[key] = val
-        
+
         # Add best metrics if available
         if wandb_callback.best_eval_metrics:
             for k, v in wandb_callback.best_eval_metrics.items():
-                if isinstance(v, (int, float, np.int64, np.float32, np.float64, np.number)):
+                if isinstance(
+                    v, (int, float, np.int64, np.float32, np.float64, np.number)
+                ):
                     summary_metrics[f"best_{k}"] = v
-                    
+
         # Log the combined summary
         log_to_wandb(summary_metrics, prefix="summary")
         # Also log a final plot of training losses if available
@@ -705,13 +774,13 @@ def main(cfg: DictConfig):
                 for loss_name, values in wandb_callback.training_losses.items():
                     if len(values) > 1:  # Only plot if we have multiple values
                         plt.plot(values, label=loss_name)
-                
-                plt.xlabel('Updates')
-                plt.ylabel('Loss Value')
-                plt.title('Training Losses')
+
+                plt.xlabel("Updates")
+                plt.ylabel("Loss Value")
+                plt.title("Training Losses")
                 plt.legend()
                 plt.tight_layout()
-                
+
                 # Log to wandb
                 log_to_wandb({"media/plots/training_losses": wandb.Image(plt)})
                 plt.close()
@@ -719,19 +788,19 @@ def main(cfg: DictConfig):
                 print(f"Warning: Could not create training loss plot: {e}")
 
     # Get the model directory name from config if available, or fall back to default
-    if hasattr(cfg.output, 'model_dir_name'):
+    if hasattr(cfg.output, "model_dir_name"):
         model_dir_name = cfg.output.model_dir_name
         # Add zero reward indicator if using that mode
-        if cfg.data.get('use_zero_rewards', False):
+        if cfg.data.get("use_zero_rewards", False):
             model_dir_name += "_zero_rewards"
-        
+
         # Create subdirectory based on the name template
         model_dir = os.path.join(cfg.output.output_dir, model_dir_name)
         os.makedirs(model_dir, exist_ok=True)
         model_path = os.path.join(model_dir, f"{algorithm_name.lower()}.pt")
     else:
         # Fall back to the original naming scheme
-        zero_suffix = "_zero_rewards" if cfg.data.get('use_zero_rewards', False) else ""
+        zero_suffix = "_zero_rewards" if cfg.data.get("use_zero_rewards", False) else ""
         model_path = f"{cfg.output.output_dir}/{algorithm_name.lower()}_{Path(cfg.data.data_path).stem}{zero_suffix}.pt"
 
     algo.save_model(model_path)
@@ -746,27 +815,27 @@ def main(cfg: DictConfig):
                 "dataset": Path(cfg.data.data_path).stem,
                 "epochs": n_epochs,
                 "observation_dim": state_dim,
-                "action_dim": action_dim
+                "action_dim": action_dim,
             }
-            
+
             # Add best metrics if available
             if wandb_callback.best_eval_metrics:
                 for k, v in wandb_callback.best_eval_metrics.items():
-                    if isinstance(v, (int, float, np.int64, np.float32, np.float64, np.number)):
+                    if isinstance(
+                        v, (int, float, np.int64, np.float32, np.float64, np.number)
+                    ):
                         model_metadata[f"best_{k}"] = v
-            
+
             # Use artifact name from config if available
-            if hasattr(cfg.output, 'artifact_name'):
+            if hasattr(cfg.output, "artifact_name"):
                 artifact_name = cfg.output.artifact_name
             else:
                 # Fall back to a default name
                 artifact_name = f"{algorithm_name}_{Path(cfg.data.data_path).stem}"
-            
+
             # Log the artifact with metadata
             artifact = wandb_callback.log_model_artifact(
-                model_path, 
-                artifact_name=artifact_name,
-                metadata=model_metadata
+                model_path, artifact_name=artifact_name, metadata=model_metadata
             )
             if artifact:
                 print(f"Model logged to wandb as artifact: {artifact.name}")
@@ -779,61 +848,65 @@ def main(cfg: DictConfig):
         # Set up video directory for final evaluation
         video_recording = cfg.evaluation.record_video
         video_path = None
-        
+
         if video_recording:
             # Create a final evaluation video directory
             video_dir = Path(cfg.output.output_dir) / "videos" / "final_evaluation"
             os.makedirs(video_dir, exist_ok=True)
             video_path = str(video_dir / "final_eval")
             print(f"Final evaluation videos will be saved to: {video_dir}")
-            
+
         evaluation_metrics = evaluate_policy_manual(
-            env, 
-            algo, 
-            n_episodes=cfg.training.eval_episodes, 
+            env,
+            algo,
+            n_episodes=cfg.training.eval_episodes,
             verbose=True,
             parallel=cfg.evaluation.parallel_eval,
             num_workers=cfg.evaluation.eval_workers,
             record_video=video_recording,
             video_path=video_path,
-            video_fps=cfg.evaluation.video_fps
+            video_fps=cfg.evaluation.video_fps,
         )
-        
+
         # Print summary
-        print(f"Final evaluation results: Mean return = {evaluation_metrics['mean_return']:.2f}, " + 
-              f"Success rate = {evaluation_metrics['success_rate']:.2f}, " +
-              f"Episodes = {evaluation_metrics['num_episodes']}")
-        
+        print(
+            f"Final evaluation results: Mean return = {evaluation_metrics['mean_return']:.2f}, "
+            + f"Success rate = {evaluation_metrics['success_rate']:.2f}, "
+            + f"Episodes = {evaluation_metrics['num_episodes']}"
+        )
+
         # Log final results to wandb
         if cfg.wandb.use_wandb:
             log_to_wandb(evaluation_metrics, prefix="final_eval")
-            
+
             # Log videos if available
             if video_recording and video_path and wandb.run:
                 try:
                     video_files = glob.glob(f"{video_path}*.mp4")
                     print(f"Found {len(video_files)} final evaluation video files")
-                    
+
                     if video_files:
                         # Upload up to 3 videos
                         for i, video_file in enumerate(video_files[:3]):
                             wandb_callback.log_video(
                                 video_file,
-                                name=f"video_{i+1}",
+                                name=f"video_{i + 1}",
                                 fps=cfg.evaluation.video_fps,
-                                prefix="final_rollout"
+                                prefix="final_rollout",
                             )
-                            
+
                         # Create a grid of videos if we have multiple
                         if len(video_files) > 1:
                             print("Creating video grid from final evaluation videos...")
-                            grid_path = f"{os.path.dirname(video_path)}/final_eval_grid.mp4"
+                            grid_path = (
+                                f"{os.path.dirname(video_path)}/final_eval_grid.mp4"
+                            )
                             try:
                                 grid_video = create_video_grid(
-                                    video_files, 
-                                    grid_path, 
-                                    max_videos=6, 
-                                    fps=cfg.evaluation.video_fps
+                                    video_files,
+                                    grid_path,
+                                    max_videos=6,
+                                    fps=cfg.evaluation.video_fps,
                                 )
                                 if grid_video:
                                     # Log the grid video
@@ -841,14 +914,15 @@ def main(cfg: DictConfig):
                                         grid_video,
                                         name="video_grid",
                                         fps=cfg.evaluation.video_fps,
-                                        prefix="final_rollout"
+                                        prefix="final_rollout",
                                     )
                             except Exception as e:
                                 print(f"Error creating final video grid: {e}")
                 except Exception as e:
                     print(f"Error logging final videos to wandb: {e}")
-    
+
     print("\nTraining complete!")
 
+
 if __name__ == "__main__":
-    main() 
+    main()

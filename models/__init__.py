@@ -1,10 +1,4 @@
 # models module
-from models.reward_models import (
-    RewardModel,
-    EnsembleRewardModel
-)
+from models.reward_models import RewardModel, EnsembleRewardModel
 
-__all__ = [
-    'RewardModel',
-    'EnsembleRewardModel'
-] 
+__all__ = ["RewardModel", "EnsembleRewardModel"]

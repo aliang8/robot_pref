@@ -1,38 +1,34 @@
-import os
-import torch
-import numpy as np
-import random
-from tqdm import tqdm
-import matplotlib.pyplot as plt
-import pickle
-import time
-from pathlib import Path
-import hydra
-from omegaconf import DictConfig, OmegaConf
-import wandb
-from copy import deepcopy
 import gc
+import os
+import pickle
+import random
+import time
+from copy import deepcopy
+from pathlib import Path
+
+import hydra
+import matplotlib.pyplot as plt
+import numpy as np
+import torch
+from omegaconf import DictConfig, OmegaConf
+
+import wandb
+
+# Import shared models and utilities
+from models import EnsembleRewardModel, RewardModel
 
 # Import utility functions
 from trajectory_utils import (
     load_tensordict,
-    create_segments,
-    sample_segment_pairs,
-    compute_dtw_distance_matrix
+    process_data_trajectories,
+    segment_trajectory,
 )
-from utils.wandb_utils import log_to_wandb, log_artifact
-
-# Import shared models and utilities
-from models import EnsembleRewardModel, RewardModel
-from utils.dataset_utils import PreferenceDataset, bradley_terry_loss
-from utils.active_learning_utils import (
-    select_active_pref_query,
-    create_initial_dataset
-)
-from utils.training_utils import train_model
 from utils import evaluate_model_on_test_set
-from utils.dataset_utils import create_data_loaders
+from utils.active_learning_utils import create_initial_dataset, select_active_pref_query
+from utils.dataset_utils import PreferenceDataset, create_data_loaders
 from utils.seed_utils import set_seed
+from utils.training_utils import train_model
+from utils.wandb_utils import log_artifact, log_to_wandb
 
 
 def find_similar_segments_dtw(query_idx, k, distance_matrix):
@@ -93,7 +89,7 @@ def run_reward_analysis(model_path, data_path, output_dir, num_episodes=9, devic
     if wandb_run is not None and wandb_run.run:
         reward_grid_path = os.path.join(output_dir, "reward_grid.png")
         if os.path.exists(reward_grid_path):
-            print(f"Logging reward analysis grid to wandb")
+            print("Logging reward analysis grid to wandb")
             wandb_run.log({"reward_analysis/grid": wandb.Image(reward_grid_path)})
         else:
             print(f"Warning: Could not find reward grid image at {reward_grid_path}")
@@ -183,38 +179,38 @@ def train_final_reward_model(labeled_pairs, segment_indices, labeled_preferences
     )
     return final_model, None, train_losses, val_losses
 
-@hydra.main(config_path="config", config_name="reward_model_active", version_base=None)
-def main(cfg: DictConfig):
-    """Main entry point for active preference learning."""
-    # Set random seed for reproducibility at the beginning
-    random_seed = cfg.get('random_seed', 42)
-    set_seed(random_seed)
-    print(f"Global random seed set to {random_seed}")
+def load_dtw_matrix(data_path, segment_length):
+    """Load pre-computed DTW matrix from file.
     
-    # Get the dataset name
-    dataset_path = Path(cfg.data.data_path)
-    dataset_name = dataset_path.stem
+    Args:
+        data_path: Path to the dataset
+        segment_length: Length of segments used for DTW computation
+        
+    Returns:
+        tuple: (distance_matrix, idx_mapping_dtw) if successful, (None, None) if failed
+    """
+    dtw_matrix_file = Path(data_path).parent / f"dtw_matrix_{segment_length}.pkl"
     
-    if 'robomimic' in str(dataset_path):
-        # Get the task name (like 'can') from the path
-        task_name = dataset_path.parent.name
-        dataset_name = f"{task_name}_{dataset_name}"
-    else:
-        # Get parent directory name if needed for other datasets
-        parent_dir = dataset_path.parent.name
-        if parent_dir and parent_dir not in ['datasets', 'data']:
-            dataset_name = f"{parent_dir}_{dataset_name}"
+    if not os.path.exists(dtw_matrix_file):
+        print(f"Warning: DTW matrix file not found at {dtw_matrix_file}")
+        return None, None
+        
+    try:
+        with open(dtw_matrix_file, 'rb') as f:
+            data = pickle.load(f)
+            if isinstance(data, tuple) and len(data) == 2:
+                dtw_matrix, segment_ids = data
+                # Create mapping from original segment index to DTW matrix index
+                idx_mapping_dtw = {old_idx: new_idx for new_idx, old_idx in enumerate(segment_ids)}
+                return dtw_matrix, idx_mapping_dtw
+            else:
+                print("Warning: Loaded DTW matrix does not contain segment IDs")
+                return data, None
+    except Exception as e:
+        print(f"Error loading DTW matrix: {e}")
+        return None, None
 
-    print(f"Dataset name: {dataset_name}")
-    
-    # Replace only the dataset name placeholder in the template strings
-    if hasattr(cfg.output, "model_dir_name"):
-        cfg.output.model_dir_name = cfg.output.model_dir_name.replace("DATASET_NAME", dataset_name)
-    
-    if hasattr(cfg.output, "artifact_name"):
-        cfg.output.artifact_name = cfg.output.artifact_name.replace("DATASET_NAME", dataset_name)
-    
-    active_preference_learning(cfg)
+
 
 def active_preference_learning(cfg):
     """Main function for active preference learning.
@@ -246,11 +242,9 @@ def active_preference_learning(cfg):
     print("\nDTW Augmentation Parameters:")
     dtw_enabled = cfg.dtw_augmentation.enabled
     dtw_k_augment = cfg.dtw_augmentation.k_augment
-    dtw_max_segments_for_matrix = cfg.dtw_augmentation.max_dtw_segments
     print(f"  DTW Enabled: {dtw_enabled}")
     if dtw_enabled:
         print(f"  K augment (similar segments): {dtw_k_augment}")
-        print(f"  Max segments for DTW matrix computation: {dtw_max_segments_for_matrix if dtw_max_segments_for_matrix is not None else 'All'}")
 
     # Get random seed from config (already set in main)
     random_seed = cfg.get('random_seed', 42)
@@ -308,47 +302,60 @@ def active_preference_learning(cfg):
     
     # Create segments
     print(f"Creating segments of length {cfg.data.segment_length}...")
-    # Pass CPU data to create_segments to ensure proper indexing
-    segments, segment_indices = create_segments(
-        data_cpu, 
-        segment_length=cfg.data.segment_length,
-        max_segments=cfg.data.num_segments
-    )
+
+    # Load data into trajectories
+    trajectories = process_data_trajectories(cfg.data.data_path)
+
+    # Dynamic segment length calculation
+    segments_per_trajectory = len(trajectories[0]["obs"]) // cfg.data.segment_length + 1
+    print(f"Using segments per trajectory: {segments_per_trajectory}")
+
+    # Segment trajectories
+    segmented_trajectories = []
+    for trajectory in trajectories:
+        segmented_trajectories.extend(segment_trajectory(trajectory, cfg.data.segment_length, segments_per_trajectory))
     
-    # Generate all possible segment pairs
-    print(f"Generating {cfg.data.num_pairs} segment pairs...")
-    # Pass CPU rewards to sample_segment_pairs
-    all_segment_pairs, gt_preferences = sample_segment_pairs(
-        segments, 
-        segment_indices, 
-        rewards, 
-        n_pairs=cfg.data.num_pairs
-    )
+    assert len(segmented_trajectories) == len(trajectories) * segments_per_trajectory, f"Total segments: {len(segmented_trajectories)}, should equal len(trajectories) {len(trajectories)} * segments_per_trajectory {segments_per_trajectory} = {len(trajectories) * segments_per_trajectory}"
+
+    # Sample subsamples from all segments
+    subsample_indices = random.sample(range(len(segmented_trajectories)), cfg.subsamples)
+    subsampled_segments = [segmented_trajectories[i] for i in subsample_indices]
+
+    # # Pass CPU data to create_segments to ensure proper indexing
+    # segments, segment_indices = create_segments(
+    #     data_cpu, 
+    #     segment_length=cfg.data.segment_length,
+    #     max_segments=cfg.data.num_segments
+    # )
     
-    # Compute DTW distance matrix if augmentation is enabled
+    # # Generate all possible segment pairs
+    # print(f"Generating {cfg.data.num_pairs} segment pairs...")
+    # # Pass CPU rewards to sample_segment_pairs
+    # all_segment_pairs, gt_preferences = sample_segment_pairs(
+    #     segments, 
+    #     segment_indices, 
+    #     rewards, 
+    #     n_pairs=cfg.data.num_pairs
+    # )
+    
+    # Load pre-computed DTW distance matrix if augmentation is enabled
     distance_matrix = None
-    idx_mapping_dtw = None # Maps new_idx in subsampled_segments (used for DTW matrix) to old_idx in original segments
-    original_to_dtw_idx = None # Maps old_idx to new_idx in subsampled_segments
+    idx_mapping_dtw = None
+    original_to_dtw_idx = None
 
     if dtw_enabled:
-        print("\nComputing DTW distance matrix for augmentation...")
-        # 'segments' is a list of dicts {'obs': tensor, 'action': tensor}
-        # compute_dtw_distance_matrix from trajectory_utils handles this format.
-        # It uses segment['obs'] for DTW.
-        distance_matrix, idx_mapping_dtw = compute_dtw_distance_matrix(
-            segments, # Original full list of segments
-            max_segments=dtw_max_segments_for_matrix,
-            random_seed=random_seed
-        )
+        print("\nLoading pre-computed DTW distance matrix...")
+        distance_matrix, idx_mapping_dtw = load_dtw_matrix(cfg.data.data_path, cfg.data.segment_length)
+        
         if distance_matrix is not None:
-            print(f"DTW distance matrix computed with shape: {distance_matrix.shape}")
+            print(f"Successfully loaded DTW distance matrix with shape: {distance_matrix.shape}")
             if idx_mapping_dtw:
-                print(f"DTW matrix computed on a subset of {len(idx_mapping_dtw)} segments.")
+                print(f"DTW matrix contains {len(idx_mapping_dtw)} segments")
                 # Create reverse mapping: original segment index to DTW matrix index
                 original_to_dtw_idx = {old_idx: new_idx for new_idx, old_idx in idx_mapping_dtw.items()}
         else:
-            print("Warning: DTW distance matrix computation failed or yielded no result. Augmentation will be disabled.")
-            dtw_enabled = False # Disable if matrix computation failed
+            print("Warning: Failed to load DTW distance matrix. Augmentation will be disabled.")
+            dtw_enabled = False
 
     # Create test dataset from a separate set of pairs for consistent evaluation
     # We use 20% of all pairs for testing
@@ -402,7 +409,8 @@ def active_preference_learning(cfg):
         "test_accuracy": [],
         "test_loss": [],
         "avg_logpdf": [],
-        "iterations": []
+        "iterations": [],
+        "val_losses": []  # Track validation losses across iterations
     }
     
     # Main active learning loop
@@ -417,6 +425,15 @@ def active_preference_learning(cfg):
     pair_to_original_idx = {}
     for i, pair_val in enumerate(all_segment_pairs): # Renamed pair to pair_val to avoid conflict
         pair_to_original_idx[tuple(pair_val)] = i
+    
+    # Get model directory name from config for checkpoints
+    model_dir_name = cfg.output.model_dir_name
+    model_dir = os.path.join(cfg.output.output_dir, model_dir_name)
+    os.makedirs(model_dir, exist_ok=True)
+    
+    # Create a checkpoint directory
+    checkpoint_dir = os.path.join(model_dir, "checkpoints")
+    os.makedirs(checkpoint_dir, exist_ok=True)
     
     while total_labeled < max_queries and len(unlabeled_pairs) > 0:
         
@@ -442,11 +459,19 @@ def active_preference_learning(cfg):
             effective_workers = 0
             print("Reducing worker count to 0 for small batch size")
         
+        # Set train and val ratios based on the number of labeled pairs
+        if total_labeled <= 1:
+            train_ratio = 1.0
+            val_ratio = 0.0
+        else:
+            train_ratio = 0.8
+            val_ratio = 0.2
+
         # Use utility function to create data loaders with all data for training
         data_loaders = create_data_loaders(
             ensemble_dataset,
-            train_ratio=1.0,  # Use all data for training
-            val_ratio=0.0,    # No validation set
+            train_ratio=train_ratio,  # Use all data for training
+            val_ratio=val_ratio,    # No validation set
             batch_size=effective_batch_size,
             num_workers=effective_workers,
             pin_memory=False,
@@ -472,7 +497,7 @@ def active_preference_learning(cfg):
             lr = cfg.model.lr  # Use standard learning rate for training from scratch
         
         # Train the ensemble using the unified training function
-        ensemble, _, _ = train_model(
+        ensemble, train_loss, val_loss = train_model(
             ensemble,
             train_loader,
             val_loader,
@@ -482,6 +507,12 @@ def active_preference_learning(cfg):
             wandb=None,     # Don't log ensemble training to wandb
             is_ensemble=True
         )
+        
+        # Store validation loss for plotting
+        if val_loss:
+            metrics["val_losses"].append(val_loss[-1])  # Store the last validation loss
+        else:
+            metrics["val_losses"].append(None)
         
         # Store the current ensemble for potential fine-tuning in the next iteration
         if cfg.active_learning.fine_tune:
@@ -510,8 +541,15 @@ def active_preference_learning(cfg):
                 "test_accuracy": test_metrics["test_accuracy"],
                 "test_loss": test_metrics["test_loss"],
                 "avg_logpdf": test_metrics["avg_logpdf"],
-                "active_iteration": iteration
+                "active_iteration": iteration,
+                "val_loss": metrics["val_losses"][-1] if metrics["val_losses"][-1] is not None else 0
             })
+        
+        # Save checkpoint every 5 iterations
+        if iteration % 5 == 0:
+            checkpoint_path = os.path.join(checkpoint_dir, f"checkpoint_iter_{iteration}.pt")
+            torch.save(ensemble.models[0].state_dict(), checkpoint_path)
+            print(f"Saved checkpoint at iteration {iteration} to {checkpoint_path}")
         
         # Select next batch of uncertain pairs
         batch_size = min(cfg.active_learning.batch_size, max_queries - total_labeled)
@@ -748,10 +786,11 @@ def active_preference_learning(cfg):
     model_dir = os.path.join(cfg.output.output_dir, model_dir_name)
     os.makedirs(model_dir, exist_ok=True)
     
-    # Plot learning curve with three subplots: accuracy, loss, and logpdf
-    fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(18, 6), constrained_layout=True)
+    # Plot learning curve with four subplots: accuracy, loss, logpdf, and validation loss
+    fig, axs = plt.subplots(1, 4, figsize=(24, 6), constrained_layout=True)
     
     # Plot test accuracy
+    ax1 = axs[0]
     ax1.plot(metrics["num_labeled"], metrics["test_accuracy"], marker='o', color='blue')
     ax1.set_xlabel("Number of Labeled Pairs")
     ax1.set_ylabel("Test Accuracy")
@@ -759,6 +798,7 @@ def active_preference_learning(cfg):
     ax1.grid(True)
     
     # Plot test loss (Bradley-Terry)
+    ax2 = axs[1]
     ax2.plot(metrics["num_labeled"], metrics["test_loss"], marker='o', color='red')
     ax2.set_xlabel("Number of Labeled Pairs")
     ax2.set_ylabel("Bradley-Terry Loss (BCE)")
@@ -766,14 +806,31 @@ def active_preference_learning(cfg):
     ax2.grid(True)
     
     # Plot test logpdf (log probability density)
+    ax3 = axs[2]
     ax3.plot(metrics["num_labeled"], metrics["avg_logpdf"], marker='o', color='green')
     ax3.set_xlabel("Number of Labeled Pairs") 
     ax3.set_ylabel("Average Log Probability")
     ax3.set_title(f"Avg Log Probability vs Labeled Pairs ({cfg.active_learning.uncertainty_method})")
     ax3.grid(True)
+
+    # Plot validation loss over number of queries
+    ax4 = axs[3]
+    # Only plot if there is at least one non-None value
+    val_losses_x = []
+    val_losses_y = []
+    for x, y in zip(metrics["num_labeled"], metrics["val_losses"]):
+        if y is not None:
+            val_losses_x.append(x)
+            val_losses_y.append(y)
+    if len(val_losses_x) > 0:
+        ax4.plot(val_losses_x, val_losses_y, marker='o', color='purple')
+    ax4.set_xlabel("Number of Labeled Pairs")
+    ax4.set_ylabel("Validation Loss")
+    ax4.set_title("Validation Loss vs Labeled Pairs")
+    ax4.grid(True)
    
     # Add a global title
-    fig.suptitle(f"Active Learning Performance Metrics", fontsize=16)
+    fig.suptitle("Active Learning Performance Metrics", fontsize=16)
     
     # Save plot in the model directory
     learning_curve_path = os.path.join(model_dir, "learning_curve.png")
@@ -839,5 +896,39 @@ def active_preference_learning(cfg):
         # Finish wandb run
         wandb.finish()
 
+
+@hydra.main(config_path="config", config_name="reward_model_active", version_base=None)
+def main(cfg: DictConfig):
+    """Main entry point for active preference learning."""
+    # Set random seed for reproducibility at the beginning
+    random_seed = cfg.get('random_seed', 42)
+    set_seed(random_seed)
+    print(f"Global random seed set to {random_seed}")
+    
+    # Get the dataset name
+    dataset_path = Path(cfg.data.data_path)
+    dataset_name = dataset_path.stem
+    
+    if 'robomimic' in str(dataset_path):
+        # Get the task name (like 'can') from the path
+        task_name = dataset_path.parent.name
+        dataset_name = f"{task_name}_{dataset_name}"
+    else:
+        # Get parent directory name if needed for other datasets
+        parent_dir = dataset_path.parent.name
+        if parent_dir and parent_dir not in ['datasets', 'data']:
+            dataset_name = f"{parent_dir}_{dataset_name}"
+
+    print(f"Dataset name: {dataset_name}")
+    
+    # Replace only the dataset name placeholder in the template strings
+    if hasattr(cfg.output, "model_dir_name"):
+        cfg.output.model_dir_name = cfg.output.model_dir_name.replace("DATASET_NAME", dataset_name)
+    
+    if hasattr(cfg.output, "artifact_name"):
+        cfg.output.artifact_name = cfg.output.artifact_name.replace("DATASET_NAME", dataset_name)
+    
+    active_preference_learning(cfg)
+    
 if __name__ == "__main__":
     main() 
