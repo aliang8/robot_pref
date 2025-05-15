@@ -18,7 +18,7 @@ import wandb
 from models import EnsembleRewardModel, RewardModel
 
 # Import utility functions
-from trajectory_utils import (
+from utils.trajectory_utils import (
     load_tensordict,
     process_data_trajectories,
     segment_trajectory,

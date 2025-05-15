@@ -31,7 +31,7 @@ from d3rlpy.algos import IQL, DiscreteBC, BC, BCConfig, IQLConfig
 from d3rlpy.models.encoders import VectorEncoderFactory
 
 # Import utility functions
-from trajectory_utils import load_tensordict, RANDOM_SEED
+from utils.trajectory_utils import load_tensordict, RANDOM_SEED
 from utils.env_utils import MetaWorldEnvCreator, RobomimicEnvCreator
 from utils.callbacks import WandbCallback, CompositeCallback
 from utils.wandb_utils import log_to_wandb

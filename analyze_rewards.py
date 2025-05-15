@@ -9,7 +9,7 @@ from tqdm import tqdm
 import random
 
 # Import utility functions
-from trajectory_utils import DEFAULT_DATA_PATHS, load_tensordict
+from utils.trajectory_utils import DEFAULT_DATA_PATHS, load_tensordict
 
 from models.reward_models import RewardModel
 

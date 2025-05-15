@@ -14,7 +14,7 @@ import wandb
 from models.reward_models import RewardModel
 
 # Import utility functions
-from trajectory_utils import (
+from utils.trajectory_utils import (
     create_segments,
     load_tensordict,
     sample_segment_pairs,

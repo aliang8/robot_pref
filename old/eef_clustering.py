@@ -14,7 +14,7 @@ from omegaconf import DictConfig, OmegaConf
 import utils.dtw as dtw
 
 # Import utility functions
-from trajectory_utils import (
+from utils.trajectory_utils import (
     DEFAULT_DATA_PATHS,
     load_tensordict,
     compute_dtw_distance_matrix,
@@ -717,7 +717,7 @@ def main(cfg: DictConfig):
 
     if preprocessed_data is not None:
         # Load preprocessed data
-        from trajectory_utils import load_preprocessed_segments
+        from utils.trajectory_utils import load_preprocessed_segments
 
         preproc_data = load_preprocessed_segments(preprocessed_data)
 
