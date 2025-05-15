@@ -1,13 +1,14 @@
-import torch
-import numpy as np
-from pathlib import Path
 import os
 import random
-from tqdm import tqdm
+
 import matplotlib.pyplot as plt
+import numpy as np
+import torch
 from matplotlib import animation
 from PIL import Image
-from torchvision.transforms import Compose, Resize, ToTensor, Normalize
+from torchvision.transforms import Compose, Normalize, Resize, ToTensor
+from tqdm import tqdm
+
 import utils.dtw as dtw
 
 # Set torch hub cache directory
@@ -331,7 +332,7 @@ def compute_dtw_distance(query_segment, reference_segment):
         if not np.isfinite(cost):
             # Fall back to a simpler distance metric
             cost = np.mean((query.mean(0) - reference.mean(0)) ** 2)
-    except Exception as e:
+    except Exception:
         # Fall back to a simpler distance metric
         query = query_segment.numpy()
         reference = reference_segment.numpy()
@@ -629,7 +630,7 @@ def compute_eef_position_ranges(data_paths):
     x_min, y_min, z_min = global_min
     x_max, y_max, z_max = global_max
     
-    print(f"Global EEF position ranges across all datasets:")
+    print("Global EEF position ranges across all datasets:")
     print(f"  X range: [{x_min:.4f}, {x_max:.4f}]")
     print(f"  Y range: [{y_min:.4f}, {y_max:.4f}]")
     print(f"  Z range: [{z_min:.4f}, {z_max:.4f}]")

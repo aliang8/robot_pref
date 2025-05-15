@@ -287,8 +287,29 @@ def create_balanced_dataset(data, episode_data, selected_indices, output_path):
         print("Warning: NaN values were found and replaced with zeros.")
     
     # Save the new dataset
-    print(f"Saving balanced dataset to {output_path}")
+    print(f"Saving balanced dataset to {output_path}_balanced")
     torch.save(new_data, output_path)
+    
+    # Plot the distribution of returns in the balanced dataset
+    balanced_returns = []
+    balanced_episode_ids = new_data["episode"].cpu().numpy()
+    balanced_rewards = new_data["reward"].cpu().numpy()
+    
+    unique_balanced_episodes = np.unique(balanced_episode_ids)
+    for ep_id in unique_balanced_episodes:
+        indices = np.where(balanced_episode_ids == ep_id)[0]
+        ep_rewards = balanced_rewards[indices]
+        ep_rewards = np.nan_to_num(ep_rewards, nan=0.0)
+        balanced_returns.append(np.sum(ep_rewards))
+    
+    # Plot histogram of balanced returns
+    balanced_histogram_path = os.path.join(os.path.dirname(output_path), 
+                                          f"{Path(output_path).stem}_returns_histogram.png")
+    plot_returns_histogram(
+        np.array(balanced_returns),
+        balanced_histogram_path,
+        title=f"Return Distribution: {Path(output_path).stem}"
+    )
     
     return {
         "num_episodes": len(selected_episode_ids),

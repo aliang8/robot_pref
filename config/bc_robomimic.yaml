@@ -12,6 +12,7 @@ data:
   reward_model_path: null  # Not needed for BC since we learn directly from demonstrations
   max_segments: 0
   reward_batch_size: 32
+  env_name: "lift"  # Exact name of the Robomimic environment
 
 # Model architecture
 model:
