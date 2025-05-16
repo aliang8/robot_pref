@@ -133,126 +133,6 @@ def compute_uncertainty_scores(
 
     return uncertainty_scores
 
-
-def select_uncertain_pairs(uncertainty_scores, segment_pairs, k):
-    """Select top-k most uncertain segment pairs.
-
-    Args:
-        uncertainty_scores: List of uncertainty scores for each segment pair
-        segment_pairs: List of segment pair indices
-        k: Number of pairs to select
-
-    Returns:
-        selected_pairs: List of selected segment pairs
-        selected_indices: Indices of selected pairs in the original list
-    """
-    # Convert to numpy for easier manipulation
-    scores = np.array(uncertainty_scores)
-
-    # Ensure k is not larger than the number of available pairs
-    k = min(k, len(segment_pairs))
-
-    if k == 0:
-        print("Warning: No pairs available to select")
-        return [], []
-
-    # Get indices of top-k highest uncertainty scores
-    selected_indices = np.argsort(scores)[-k:]
-
-    # Get corresponding segment pairs
-    selected_pairs = [segment_pairs[i] for i in selected_indices]
-
-    return selected_pairs, selected_indices.tolist()
-
-
-def get_ground_truth_preferences(segment_pairs, segment_indices, rewards):
-    """Generate ground truth preferences based on cumulative rewards.
-
-    Args:
-        segment_pairs: List of segment pair indices
-        segment_indices: List of (start_idx, end_idx) tuples for each segment
-        rewards: Tensor of reward values for all transitions
-
-    Returns:
-        preferences: List of preferences (1 = first segment preferred, 2 = second segment preferred)
-    """
-    preferences = []
-
-    # Ensure rewards is on CPU for indexing
-    rewards_cpu = rewards.cpu() if isinstance(rewards, torch.Tensor) else rewards
-
-    for seg_idx1, seg_idx2 in segment_pairs:
-        # Get segment indices
-        start1, end1 = segment_indices[seg_idx1]
-        start2, end2 = segment_indices[seg_idx2]
-
-        # Calculate cumulative rewards for each segment
-        reward1 = rewards_cpu[start1:end1].sum().item()
-        reward2 = rewards_cpu[start2:end2].sum().item()
-
-        # Determine preference (1 = first segment preferred, 2 = second segment preferred)
-        if reward1 > reward2:
-            preferences.append(1)
-        else:
-            preferences.append(2)
-
-    return preferences
-
-
-def create_initial_dataset(
-    segment_pairs, segment_indices, preferences, data, initial_size
-):
-    """Create initial dataset with a small number of labeled pairs.
-
-    Args:
-        segment_pairs: List of segment pair indices
-        segment_indices: List of (start_idx, end_idx) tuples for each segment
-        preferences: List of preferences (1 = first segment preferred, 2 = second segment preferred)
-        data: Data dictionary containing observations and actions
-        initial_size: Initial number of labeled pairs
-
-    Returns:
-        labeled_pairs: List of initially labeled segment pairs
-        labeled_preferences: List of preferences for initially labeled pairs
-        unlabeled_pairs: List of remaining unlabeled segment pairs
-        unlabeled_indices: Indices of unlabeled pairs in the original list
-    """
-    # Ensure initial_size is not larger than the number of available pairs
-    initial_size = min(initial_size, len(segment_pairs))
-
-    if initial_size == 0:
-        print("Warning: No pairs available for initial dataset")
-        return [], [], segment_pairs, list(range(len(segment_pairs)))
-
-    # Randomly select initial pairs
-    all_indices = list(range(len(segment_pairs)))
-
-    # Handle case where initial_size is very close to total number of pairs
-    if initial_size >= len(segment_pairs) - 1:
-        print(
-            f"Warning: Initial size {initial_size} is almost equal to total pairs {len(segment_pairs)}."
-        )
-        print("Using all pairs as labeled data.")
-        labeled_indices = all_indices
-        unlabeled_indices = []
-    else:
-        labeled_indices = random.sample(all_indices, initial_size)
-        unlabeled_indices = [i for i in all_indices if i not in labeled_indices]
-
-    # Get labeled pairs and preferences
-    labeled_pairs = [segment_pairs[i] for i in labeled_indices]
-    labeled_preferences = [preferences[i] for i in labeled_indices]
-
-    # Get unlabeled pairs
-    unlabeled_pairs = [segment_pairs[i] for i in unlabeled_indices]
-
-    print(
-        f"Created initial dataset with {len(labeled_pairs)} labeled pairs and {len(unlabeled_pairs)} unlabeled pairs"
-    )
-
-    return labeled_pairs, labeled_preferences, unlabeled_pairs, unlabeled_indices
-
-
 def select_active_pref_query(
     reward_model,
     segments,
@@ -261,15 +141,11 @@ def select_active_pref_query(
     device,
     uncertainty_method="entropy",
     max_pairs=None,
-    use_random_candidate_sampling=True,
+    use_random_candidate_sampling=False,
     n_candidates=100,
     candidate_pairs=None,
 ):
-    """Unified approach for uncertainty-based pair selection.
-
-    This function provides two approaches:
-    1. Compute uncertainty for all possible segment pairs (more thorough but expensive)
-    2. Sample random candidates and compute uncertainty only for those (more efficient)
+    """Compute uncertainty for all possible segment pairs
 
     Args:
         reward_model: Trained reward model for uncertainty estimation
