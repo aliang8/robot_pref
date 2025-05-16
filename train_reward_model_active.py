@@ -17,20 +17,19 @@ import wandb
 
 # Import shared models and utilities
 from models import EnsembleRewardModel, RewardModel
+from utils.active_query_selection import (
+    select_active_pref_query,
+)
 
 # Import utility functions
-from trajectory_utils import (
+from utils.data import (
     get_gt_preferences,
     load_tensordict,
-    process_data_trajectories,
-    segment_trajectory,
 )
-from utils import evaluate_model_on_test_set
-from utils.active_query_selection import create_initial_dataset, select_active_pref_query
 from utils.dataset import PreferenceDataset, create_data_loaders
 from utils.seed import set_seed
-from utils.training import train_model
-from utils.wandb import log_artifact, log_to_wandb
+from utils.training import evaluate_model_on_test_set, train_model
+from utils.wandb import log_to_wandb
 
 
 def find_similar_segments_dtw(query_idx, k, distance_matrix):
@@ -262,86 +261,87 @@ def active_preference_learning(cfg, dataset_name=None):
     # Keep a CPU version of the data for indexing operations
     data_cpu = {k: v.cpu() if isinstance(v, torch.Tensor) else v for k, v in data.items()}
     
-    # # Get observation and action dimensions
-    # observations = data_cpu["obs"] if "obs" in data_cpu else data_cpu["state"]
-    # actions = data_cpu["action"]
-    # rewards = data_cpu["reward"]
+    # Get observation and action dimensions
+    observations = data_cpu["obs"] if "obs" in data_cpu else data_cpu["state"]
+    actions = data_cpu["action"]
+    rewards = data_cpu["reward"]
     
-    # state_dim = observations.shape[1]
-    # action_dim = actions.shape[1]
+    state_dim = observations.shape[1]
+    action_dim = actions.shape[1]
     
-    # print(f"Observation dimension: {state_dim}, Action dimension: {action_dim}")
-    
-    # # Create segments
-    # print(f"Creating segments of length {cfg.data.segment_length}...")
+    print(f"Observation dimension: {state_dim}, Action dimension: {action_dim}")
 
     # # Load data into trajectories
-    trajectories = process_data_trajectories(cfg.data.data_path)
+    # trajectories = process_data_trajectories(cfg.data.data_path)
 
-    # Dynamic segment length calculation
-    segments_per_trajectory = len(trajectories[0]["obs"]) // cfg.data.segment_length + 1
-    print(f"Using segments per trajectory: {segments_per_trajectory}")
+    # # Dynamic segment length calculation
+    # segments_per_trajectory = len(trajectories[0]["obs"]) // cfg.data.segment_length + 1
+    # print(f"Using segments per trajectory: {segments_per_trajectory}")
 
-    # Segment trajectories
-    segmented_trajectories = []
-    for trajectory in trajectories:
-        segmented_trajectories.extend(segment_trajectory(trajectory, cfg.data.segment_length, segments_per_trajectory))
+    # # Segment trajectories
+    # segmented_trajectories = []
+    # for trajectory in trajectories:
+    #     segmented_trajectories.extend(segment_trajectory(trajectory, cfg.data.segment_length, segments_per_trajectory))
     
-    assert len(segmented_trajectories) == len(trajectories) * segments_per_trajectory, f"Total segments: {len(segmented_trajectories)}, should equal len(trajectories) {len(trajectories)} * segments_per_trajectory {segments_per_trajectory} = {len(trajectories) * segments_per_trajectory}"
+    # assert len(segmented_trajectories) == len(trajectories) * segments_per_trajectory, f"Total segments: {len(segmented_trajectories)}, should equal len(trajectories) {len(trajectories)} * segments_per_trajectory {segments_per_trajectory} = {len(trajectories) * segments_per_trajectory}"
     
-    # Load pre-computed DTW distance matrix if augmentation is enabled
+    # Load pre-computed DTW distance matrix and segment indices if augmentation is enabled
     distance_matrix = None
-    idx_mapping_dtw = None
-    original_to_dtw_idx = None
+    segment_indices = None
+    # idx_mapping_dtw = None
+    # original_to_dtw_idx = None
 
     if dtw_enabled:
-        print("\nLoading pre-computed DTW distance matrix...")
+        print("\nLoading pre-computed DTW distance matrix and segment indices...")
         dtw_matrix_file = Path(cfg.data.data_path).parent / f"dtw_matrix_{cfg.data.segment_length}.pkl"
 
         if not os.path.exists(dtw_matrix_file):
             print(f"Warning: DTW matrix file not found at {dtw_matrix_file}")
             assert False, "DTW matrix file not found. Please run preprocess_dtw_matrix.py"
         else:
-            distance_matrix = pickle.load(open(dtw_matrix_file, "rb"))
+            distance_matrix, segment_indices = pickle.load(open(dtw_matrix_file, "rb"))
             print(f"Successfully loaded DTW distance matrix with shape: {distance_matrix.shape}")
+    
+    num_segments = len(segment_indices)
 
-    # We use 20% of all pairs for testing
-    num_segments = distance_matrix.shape[0]
-
-    # Find all possible segment pairs (num_segments choose 2)
+    # Find all possible segment pairs (num_segments choose 2) and sample data.subsamples from them
     all_segment_pairs = list(itertools.combinations(range(num_segments), 2))
-    print(f"Total segment pairs: {len(all_segment_pairs)}")
+    all_segment_pairs = random.sample(all_segment_pairs, cfg.data.subsamples)
+    print(f"Sampled {len(all_segment_pairs)} pairs from {len(all_segment_pairs)} total pairs")
 
     # Test set
-    test_size = int(0.1 * len(all_segment_pairs))
-    
+    test_size = 500 # TODO: make this cfg
     test_indices = random.sample(range(len(all_segment_pairs)), test_size)
     test_pairs = [all_segment_pairs[i] for i in test_indices]
-    test_preferences = get_gt_preferences(segmented_trajectories, test_pairs)
-        
-    # Make sure test pairs are not in labeled or unlabeled sets
-    remaining_indices = [i for i in range(len(all_segment_pairs)) if i not in test_indices]
-    remaining_pairs = [all_segment_pairs[i] for i in remaining_indices]
-    remaining_preferences = get_gt_preferences(segmented_trajectories, remaining_pairs)
+
+    # # For each segment index in the test pairs, collect the corresponding segment indices
+    # test_segment_indices = []
+    # for idx1, idx2 in test_pairs:
+    #     test_segment_indices.append(segment_indices[idx1])
+    #     test_segment_indices.append(segment_indices[idx2])
+    # # Remove duplicates, since some segments may appear in multiple pairs
+    # test_segment_indices = list({tuple(x) for x in test_segment_indices})
+    # Compute test preferences using the ground truth function
+    test_preferences = get_gt_preferences(data_cpu, segment_indices, test_pairs)
     
+    # Make sure test pairs are not in labeled or unlabeled sets
+    all_indices = list(range(len(all_segment_pairs)))
+    remaining_indices = list(set(all_indices) - set(test_indices))
+    remaining_pairs = [all_segment_pairs[i] for i in remaining_indices]
+        
     # Now create the labeled/unlabeled split from the remaining pairs
     print(f"Creating initial dataset with {cfg.active_learning.initial_size} labeled pairs...")
     print(f"Using {len(remaining_pairs)} pairs after excluding test set")
 
-    import ipdb; ipdb.set_trace()
-    
-    labeled_pairs, labeled_preferences, unlabeled_pairs, unlabeled_indices = create_initial_dataset(
-        remaining_pairs,
-        segment_indices,
-        remaining_preferences,
-        data_cpu,  # Use CPU data for indexing
-        cfg.active_learning.initial_size
-    )
-    
-    # Map unlabeled_indices back to original indices
-    unlabeled_indices = [remaining_indices[i] for i in unlabeled_indices]
-    
-    # Create test dataset if we have test pairs
+    # Sample cfg.active_learning.initial_size from remaining pairs
+    labeled_pairs = random.sample(remaining_indices, cfg.active_learning.initial_size)
+    labeled_pairs = [all_segment_pairs[i] for i in labeled_pairs]
+    labeled_preferences = get_gt_preferences(data_cpu, segment_indices, labeled_pairs)
+
+    # Unlabeled pairs are those in remaining_indices but not in labeled_pairs
+    unlabeled_indices = list(set(remaining_indices) - set(labeled_pairs))
+    unlabeled_pairs = [all_segment_pairs[i] for i in unlabeled_indices]
+
     test_dataset = PreferenceDataset(data_cpu, test_pairs, segment_indices, test_preferences)
     test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=64)
     print(f"Created test dataset with {len(test_dataset)} pairs")
@@ -370,6 +370,7 @@ def active_preference_learning(cfg, dataset_name=None):
     pair_to_original_idx = {}
     for i, pair_val in enumerate(all_segment_pairs): # Renamed pair to pair_val to avoid conflict
         pair_to_original_idx[tuple(pair_val)] = i
+
     
     # Get model directory name from config for checkpoints
     model_dir_name = cfg.output.model_dir_name
@@ -403,20 +404,12 @@ def active_preference_learning(cfg, dataset_name=None):
         if effective_batch_size < 4 and effective_workers > 0:
             effective_workers = 0
             print("Reducing worker count to 0 for small batch size")
-        
-        # Set train and val ratios based on the number of labeled pairs
-        if total_labeled <= 1:
-            train_ratio = 1.0
-            val_ratio = 0.0
-        else:
-            train_ratio = 0.8
-            val_ratio = 0.2
 
         # Use utility function to create data loaders with all data for training
         data_loaders = create_data_loaders(
             ensemble_dataset,
-            train_ratio=train_ratio,  # Use all data for training
-            val_ratio=val_ratio,    # No validation set
+            train_ratio=1.0,  # Use all data for training
+            val_ratio=0.0,    # No validation set
             batch_size=effective_batch_size,
             num_workers=effective_workers,
             pin_memory=False,
@@ -449,15 +442,8 @@ def active_preference_learning(cfg, dataset_name=None):
             device,
             num_epochs=cfg.training.num_epochs,
             lr=lr,
-            wandb=None,     # Don't log ensemble training to wandb
             is_ensemble=True
         )
-        
-        # Store validation loss for plotting
-        if val_loss:
-            metrics["val_losses"].append(val_loss[-1])  # Store the last validation loss
-        else:
-            metrics["val_losses"].append(None)
         
         # Store the current ensemble for potential fine-tuning in the next iteration
         if cfg.active_learning.fine_tune:
@@ -489,7 +475,14 @@ def active_preference_learning(cfg, dataset_name=None):
                 "active_iteration": iteration,
                 "val_loss": metrics["val_losses"][-1] if metrics["val_losses"][-1] is not None else 0
             })
-        
+
+        # Track test loss over number of labeled queries for plotting
+        if "test_loss_curve" not in metrics:
+            metrics["test_loss_curve"] = []
+            metrics["num_labeled_curve"] = []
+        metrics["test_loss_curve"].append(test_metrics["test_loss"])
+        metrics["num_labeled_curve"].append(total_labeled)
+
         # Save checkpoint every 5 iterations
         if iteration % 5 == 0:
             checkpoint_path = os.path.join(checkpoint_dir, f"checkpoint_iter_{iteration}.pt")
@@ -506,13 +499,12 @@ def active_preference_learning(cfg, dataset_name=None):
 
         # If DTW augmentation is enabled, only sample from pairs that are in the DTW matrix
         candidate_pairs = unlabeled_pairs
-        if dtw_enabled and distance_matrix is not None and idx_mapping_dtw is not None:
+        if dtw_enabled and distance_matrix is not None:
             # Filter unlabeled pairs to only include those where both segments are in the DTW matrix
             dtw_candidate_pairs = []
+
             for pair in unlabeled_pairs:
-                i, j = pair
-                if (i in original_to_dtw_idx) and (j in original_to_dtw_idx):
-                    dtw_candidate_pairs.append(pair)
+                dtw_candidate_pairs.append(pair)
             
             if len(dtw_candidate_pairs) > 0:
                 print(f"Using {len(dtw_candidate_pairs)} pairs from DTW matrix for uncertainty sampling")
@@ -523,7 +515,7 @@ def active_preference_learning(cfg, dataset_name=None):
         # Use the unified function for uncertainty-based selection
         ranked_pairs = select_active_pref_query(
             ensemble,
-            segments,
+            num_segments,
             segment_indices,
             data_cpu,
             device,
@@ -549,21 +541,25 @@ def active_preference_learning(cfg, dataset_name=None):
         # In a real system, this would be where we query the human
         selected_preferences = []
         valid_selected_pairs = []
-        for pair_val_loop in selected_pairs: # Renamed pair to pair_val_loop
+        for pair_val_loop in selected_pairs:  # Renamed pair to pair_val_loop
             pair_tuple = tuple(pair_val_loop)
             if pair_tuple in pair_to_original_idx:
-                selected_preferences.append(gt_preferences[pair_to_original_idx[pair_tuple]])
-                valid_selected_pairs.append(list(pair_val_loop)) # Ensure it's a list of lists
+                # get_gt_preferences returns a list, but we want the single value (not a list)
+                pref = get_gt_preferences(data_cpu, segment_indices, [pair_val_loop])
+                if isinstance(pref, list) and len(pref) == 1:
+                    pref = pref[0]
+                selected_preferences.append(pref)
+                valid_selected_pairs.append(list(pair_val_loop))  # Ensure it's a list of lists
             else:
                 print(f"Warning: Pair {pair_val_loop} not found in original pairs mapping")
-        
+
         # Update selected_pairs to only include valid ones
         selected_pairs = valid_selected_pairs
-        
+
         if len(selected_pairs) == 0:
             print("No valid pairs selected. Ending active learning loop.")
             break
-        
+
         # --- DTW Augmentation Start ---
         current_iter_augmented_pairs = []
         current_iter_augmented_preferences = []
@@ -574,60 +570,37 @@ def active_preference_learning(cfg, dataset_name=None):
             for pair_original_indices, preference_val in zip(selected_pairs, selected_preferences):
                 original_i, original_j = pair_original_indices # These are original segment indices
                 
-                dtw_i, dtw_j = -1, -1
-                can_augment_this_pair = True
-
-                if idx_mapping_dtw: # Using a subsampled matrix
-                    if original_to_dtw_idx is None: # Should not happen if idx_mapping_dtw exists
-                         print("Error: original_to_dtw_idx not created despite idx_mapping_dtw. Skipping augmentation.")
-                         can_augment_this_pair = False
-                    else:
-                        dtw_i = original_to_dtw_idx.get(original_i, -1)
-                        dtw_j = original_to_dtw_idx.get(original_j, -1)
-                        if dtw_i == -1 or dtw_j == -1:
-                            # print(f"Warning: Pair ({original_i}, {original_j}) involves segments not in DTW subset. Skipping augmentation for this pair.")
-                            can_augment_this_pair = False
-                else: # No subsampling, direct mapping for distance_matrix indices
-                    dtw_i, dtw_j = original_i, original_j
-
-                if not can_augment_this_pair:
-                    continue
-                
-                # Ensure dtw_i and dtw_j are valid indices for distance_matrix
-                if not (0 <= dtw_i < distance_matrix.shape[0] and 0 <= dtw_j < distance_matrix.shape[0]):
-                    # print(f"Warning: Invalid DTW indices {dtw_i}, {dtw_j} for pair ({original_i}, {original_j}) derived. Skipping augmentation.")
-                    continue
+                dtw_i, dtw_j = original_i, original_j
                 
                 # preference_val == 1 means original_i is preferred over original_j
                 if preference_val == 1:
                     similar_to_dtw_i_indices = find_similar_segments_dtw(dtw_i, dtw_k_augment, distance_matrix)
-                    for sim_dtw_idx in similar_to_dtw_i_indices:
-                        sim_original_idx = idx_mapping_dtw[sim_dtw_idx] if idx_mapping_dtw else sim_dtw_idx
-                        if sim_original_idx != original_j and sim_original_idx != original_i : # Avoid (x,x) and already queried original_j
+                    for sim_original_idx in similar_to_dtw_i_indices:
+                        if sim_original_idx != original_j and sim_original_idx != original_i:  # Avoid (x,x) and already queried original_j
                             current_iter_augmented_pairs.append([sim_original_idx, original_j])
                             current_iter_augmented_preferences.append(1)
 
                     similar_to_dtw_j_indices = find_similar_segments_dtw(dtw_j, dtw_k_augment, distance_matrix)
-                    for sim_dtw_idx in similar_to_dtw_j_indices:
-                        sim_original_idx = idx_mapping_dtw[sim_dtw_idx] if idx_mapping_dtw else sim_dtw_idx
-                        if sim_original_idx != original_i and sim_original_idx != original_j: # Avoid (x,x) and already queried original_i
+                    for sim_original_idx in similar_to_dtw_j_indices:
+                        if sim_original_idx != original_i and sim_original_idx != original_j:  # Avoid (x,x) and already queried original_i
                             current_iter_augmented_pairs.append([original_i, sim_original_idx])
                             current_iter_augmented_preferences.append(1)
-                
-                elif preference_val == 2: # original_j is preferred over original_i
+
+                elif preference_val == 2:  # original_j is preferred over original_i
                     similar_to_dtw_j_indices = find_similar_segments_dtw(dtw_j, dtw_k_augment, distance_matrix)
-                    for sim_dtw_idx in similar_to_dtw_j_indices:
-                        sim_original_idx = idx_mapping_dtw[sim_dtw_idx] if idx_mapping_dtw else sim_dtw_idx
+                    for sim_original_idx in similar_to_dtw_j_indices:
                         if sim_original_idx != original_i and sim_original_idx != original_j:
                             current_iter_augmented_pairs.append([original_i, sim_original_idx])
                             current_iter_augmented_preferences.append(2)
 
                     similar_to_dtw_i_indices = find_similar_segments_dtw(dtw_i, dtw_k_augment, distance_matrix)
-                    for sim_dtw_idx in similar_to_dtw_i_indices:
-                        sim_original_idx = idx_mapping_dtw[sim_dtw_idx] if idx_mapping_dtw else sim_dtw_idx
+                    for sim_original_idx in similar_to_dtw_i_indices:
                         if sim_original_idx != original_j and sim_original_idx != original_i:
                             current_iter_augmented_pairs.append([sim_original_idx, original_j])
                             current_iter_augmented_preferences.append(2)
+
+            labeled_pairs.extend(current_iter_augmented_pairs)
+            labeled_preferences.extend(current_iter_augmented_preferences)
         # --- DTW Augmentation End ---
 
         # Combine human-queried and augmented pairs, then add uniquely to labeled_pairs
@@ -691,7 +664,6 @@ def active_preference_learning(cfg, dataset_name=None):
     # Clean up resources before final model training
     gc.collect()
     torch.cuda.empty_cache()
-    
     # Train final model on all labeled data
     final_model, final_metrics, train_losses, val_losses = train_final_reward_model(
         labeled_pairs, 
@@ -822,24 +794,24 @@ def active_preference_learning(cfg, dataset_name=None):
             print(f"Warning: Error during reward analysis: {e}")
     
     # Log artifacts to wandb
-    if cfg.wandb.use_wandb:
-        log_artifact(
-            model_path,
-            artifact_type="model",
-            metadata={
-                "method": cfg.active_learning.uncertainty_method,
-                "fine_tune": cfg.active_learning.fine_tune,
-                "initial_size": cfg.active_learning.initial_size,
-                "max_queries": cfg.active_learning.max_queries,
-                "batch_size": cfg.active_learning.batch_size,
-                "num_queries": total_labeled,
-                "final_accuracy": final_metrics["test_accuracy"],
-                "consistent_accuracy": consistent_metrics["test_accuracy"]
-            }
-        )
+    # if cfg.wandb.use_wandb:
+    #     log_artifact(
+    #         model_path,
+    #         artifact_type="model",
+    #         metadata={
+    #             "method": cfg.active_learning.uncertainty_method,
+    #             "fine_tune": cfg.active_learning.fine_tune,
+    #             "initial_size": cfg.active_learning.initial_size,
+    #             "max_queries": cfg.active_learning.max_queries,
+    #             "batch_size": cfg.active_learning.batch_size,
+    #             "num_queries": total_labeled,
+    #             "final_accuracy": final_metrics["test_accuracy"],
+    #             "consistent_accuracy": consistent_metrics["test_accuracy"]
+    #         }
+    #     )
         
-        # Finish wandb run
-        wandb.finish()
+    #     # Finish wandb run
+    #     wandb.finish()
 
 
 @hydra.main(config_path="config", config_name="reward_model_active", version_base=None)

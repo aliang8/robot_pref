@@ -17,7 +17,7 @@ data:
   segment_length: 32
   num_segments: 10000
   num_pairs: 5000
-  subsamples: 320
+  subsamples: 50000
 
 # DTW augmentation parameters
 dtw_augmentation:
