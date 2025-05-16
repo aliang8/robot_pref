@@ -335,3 +335,97 @@ def compute_eef_position_ranges(data_paths):
     print(f"  Z range: [{z_min:.4f}, {z_max:.4f}]")
 
     return x_min, x_max, y_min, y_max, z_min, z_max
+
+
+def process_data_trajectories(data_path):
+    """
+    Load and process data into trajectories based on "episode" key from a data file.
+
+    Args:
+        data_path (str): Path to the data file.
+
+    Returns:
+        trajectories: List of processed trajectories.
+    """
+    data = load_tensordict(data_path)
+
+    # Group data by episode
+    unique_episodes = data["episode"].unique()
+
+    trajectories = []
+    # Process each unique episode
+    for episode_num in unique_episodes:
+        episode_mask = data["episode"] == episode_num
+
+        trajectory = {}
+        for key in data.keys():
+            trajectory[key] = data[key][episode_mask]
+
+        trajectories.append(trajectory)
+
+    print(f"Loaded {len(trajectories)} trajectories")
+
+    return trajectories
+
+
+def segment_trajectory(trajectory, segment_length, segments_per_trajectory=3):
+    """
+    Segment a trajectory into segments_per_trajectory parts of equal length.
+
+    Args:
+        trajectory (Tensor): The trajectory data.
+        segment_length (int): The length of each segment.
+        segments_per_trajectory (int): Number of segments to extract per trajectory.
+
+    Returns:
+        list: List of segments with length segment_length.
+    """
+    total_length = len(trajectory["obs"])
+
+    segments = []
+    for i in range(segments_per_trajectory):
+        # Calculate evenly spaced starting points across the trajectory
+        start_idx = (
+            i * (total_length - segment_length) // max(1, segments_per_trajectory - 1)
+        )
+        end_idx = start_idx + segment_length
+
+        segment = {}
+        for key in trajectory.keys():
+            segment[key] = trajectory[key][start_idx:end_idx]
+        segments.append(segment)
+
+    return segments
+
+
+def get_gt_preferences(segmented_trajectories, pairs):
+    """
+    Get ground truth preferences for segments based on cumulative rewards.
+
+    Args:
+        segmented_trajectories (list): List of all segmented trajectories.
+        pairs (list): List of tuples containing segment indices to compute ground truth preferences.
+
+    Returns:
+        list: List of tuples containing segment indices and their corresponding preferences.
+    """
+    preference_labels = []
+
+    for idx1, idx2 in pairs:
+        # Get the segments
+        segment1 = segmented_trajectories[idx1]
+        segment2 = segmented_trajectories[idx2]
+
+        # Compute cumulative rewards
+        reward1 = segment1["reward"].sum().item()
+        reward2 = segment2["reward"].sum().item()
+
+        # Determine preference
+        if reward1 > reward2:
+            preference_labels.append(1)
+        else:
+            preference_labels.append(2)
+
+    return preference_labels
+
+    

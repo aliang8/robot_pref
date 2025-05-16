@@ -1,4 +1,5 @@
 import gc
+import itertools
 import os
 import pickle
 import random
@@ -18,7 +19,8 @@ import wandb
 from models import EnsembleRewardModel, RewardModel
 
 # Import utility functions
-from utils.trajectory import (
+from trajectory_utils import (
+    get_gt_preferences,
     load_tensordict,
     process_data_trajectories,
     segment_trajectory,
@@ -179,38 +181,6 @@ def train_final_reward_model(labeled_pairs, segment_indices, labeled_preferences
     )
     return final_model, None, train_losses, val_losses
 
-def load_dtw_matrix(data_path, segment_length):
-    """Load pre-computed DTW matrix from file.
-    
-    Args:
-        data_path: Path to the dataset
-        segment_length: Length of segments used for DTW computation
-        
-    Returns:
-        tuple: (distance_matrix, idx_mapping_dtw) if successful, (None, None) if failed
-    """
-    dtw_matrix_file = Path(data_path).parent / f"dtw_matrix_{segment_length}.pkl"
-    
-    if not os.path.exists(dtw_matrix_file):
-        print(f"Warning: DTW matrix file not found at {dtw_matrix_file}")
-        return None, None
-        
-    try:
-        with open(dtw_matrix_file, 'rb') as f:
-            data = pickle.load(f)
-            if isinstance(data, tuple) and len(data) == 2:
-                dtw_matrix, segment_ids = data
-                # Create mapping from original segment index to DTW matrix index
-                idx_mapping_dtw = {old_idx: new_idx for new_idx, old_idx in enumerate(segment_ids)}
-                return dtw_matrix, idx_mapping_dtw
-            else:
-                print("Warning: Loaded DTW matrix does not contain segment IDs")
-                return data, None
-    except Exception as e:
-        print(f"Error loading DTW matrix: {e}")
-        return None, None
-
-
 
 def active_preference_learning(cfg, dataset_name=None):
     """Main function for active preference learning.
@@ -292,20 +262,20 @@ def active_preference_learning(cfg, dataset_name=None):
     # Keep a CPU version of the data for indexing operations
     data_cpu = {k: v.cpu() if isinstance(v, torch.Tensor) else v for k, v in data.items()}
     
-    # Get observation and action dimensions
-    observations = data_cpu["obs"] if "obs" in data_cpu else data_cpu["state"]
-    actions = data_cpu["action"]
-    rewards = data_cpu["reward"]
+    # # Get observation and action dimensions
+    # observations = data_cpu["obs"] if "obs" in data_cpu else data_cpu["state"]
+    # actions = data_cpu["action"]
+    # rewards = data_cpu["reward"]
     
-    state_dim = observations.shape[1]
-    action_dim = actions.shape[1]
+    # state_dim = observations.shape[1]
+    # action_dim = actions.shape[1]
     
-    print(f"Observation dimension: {state_dim}, Action dimension: {action_dim}")
+    # print(f"Observation dimension: {state_dim}, Action dimension: {action_dim}")
     
-    # Create segments
-    print(f"Creating segments of length {cfg.data.segment_length}...")
+    # # Create segments
+    # print(f"Creating segments of length {cfg.data.segment_length}...")
 
-    # Load data into trajectories
+    # # Load data into trajectories
     trajectories = process_data_trajectories(cfg.data.data_path)
 
     # Dynamic segment length calculation
@@ -318,10 +288,6 @@ def active_preference_learning(cfg, dataset_name=None):
         segmented_trajectories.extend(segment_trajectory(trajectory, cfg.data.segment_length, segments_per_trajectory))
     
     assert len(segmented_trajectories) == len(trajectories) * segments_per_trajectory, f"Total segments: {len(segmented_trajectories)}, should equal len(trajectories) {len(trajectories)} * segments_per_trajectory {segments_per_trajectory} = {len(trajectories) * segments_per_trajectory}"
-
-    # Sample subsamples from all segments
-    subsample_indices = random.sample(range(len(segmented_trajectories)), cfg.data.subsamples)
-    subsampled_segments = [segmented_trajectories[i] for i in subsample_indices]
     
     # Load pre-computed DTW distance matrix if augmentation is enabled
     distance_matrix = None
@@ -330,46 +296,39 @@ def active_preference_learning(cfg, dataset_name=None):
 
     if dtw_enabled:
         print("\nLoading pre-computed DTW distance matrix...")
-        distance_matrix, idx_mapping_dtw = load_dtw_matrix(cfg.data.data_path, cfg.data.segment_length)
-        import ipdb; ipdb.set_trace()
-        
-        if distance_matrix is not None:
-            print(f"Successfully loaded DTW distance matrix with shape: {distance_matrix.shape}")
-            if idx_mapping_dtw:
-                print(f"DTW matrix contains {len(idx_mapping_dtw)} segments")
-                # Create reverse mapping: original segment index to DTW matrix index
-                original_to_dtw_idx = {old_idx: new_idx for new_idx, old_idx in idx_mapping_dtw.items()}
-        else:
-            print("Warning: Failed to load DTW distance matrix. Augmentation will be disabled.")
-            dtw_enabled = False
+        dtw_matrix_file = Path(cfg.data.data_path).parent / f"dtw_matrix_{cfg.data.segment_length}.pkl"
 
-    # Create test dataset from a separate set of pairs for consistent evaluation
+        if not os.path.exists(dtw_matrix_file):
+            print(f"Warning: DTW matrix file not found at {dtw_matrix_file}")
+            assert False, "DTW matrix file not found. Please run preprocess_dtw_matrix.py"
+        else:
+            distance_matrix = pickle.load(open(dtw_matrix_file, "rb"))
+            print(f"Successfully loaded DTW distance matrix with shape: {distance_matrix.shape}")
+
     # We use 20% of all pairs for testing
-    test_size = min(int(0.2 * len(all_segment_pairs)), len(all_segment_pairs))
+    num_segments = distance_matrix.shape[0]
+
+    # Find all possible segment pairs (num_segments choose 2)
+    all_segment_pairs = list(itertools.combinations(range(num_segments), 2))
+    print(f"Total segment pairs: {len(all_segment_pairs)}")
+
+    # Test set
+    test_size = int(0.1 * len(all_segment_pairs))
     
-    if test_size == 0:
-        print("Warning: Not enough pairs for testing. Using all pairs for training.")
-        test_indices = []
-        test_pairs = []
-        test_preferences = []
-    else:
-        # Use the same random seed for reproducibility
-        test_indices = random.sample(range(len(all_segment_pairs)), test_size)
-        test_pairs = [all_segment_pairs[i] for i in test_indices]
-        test_preferences = [gt_preferences[i] for i in test_indices]
-    
-    # Create a set of test indices for faster lookup
-    test_indices_set = set(test_indices)
-    
+    test_indices = random.sample(range(len(all_segment_pairs)), test_size)
+    test_pairs = [all_segment_pairs[i] for i in test_indices]
+    test_preferences = get_gt_preferences(segmented_trajectories, test_pairs)
+        
     # Make sure test pairs are not in labeled or unlabeled sets
-    # First create initial dataset excluding test pairs
-    remaining_indices = [i for i in range(len(all_segment_pairs)) if i not in test_indices_set]
+    remaining_indices = [i for i in range(len(all_segment_pairs)) if i not in test_indices]
     remaining_pairs = [all_segment_pairs[i] for i in remaining_indices]
-    remaining_preferences = [gt_preferences[i] for i in remaining_indices]
+    remaining_preferences = get_gt_preferences(segmented_trajectories, remaining_pairs)
     
     # Now create the labeled/unlabeled split from the remaining pairs
     print(f"Creating initial dataset with {cfg.active_learning.initial_size} labeled pairs...")
     print(f"Using {len(remaining_pairs)} pairs after excluding test set")
+
+    import ipdb; ipdb.set_trace()
     
     labeled_pairs, labeled_preferences, unlabeled_pairs, unlabeled_indices = create_initial_dataset(
         remaining_pairs,
