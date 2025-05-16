@@ -1,8 +1,6 @@
 import torch
 import torch.nn as nn
 import numpy as np
-from utils.dataset_utils import bradley_terry_loss
-
 
 class RewardModel(nn.Module):
     """MLP-based reward model that takes state and action as input."""
@@ -89,13 +87,3 @@ class EnsembleRewardModel(nn.Module):
         """Return mean reward across all models."""
         rewards = self(observations, actions)
         return rewards.mean(dim=0)
-
-    def std_reward(self, observations, actions):
-        """Return standard deviation of rewards across all models."""
-        rewards = self(observations, actions)
-        return rewards.std(dim=0)
-
-    def disagreement(self, observations, actions):
-        """Return disagreement (variance) across models."""
-        rewards = self(observations, actions)
-        return rewards.var(dim=0)

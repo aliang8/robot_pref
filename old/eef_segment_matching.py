@@ -13,7 +13,7 @@ from omegaconf import DictConfig, OmegaConf
 from IPython.display import HTML, display
 
 # Import utility functions
-from trajectory_utils import (
+from utils.trajectory import (
     DEFAULT_DATA_PATHS,
     load_tensordict,
     compute_eef_position_ranges,

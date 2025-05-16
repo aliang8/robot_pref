@@ -19,8 +19,7 @@ class PreferenceDataset(Dataset):
             norm_method: Normalization method ('standard' or 'minmax')
             norm_stats: Pre-computed normalization statistics dict (optional)
         """
-        # Ensure all data is on CPU for multi-process loading
-        self.data = data.cpu() if isinstance(data, torch.Tensor) else data
+        self.data = data
         self.segment_pairs = segment_pairs
         self.segment_indices = segment_indices
         self.preferences = preferences
@@ -39,9 +38,7 @@ class PreferenceDataset(Dataset):
             else:
                 raise ValueError("Data dictionary must contain 'obs' or 'state' key")
         else:
-            # For tensor data, use its length
-            self.data_length = len(self.data)
-            self.obs_key = None
+            raise ValueError("Data must be a dictionary")
         
         # Compute or use provided normalization statistics
         self.norm_stats = {}
@@ -121,52 +118,16 @@ class PreferenceDataset(Dataset):
         start1, end1 = self.segment_indices[seg_idx1]
         start2, end2 = self.segment_indices[seg_idx2]
 
-        # Check bounds against the correct data length
-        if start1 < 0 or end1 >= self.data_length or start1 > end1:
-            raise IndexError(
-                f"Invalid segment indices for segment 1: {start1}:{end1}, data length: {self.data_length}"
-            )
-
-        if start2 < 0 or end2 >= self.data_length or start2 > end2:
-            raise IndexError(
-                f"Invalid segment indices for segment 2: {start2}:{end2}, data length: {self.data_length}"
-            )
-
-        # Get data for segments (handle dictionary data correctly)
         if isinstance(self.data, dict):
-            # Extract from dictionary (TensorDict)
             obs_key = self.obs_key
             action_key = "action"
 
             # Safely extract data
-            obs1 = self.data[obs_key][start1 : end1 + 1].clone().detach()
+            obs1 = self.data[obs_key][start1 : end1].clone().detach()
             actions1 = self.data[action_key][start1:end1].clone().detach()
-            obs2 = self.data[obs_key][start2 : end2 + 1].clone().detach()
+            obs2 = self.data[obs_key][start2 : end2].clone().detach()
             actions2 = self.data[action_key][start2:end2].clone().detach()
-        else:
-            # Extract directly from tensor
-            obs1 = self.data[start1 : end1 + 1].clone().detach()
-            actions1 = self.data[start1:end1].clone().detach()
-            obs2 = self.data[start2 : end2 + 1].clone().detach()
-            actions2 = self.data[start2:end2].clone().detach()
-
-        # Make observations and actions have the same length (important for concatenation)
-        # Method 1: Remove the last observation
-        obs1 = obs1[:-1]
-        obs2 = obs2[:-1]
-
-        # Ensure shapes are compatible
-        if obs1.shape[0] != actions1.shape[0]:
-            # Adjust shapes if somehow they're still mismatched
-            min_len = min(obs1.shape[0], actions1.shape[0])
-            obs1 = obs1[:min_len]
-            actions1 = actions1[:min_len]
-
-        if obs2.shape[0] != actions2.shape[0]:
-            min_len = min(obs2.shape[0], actions2.shape[0])
-            obs2 = obs2[:min_len]
-            actions2 = actions2[:min_len]
-        
+   
         # Apply normalization to observations
         if self.normalize_obs:
             obs1 = self._normalize_observations(obs1)
@@ -180,59 +141,7 @@ class PreferenceDataset(Dataset):
             # Otherwise create a new tensor
             pref = torch.tensor(self.preferences[idx], dtype=torch.long)
 
-        # Handle NaN values
-        if (
-            torch.isnan(obs1).any()
-            or torch.isnan(actions1).any()
-            or torch.isnan(obs2).any()
-            or torch.isnan(actions2).any()
-        ):
-            obs1 = torch.nan_to_num(obs1, nan=0.0)
-            actions1 = torch.nan_to_num(actions1, nan=0.0)
-            obs2 = torch.nan_to_num(obs2, nan=0.0)
-            actions2 = torch.nan_to_num(actions2, nan=0.0)
-
         return obs1, actions1, obs2, actions2, pref
-
-
-def bradley_terry_loss(rewards1, rewards2, preferences):
-    """
-    Compute the Bradley-Terry preference learning loss (binary cross-entropy).
-    
-    Args:
-        rewards1: Predicted rewards for the first segments in each pair
-                 Shape can be [batch_size] or [num_models, batch_size]
-        rewards2: Predicted rewards for the second segments in each pair
-                 Shape can be [batch_size] or [num_models, batch_size]
-        preferences: Labels indicating which segment is preferred (1 or 2)
-                    Shape is [batch_size]
-
-    Returns:
-        Loss value if rewards are [batch_size]
-        Loss tensor of shape [num_models] if rewards are [num_models, batch_size]
-    """
-    # Convert preferences to probabilities (1 = first segment preferred, 2 = second segment preferred)
-    # Use detach and clone for tensor conversion if input is already a tensor
-    if isinstance(preferences, torch.Tensor):
-        prefs = (preferences == 1).float()
-    else:
-        prefs = (torch.tensor(preferences) == 1).float()
-
-    # Compute probability that segment1 is preferred over segment2 using the Bradley-Terry model
-    # Add a small epsilon for numerical stability
-    eps = 1e-6
-    logits = torch.clamp(
-        rewards1 - rewards2, min=-50.0, max=50.0
-    )  # Clip logits to prevent overflow
-    pred_probs = torch.sigmoid(logits)
-    
-    # Standard binary cross-entropy loss: -(y*log(p) + (1-y)*log(1-p))
-    # This is negative log likelihood (higher means worse fit)
-    bce = -(prefs * torch.log(pred_probs + eps) + (1 - prefs) * torch.log(1 - pred_probs + eps))
-    
-    # Return mean over batch dimension
-    return torch.mean(bce, dim=-1)  # Mean over last dimension (batch)
-
 
 def shuffle_preference_dataset(dataset, seed=42):
     """

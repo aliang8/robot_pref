@@ -17,7 +17,7 @@ import hydra
 from omegaconf import DictConfig, OmegaConf
 import matplotlib.animation as animation
 
-from utils.dataset_utils import create_data_loaders
+from utils.dataset import create_data_loaders
 
 # For running in interactive environments
 is_notebook = "ipykernel" in sys.modules
@@ -27,7 +27,7 @@ else:
     from tqdm import tqdm
 
 # Import utility functions
-from trajectory_utils import (
+from utils.trajectory import (
     DEFAULT_DATA_PATHS,
     RANDOM_SEED,
     load_tensordict,
@@ -46,8 +46,8 @@ from eef_clustering import (
 from models.reward_models import RewardModel, EnsembleRewardModel
 
 # Import utility functions from the modular structure
-from utils.dataset_utils import PreferenceDataset, bradley_terry_loss
-from utils.active_learning_utils import (
+from utils.dataset import PreferenceDataset, bradley_terry_loss
+from utils.active_query_selection import (
     compute_uncertainty_scores,
     select_uncertain_pairs,
     select_active_pref_query,
@@ -55,7 +55,7 @@ from utils.active_learning_utils import (
 )
 
 # Import seed utility
-from utils.seed_utils import set_seed
+from utils.seed import set_seed
 
 
 def get_reward_based_preference(data, segment1, segment2):
@@ -210,7 +210,7 @@ def train_reward_model_from_preferences(
         )
 
         # Use the training_utils function
-        from utils.training_utils import train_model
+        from utils.training import train_model
 
         model, _, _ = train_model(
             model,
@@ -226,7 +226,7 @@ def train_reward_model_from_preferences(
         model = RewardModel(state_dim, action_dim, hidden_dims)
 
         # Use the train_reward_model from utils.training_utils
-        from utils.training_utils import train_model
+        from utils.training import train_model
 
         model, _, _ = train_model(
             model,

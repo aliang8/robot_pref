@@ -31,33 +31,33 @@ from d3rlpy.algos import IQL, DiscreteBC, BC, BCConfig, IQLConfig
 from d3rlpy.models.encoders import VectorEncoderFactory
 
 # Import utility functions
-from trajectory_utils import load_tensordict, RANDOM_SEED
-from utils.env_utils import MetaWorldEnvCreator, RobomimicEnvCreator
+from utils.trajectory import load_tensordict, RANDOM_SEED
+from utils.env import MetaWorldEnvCreator, RobomimicEnvCreator
 from utils.callbacks import WandbCallback, CompositeCallback
-from utils.wandb_utils import log_to_wandb
-from utils.eval_utils import evaluate_policy_manual, custom_evaluate_on_environment
-from utils.data_utils import AttrDict
+from utils.wandb import log_to_wandb
+from utils.eval import evaluate_policy_manual, custom_evaluate_on_environment
+from utils.data import AttrDict
 from utils.viz import create_video_grid
-from utils.seed_utils import set_seed
+from utils.seed import set_seed
 from models import RewardModel
 
 # Import evaluation and rendering utilities
-from utils.eval_utils import evaluate_policy_manual, custom_evaluate_on_environment
+from utils.eval import evaluate_policy_manual, custom_evaluate_on_environment
 
 # Import environment utilities
-from utils.env_utils import get_metaworld_env, MetaWorldEnvCreator
+from utils.env import get_metaworld_env, MetaWorldEnvCreator
 
 # Import visualization utilities
 from utils.viz import create_video_grid
 
 # Import data utilities
-from utils.data_utils import AttrDict
+from utils.data import AttrDict
 
 # Import callback utilities
 from utils.callbacks import WandbCallback, CompositeCallback
 
 # Import wandb utilities
-from utils.wandb_utils import log_to_wandb
+from utils.wandb import log_to_wandb
 
 # Set seed for reproducibility
 torch.manual_seed(RANDOM_SEED)

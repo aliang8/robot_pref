@@ -8,7 +8,7 @@ import matplotlib.pyplot as plt
 from pathlib import Path
 import random
 from tqdm import tqdm
-from trajectory_utils import DEFAULT_DATA_PATHS, load_tensordict
+from utils.trajectory import DEFAULT_DATA_PATHS, load_tensordict
 
 
 def list_available_datasets():

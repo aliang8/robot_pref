@@ -1,6 +1,6 @@
 import numpy as np
 import wandb
-from utils.wandb_utils import log_to_wandb, log_artifact
+from utils.wandb import log_to_wandb, log_artifact
 import os
 
 

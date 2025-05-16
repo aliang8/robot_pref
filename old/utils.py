@@ -1,203 +1,3 @@
-import os
-import random
-
-import matplotlib.pyplot as plt
-import numpy as np
-import torch
-from matplotlib import animation
-from PIL import Image
-from torchvision.transforms import Compose, Normalize, Resize, ToTensor
-from tqdm import tqdm
-
-import utils.dtw as dtw
-
-# Set torch hub cache directory
-os.environ["TORCH_HOME"] = "/scr/aliang80/.cache"
-
-# Set random seed for reproducibility
-RANDOM_SEED = 42
-
-# Default data paths for MetaWorld tasks
-DEFAULT_DATA_PATHS = [
-    "/scr/shared/clam/datasets/metaworld/assembly-v2/buffer_assembly-v2.pt",
-    "/scr/shared/clam/datasets/metaworld/bin-picking-v2/buffer_bin-picking-v2.pt",
-    "/scr/shared/clam/datasets/metaworld/peg-insert-side-v2/buffer_peg-insert-side-v2.pt",
-]
-
-
-def load_tensordict(file_path):
-    """Load tensordict data from file."""
-    data = torch.load(file_path, weights_only=False)
-    print(
-        f"Loaded TensorDict with shape: {data['image'].shape}, device: {data['image'].device}"
-    )
-    print(f"Fields: {list(data.keys())}")
-    return data
-
-
-def extract_images_from_tensordict(data):
-    """Extract images from tensordict and convert to proper format for DINOv2."""
-    images = data["image"]
-    print(f"Extracted images with shape: {images.shape}, type: {images.dtype}")
-    return images
-
-
-def compute_dinov2_embeddings(images, batch_size=32, cache_file=None):
-    """Compute DINOv2 embeddings for the images with caching support."""
-    # Check if cache exists
-    if cache_file and os.path.exists(cache_file):
-        print(f"Loading cached embeddings from {cache_file}")
-        embeddings = torch.load(cache_file)
-        print(
-            f"Loaded embeddings with shape: {embeddings.shape}, device: {embeddings.device}"
-        )
-        return embeddings
-
-    print(
-        f"Computing DINOv2 embeddings for {len(images)} images (this may take a while)..."
-    )
-
-    # Initialize DINOv2 model
-    model = torch.hub.load("facebookresearch/dinov2", "dinov2_vits14")
-    model = model.eval()
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    model = model.to(device)
-    print(f"DINOv2 model loaded on {device}")
-
-    # Define image transformation for PIL images
-    transform = Compose(
-        [
-            Resize((224, 224)),
-            ToTensor(),
-            Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-        ]
-    )
-
-    embeddings = []
-    # Create tqdm progress bar
-    total_batches = (len(images) + batch_size - 1) // batch_size
-    for i in tqdm(
-        range(0, len(images), batch_size),
-        desc=f"Processing batches (batch size: {batch_size})",
-        total=total_batches,
-    ):
-        batch_images = images[i : i + batch_size]
-
-        # Convert to proper format and apply transforms
-        processed_images = []
-        for img in batch_images:
-            # Convert torch tensor to PIL Image
-            img_np = img.cpu().numpy().astype(np.uint8)
-            pil_img = Image.fromarray(img_np)
-            # Apply transforms
-            processed_img = transform(pil_img)
-            processed_images.append(processed_img)
-
-        # Stack into batch
-        batch_tensor = torch.stack(processed_images)
-
-        # Compute embeddings
-        with torch.no_grad():
-            batch_tensor = batch_tensor.to(device)
-            batch_embeddings = model(batch_tensor)
-            embeddings.append(batch_embeddings.cpu())
-
-    # Concatenate all embeddings
-    all_embeddings = torch.cat(embeddings, dim=0)
-    print(
-        f"Generated embeddings with shape: {all_embeddings.shape}, device: {all_embeddings.device}"
-    )
-
-    # Cache the embeddings if cache_file is provided
-    if cache_file:
-        print(f"Caching embeddings to {cache_file}")
-        os.makedirs(os.path.dirname(os.path.abspath(cache_file)), exist_ok=True)
-        torch.save(all_embeddings, cache_file)
-
-    return all_embeddings
-
-
-def sample_segment_pairs(segments, segment_indices, rewards, n_pairs=5000):
-    """Generate synthetic preference pairs based on cumulative rewards.
-
-    Args:
-        segments: List of segment data
-        segment_indices: List of (start_idx, end_idx) tuples for each segment
-        rewards: Tensor of reward values for all transitions
-        n_pairs: Number of preference pairs to generate
-
-    Returns:
-        pairs: List of (idx1, idx2) tuples indicating segment pairs
-        preferences: List of preference labels (1 if first segment preferred, 2 if second)
-    """
-    n_segments = len(segments)
-    print(f"Generating {n_pairs} preference pairs from {n_segments} segments")
-
-    # Ensure rewards is on CPU for indexing
-    rewards_cpu = rewards.cpu() if isinstance(rewards, torch.Tensor) else rewards
-
-    # Sample random pairs of segment indices
-    pairs = []
-    preference_labels = []
-
-    # Keep generating pairs until we have enough or max attempts reached
-    max_attempts = n_pairs * 5  # Allow more attempts to handle cases with equal rewards
-
-    with tqdm(total=n_pairs, desc="Generating preference pairs") as pbar:
-        while len(pairs) < n_pairs and len(pairs) < max_attempts:
-            # Sample two different segments
-            idx1, idx2 = random.sample(range(n_segments), 2)
-
-            # Get segment indices
-            start1, end1 = segment_indices[idx1]
-            start2, end2 = segment_indices[idx2]
-
-            # Calculate cumulative reward for each segment
-            reward1 = rewards_cpu[start1 : end1 + 1].sum().item()
-            reward2 = rewards_cpu[start2 : end2 + 1].sum().item()
-
-            # Skip if rewards are too close (avoid ambiguous preferences)
-            if abs(reward1 - reward2) < 1e-6:
-                continue
-
-            # Add pair to the list
-            pairs.append((idx1, idx2))
-
-            # Assign preference label (1 if segment1 is preferred, 2 if segment2 is preferred)
-            if reward1 > reward2:
-                preference_labels.append(1)
-            else:
-                preference_labels.append(2)
-
-            pbar.update(1)
-
-    print(f"Generated {len(pairs)} preference pairs")
-    return pairs, preference_labels
-
-
-def compute_dtw_distance(query_segment, reference_segment):
-    """Compute DTW distance between two segments."""
-    try:
-        # Convert to numpy for dtw
-        query = query_segment.numpy()
-        reference = reference_segment.numpy()
-
-        # Use the custom DTW implementation
-        cost, _, _ = dtw.get_single_match(query, reference)
-
-        # Check if the cost is finite
-        if not np.isfinite(cost):
-            # Fall back to a simpler distance metric
-            cost = np.mean((query.mean(0) - reference.mean(0)) ** 2)
-    except Exception:
-        # Fall back to a simpler distance metric
-        query = query_segment.numpy()
-        reference = reference_segment.numpy()
-        cost = np.mean((query.mean(0) - reference.mean(0)) ** 2)
-
-    return cost
-
-
 def compute_dtw_distance_matrix(segments, max_segments=None, random_seed=42):
     """Compute DTW distance matrix between segments using the custom DTW implementation.
 
@@ -304,6 +104,86 @@ def compute_dtw_distance_matrix(segments, max_segments=None, random_seed=42):
     # Return the distance matrix and the mapping to original indices
     return distance_matrix, idx_mapping
 
+def compute_dtw_distance(query_segment, reference_segment):
+    """Compute DTW distance between two segments."""
+    try:
+        # Convert to numpy for dtw
+        query = query_segment.numpy()
+        reference = reference_segment.numpy()
+
+        # Use the custom DTW implementation
+        cost, _, _ = dtw.get_single_match(query, reference)
+
+        # Check if the cost is finite
+        if not np.isfinite(cost):
+            # Fall back to a simpler distance metric
+            cost = np.mean((query.mean(0) - reference.mean(0)) ** 2)
+    except Exception:
+        # Fall back to a simpler distance metric
+        query = query_segment.numpy()
+        reference = reference_segment.numpy()
+        cost = np.mean((query.mean(0) - reference.mean(0)) ** 2)
+
+    return cost
+
+
+def sample_segment_pairs(segments, segment_indices, rewards, n_pairs=5000):
+    """Generate synthetic preference pairs based on cumulative rewards.
+
+    Args:
+        segments: List of segment data
+        segment_indices: List of (start_idx, end_idx) tuples for each segment
+        rewards: Tensor of reward values for all transitions
+        n_pairs: Number of preference pairs to generate
+
+    Returns:
+        pairs: List of (idx1, idx2) tuples indicating segment pairs
+        preferences: List of preference labels (1 if first segment preferred, 2 if second)
+    """
+    n_segments = len(segments)
+    print(f"Generating {n_pairs} preference pairs from {n_segments} segments")
+
+    # Ensure rewards is on CPU for indexing
+    rewards_cpu = rewards.cpu() if isinstance(rewards, torch.Tensor) else rewards
+
+    # Sample random pairs of segment indices
+    pairs = []
+    preference_labels = []
+
+    # Keep generating pairs until we have enough or max attempts reached
+    max_attempts = n_pairs * 5  # Allow more attempts to handle cases with equal rewards
+
+    with tqdm(total=n_pairs, desc="Generating preference pairs") as pbar:
+        while len(pairs) < n_pairs and len(pairs) < max_attempts:
+            # Sample two different segments
+            idx1, idx2 = random.sample(range(n_segments), 2)
+
+            # Get segment indices
+            start1, end1 = segment_indices[idx1]
+            start2, end2 = segment_indices[idx2]
+
+            # Calculate cumulative reward for each segment
+            reward1 = rewards_cpu[start1 : end1 + 1].sum().item()
+            reward2 = rewards_cpu[start2 : end2 + 1].sum().item()
+
+            # Skip if rewards are too close (avoid ambiguous preferences)
+            if abs(reward1 - reward2) < 1e-6:
+                continue
+
+            # Add pair to the list
+            pairs.append((idx1, idx2))
+
+            # Assign preference label (1 if segment1 is preferred, 2 if segment2 is preferred)
+            if reward1 > reward2:
+                preference_labels.append(1)
+            else:
+                preference_labels.append(2)
+
+            pbar.update(1)
+
+    print(f"Generated {len(pairs)} preference pairs")
+    return pairs, preference_labels
+
 
 def find_top_matches(query_segment, all_segments, top_k=5, exclude_self=True):
     """Find top k segments with lowest DTW distance to the query segment."""
@@ -324,46 +204,6 @@ def find_top_matches(query_segment, all_segments, top_k=5, exclude_self=True):
     top_distances = distances[top_indices]
 
     return top_indices, top_distances
-
-
-def create_segment_animation(images, start_idx, end_idx, title=None):
-    """Create an animation of a segment for visualization."""
-    # Ensure images are on CPU for visualization
-    segment_images = images[start_idx : end_idx + 1].cpu()
-
-    fig = plt.figure(figsize=(4, 4))
-    if title:
-        plt.title(title)
-    plt.axis("off")
-
-    im = plt.imshow(segment_images[0].numpy())
-
-    def animate(i):
-        im.set_array(segment_images[i].numpy())
-        return [im]
-
-    anim = animation.FuncAnimation(
-        fig, animate, frames=len(segment_images), interval=200, blit=True
-    )
-
-    plt.close()
-    return anim
-
-
-def sample_segments(segments, segment_indices, n_samples=500):
-    """Sample n segments from the full list."""
-    if n_samples >= len(segments):
-        return segments, segment_indices
-
-    # Sample indices
-    sample_idxs = random.sample(range(len(segments)), n_samples)
-
-    # Extract sampled segments and indices
-    sampled_segments = [segments[i] for i in sample_idxs]
-    sampled_indices = [segment_indices[i] for i in sample_idxs]
-
-    return sampled_segments, sampled_indices
-
 
 def save_preprocessed_segments(data, output_file, compress=True):
     """Save preprocessed segments data to a file.
@@ -407,7 +247,6 @@ def save_preprocessed_segments(data, output_file, compress=True):
         print(f"Number of clusters: {len(np.unique(data['clusters']))}")
         print(f"Number of segment indices: {len(data['segment_indices'])}")
 
-
 def load_preprocessed_segments(file_path):
     """Load preprocessed segments data from file.
 
@@ -431,7 +270,6 @@ def load_preprocessed_segments(file_path):
         print(f"Data timestamp: {data['timestamp']}")
 
     return data
-
 
 def compute_eef_position_ranges(data_paths):
     """Compute the global min and max ranges for EEF positions across all datasets.
@@ -590,4 +428,3 @@ def get_gt_preferences(segmented_trajectories, pairs):
 
     return preference_labels
 
-    

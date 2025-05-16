@@ -3,30 +3,9 @@ import numpy as np
 import torch
 from torch import optim
 from tqdm import tqdm
+import wandb
 
-from utils.dataset_utils import bradley_terry_loss
-
-
-def log_wandb_metrics(train_loss, val_loss, epoch, lr=None, wandb=None):
-    """Log training metrics to wandb."""
-    if not wandb or not wandb.run:
-        return
-
-    metrics = {
-        "epoch": epoch,
-        "train_loss": train_loss,
-    }
-
-    # Only add validation loss if it exists
-    if val_loss is not None:
-        metrics["val_loss"] = val_loss
-
-    if lr is not None:
-        metrics["learning_rate"] = lr
-
-    # Log metrics to wandb
-    wandb.log(metrics)
-
+from utils.loss import bradley_terry_loss
 
 def evaluate_model_on_test_set(model, test_loader, device):
     """Evaluate model performance on the test set.
@@ -143,7 +122,7 @@ def train_model(
     device,
     num_epochs=50,
     lr=1e-4,
-    wandb=None,
+    wandb_run=None,
     is_ensemble=False,
     output_path=None,
 ):
@@ -180,10 +159,6 @@ def train_model(
     if not has_validation:
         print("No validation data provided - will train without validation")
 
-    # Clear CUDA cache before training
-    if device.type == "cuda":
-        torch.cuda.empty_cache()
-
     # Move model to device
     model = model.to(device)
 
@@ -204,12 +179,7 @@ def train_model(
             progress_bar
         ):
             # Move data to device
-            obs1 = obs1.to(device, non_blocking=True)
-            actions1 = actions1.to(device, non_blocking=True)
-            obs2 = obs2.to(device, non_blocking=True)
-            actions2 = actions2.to(device, non_blocking=True)
-            pref = pref.to(device, non_blocking=True)
-
+            obs1, actions1, obs2, actions2, pref = obs1.to(device), actions1.to(device), obs2.to(device), actions2.to(device), pref.to(device)
             optimizer.zero_grad(set_to_none=True)
 
             # Compute rewards directly using the forward method
@@ -241,6 +211,9 @@ def train_model(
             train_loss += batch_loss.item()
             progress_bar.set_postfix({"loss": f"{batch_loss.item():.4f}"})
 
+            if wandb_run:
+                wandb_run.log({"train/loss": batch_loss.item()})
+
         avg_train_loss = train_loss / len(train_loader)
         train_losses.append(avg_train_loss)
         
@@ -259,12 +232,7 @@ def train_model(
                 for batch_idx, (obs1, actions1, obs2, actions2, pref) in enumerate(
                     val_progress
                 ):
-                    # Move data to device
-                    obs1 = obs1.to(device, non_blocking=True)
-                    actions1 = actions1.to(device, non_blocking=True)
-                    obs2 = obs2.to(device, non_blocking=True)
-                    actions2 = actions2.to(device, non_blocking=True)
-                    pref = pref.to(device, non_blocking=True)
+                    obs1, actions1, obs2, actions2, pref = obs1.to(device), actions1.to(device), obs2.to(device), actions2.to(device), pref.to(device)
 
                     # Compute rewards directly
                     reward1 = model(obs1, actions1)
@@ -293,14 +261,13 @@ def train_model(
             avg_val_loss = 0.0
         val_losses.append(avg_val_loss)
 
+        if wandb_run:
+            wandb_run.log({"val/loss": avg_val_loss})
+
         if epoch % 10 == 0:
             print(
                 f"Epoch {epoch + 1}/{num_epochs} - Train Loss: {avg_train_loss:.4f}, Val Loss: {avg_val_loss:.4f}"
             )
-
-        # Log to wandb
-        if wandb:
-            log_wandb_metrics(avg_train_loss, avg_val_loss, epoch, lr, wandb)
 
     # Plot training curve
     if train_losses:
@@ -319,8 +286,8 @@ def train_model(
         print(f"Training curve saved to {plot_path}")
 
         # Log the plot to wandb
-        if wandb and wandb.run:
-            wandb.log({"training_curve": wandb.Image(plot_path)})
+        if wandb_run:
+            wandb_run.log({"training_curve": wandb.Image(plot_path)})
 
         plt.close()
 

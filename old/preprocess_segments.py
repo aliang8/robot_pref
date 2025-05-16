@@ -8,7 +8,7 @@ import matplotlib.pyplot as plt
 from tqdm import tqdm
 
 # Import utility functions
-from trajectory_utils import (
+from utils.trajectory import (
     DEFAULT_DATA_PATHS,
     RANDOM_SEED,
     load_tensordict,
@@ -115,7 +115,7 @@ def main():
         essential_fields = ["obs", "state", "action", "reward", "episode", "image"]
         for field in essential_fields:
             if field in data:
-                preprocessed_data[field] = data[field]
+                preprocessed_data[field] = dat a[field]
                 print(f"Added field '{field}' with shape {data[field].shape}")
 
     # Save preprocessed data
