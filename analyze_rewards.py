@@ -10,71 +10,12 @@ import random
 
 # Import utility functions
 from utils.trajectory import DEFAULT_DATA_PATHS, load_tensordict
-
+from utils.seed import set_seed
 from models.reward_models import RewardModel
+from utils.data import process_data_trajectories
 
 
-def split_into_episodes(data):
-    """Split data into episodes based on episode IDs.
-
-    Args:
-        data: TensorDict with observations, actions, and episode IDs
-
-    Returns:
-        List of dictionaries, each containing data for one episode
-    """
-    # Extract the observations and episode IDs
-    observations = data["obs"] if "obs" in data else data["state"]
-    actions = data["action"]
-    episode_ids = data["episode"]
-
-    # Get unique episodes
-    unique_episodes = torch.unique(episode_ids).tolist()
-    print(f"Found {len(unique_episodes)} unique episodes")
-
-    # Split data by episodes
-    episodes = []
-    for episode_id in unique_episodes:
-        # Get indices for this episode
-        ep_indices = torch.where(episode_ids == episode_id)[0]
-
-        # Skip empty episodes
-        if len(ep_indices) == 0:
-            continue
-
-        # Get data for this episode
-        # TODO: fix this
-        ep_obs = observations[ep_indices]
-        ep_actions = (
-            actions[ep_indices[:-1]] if len(ep_indices) > 1 else actions[ep_indices]
-        )
-
-        # Get rewards if available
-        ep_rewards = None
-        if "reward" in data:
-            ep_rewards = data["reward"][ep_indices]
-
-        if len(ep_obs) > len(ep_actions):
-            ep_obs = ep_obs[:-1]
-            ep_rewards = ep_rewards[:-1]
-
-        # Create episode dictionary
-        episode = {
-            "id": episode_id,
-            "obs": ep_obs.cpu(),
-            "action": ep_actions.cpu(),
-            "reward": ep_rewards.cpu(),
-            "length": len(ep_indices),
-        }
-        episodes.append(episode)
-
-    # Sort episodes by length (descending)
-    episodes.sort(key=lambda x: x["length"], reverse=True)
-
-    return episodes
-
-
-def predict_rewards(model, episodes, device, batch_size=32):
+def predict_rewards(model, episodes):
     """Predict rewards for each step in the episodes using the reward model.
 
     Args:
@@ -93,25 +34,9 @@ def predict_rewards(model, episodes, device, batch_size=32):
         obs = episode["obs"]
         actions = episode["action"]
 
-        # Process in batches
-        all_rewards = []
-
-        with torch.no_grad():
-            for start_idx in range(0, len(obs), batch_size):
-                end_idx = min(start_idx + batch_size, len(obs))
-
-                # Get batch data
-                batch_obs = obs[start_idx:end_idx].to(device)
-                batch_actions = actions[start_idx:end_idx].to(device)
-
-                # Predict rewards using the model's forward method which applies tanh
-                batch_rewards = model(batch_obs, batch_actions).cpu()
-                all_rewards.append(batch_rewards)
-
-        # Combine all rewards
-        episode["predicted_rewards"] = (
-            torch.cat(all_rewards) if len(all_rewards) > 1 else all_rewards[0]
-        )
+        # Predict rewards
+        predicted_rewards = model(obs, actions)
+        episode["predicted_rewards"] = predicted_rewards
 
     return episodes
 
@@ -272,10 +197,7 @@ def analyze_rewards(
         device: Device to run the model on
         random_seed: Random seed for reproducibility
     """
-    # Set random seed for reproducibility
-    random.seed(random_seed)
-    np.random.seed(random_seed)
-    torch.manual_seed(random_seed)
+    set_seed(random_seed)
 
     # Set device
     if device is None:
@@ -315,7 +237,7 @@ def analyze_rewards(
 
     # Split data into episodes
     print("Splitting data into episodes")
-    episodes = split_into_episodes(data)
+    episodes = process_data_trajectories(data_path)
     print(f"Found {len(episodes)} episodes")
 
     # Load reward model
@@ -324,15 +246,8 @@ def analyze_rewards(
     model.load_state_dict(torch.load(model_path, map_location=device))
     model = model.to(device)
 
-    # Sample random episodes if we have more than requested
-    if len(episodes) > num_episodes:
-        print(f"Sampling {num_episodes} random episodes from {len(episodes)} total")
-        sampled_episodes = random.sample(episodes, num_episodes)
-    else:
-        print(
-            f"Using all {len(episodes)} episodes (less than requested {num_episodes})"
-        )
-        sampled_episodes = episodes
+    print(f"Sampling {num_episodes} random episodes from {len(episodes)} total")
+    sampled_episodes = random.sample(episodes, num_episodes)
 
     # Predict rewards for each episode
     print("Predicting rewards for episodes")
@@ -352,56 +267,3 @@ def analyze_rewards(
     )
 
     print(f"Analysis complete. Results saved to {output_dir}")
-
-
-def main():
-    parser = argparse.ArgumentParser(
-        description="Analyze rewards predicted by a reward model"
-    )
-    parser.add_argument(
-        "--data_path",
-        type=str,
-        default=DEFAULT_DATA_PATHS[0],
-        help="Path to the dataset",
-    )
-    parser.add_argument(
-        "--model_path",
-        type=str,
-        default="/scr/aliang80/robot_pref/models/state_action_reward_model.pt",
-        help="Path to the trained reward model",
-    )
-    parser.add_argument(
-        "--output_dir",
-        type=str,
-        help="Directory to save the plots (default: same directory as model_path)",
-    )
-    parser.add_argument(
-        "--num_episodes",
-        type=int,
-        default=9,
-        help="Number of episodes to analyze (default: 9 for a 3x3 grid)",
-    )
-    parser.add_argument(
-        "--use_cpu", action="store_true", help="Use CPU instead of CUDA"
-    )
-    parser.add_argument(
-        "--random_seed", type=int, default=42, help="Random seed for reproducibility"
-    )
-    args = parser.parse_args()
-
-    # Set device
-    device = torch.device("cpu" if args.use_cpu else "cuda")
-
-    # Run analysis
-    analyze_rewards(
-        args.data_path,
-        args.model_path,
-        args.output_dir,
-        args.num_episodes,
-        device,
-        args.random_seed,
-    )
-
-
-if __name__ == "__main__":
-    main()
