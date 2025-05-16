@@ -19,3 +19,4 @@ bc_model/*
 analysis/*
 results/*
 d3rlpy_logs/*
+old/*
