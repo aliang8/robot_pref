@@ -63,7 +63,7 @@ def main(cfg: DictConfig):
             run_name = f"reward_{dataset_name}_{cfg.data.num_pairs}_{time.strftime('%Y%m%d_%H%M%S')}"
 
         # Initialize wandb
-        wandb.init(
+        wandb_run = wandb.init(
             project=cfg.wandb.project,
             entity=cfg.wandb.entity,
             name=run_name,
@@ -72,7 +72,9 @@ def main(cfg: DictConfig):
             notes=cfg.wandb.notes,
         )
 
-        print(f"Wandb initialized: {wandb.run.name}")
+        print(f"Wandb initialized: {wandb_run.name}")
+    else:
+        wandb_run = None
 
     output_dir = cfg.output.output_dir
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -128,22 +130,6 @@ def main(cfg: DictConfig):
     val_loader = dataloaders["val"]
     test_loader = dataloaders["test"]
 
-    # Log dataset information to wandb
-    if cfg.wandb.use_wandb:
-        wandb.config.update(
-            {
-                "dataset": {
-                    "name": Path(cfg.data.data_path).stem,
-                    "total_pairs": len(preference_dataset),
-                    "train_size": dataloaders["train_size"],
-                    "val_size": dataloaders["val_size"],
-                    "test_size": dataloaders["test_size"],
-                    "observation_dim": state_dim,
-                    "action_dim": action_dim,
-                }
-            }
-        )
-
     # Initialize reward model
     model = RewardModel(state_dim, action_dim, hidden_dims=cfg.model.hidden_dims)
 
@@ -189,7 +175,7 @@ def main(cfg: DictConfig):
         device,
         num_epochs=cfg.training.num_epochs,
         lr=cfg.model.lr,
-        wandb=wandb if cfg.wandb.use_wandb else None,
+        wandb=wandb_run,
         output_path=training_curve_path,
     )
 
@@ -226,7 +212,7 @@ def main(cfg: DictConfig):
     )
 
     # Log the analysis results to wandb
-    if cfg.wandb.use_wandb:
+    if wandb_run is not None:
         reward_grid_path = os.path.join(output_dir, "reward_grid.png")
         if os.path.exists(reward_grid_path):
             print("Logging reward analysis grid to wandb")
@@ -236,7 +222,7 @@ def main(cfg: DictConfig):
 
 
     # Finish wandb run
-    if cfg.wandb.use_wandb and wandb.run:
+    if wandb_run is not None:
         wandb.finish()
 
     print("\nReward model training complete!")

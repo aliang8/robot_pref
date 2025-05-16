@@ -4,7 +4,7 @@ import torch
 from torch import optim
 from tqdm import tqdm
 
-from utils.dataset import bradley_terry_loss
+from utils.loss import bradley_terry_loss
 
 
 def log_wandb_metrics(train_loss, val_loss, epoch, lr=None, wandb=None):
