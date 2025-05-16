@@ -8,16 +8,7 @@ import matplotlib.pyplot as plt
 from pathlib import Path
 import random
 from tqdm import tqdm
-from utils.trajectory import DEFAULT_DATA_PATHS, load_tensordict
-
-
-def list_available_datasets():
-    """List all available datasets from DEFAULT_DATA_PATHS."""
-    print("\nAvailable datasets:")
-    for i, path in enumerate(DEFAULT_DATA_PATHS):
-        dataset_name = Path(path).stem
-        print(f"  [{i}] {dataset_name}: {path}")
-    print()
+from utils.data import load_tensordict
 
 
 def extract_episode_returns(data):
@@ -84,42 +75,6 @@ def extract_episode_returns(data):
     print(f"Max return: {np.max(episode_returns):.2f}")
 
     return episode_data
-
-
-def check_data_for_nans(data):
-    """Check a tensordict for NaN values.
-
-    Args:
-        data: TensorDict containing trajectory data
-
-    Returns:
-        dict: Dictionary with NaN statistics for each key
-    """
-    print("\nChecking for NaN values in data...")
-    nan_stats = {}
-
-    for key, value in data.items():
-        if isinstance(value, torch.Tensor):
-            nan_count = torch.isnan(value).sum().item()
-            total_elements = value.numel()
-            nan_percentage = (
-                100 * nan_count / total_elements if total_elements > 0 else 0
-            )
-
-            nan_stats[key] = {
-                "nan_count": nan_count,
-                "total_elements": total_elements,
-                "nan_percentage": nan_percentage,
-            }
-
-            if nan_count > 0:
-                print(
-                    f"  Field '{key}' contains {nan_count}/{total_elements} ({nan_percentage:.2f}%) NaN values"
-                )
-
-    # Return NaN statistics
-    return nan_stats
-
 
 def plot_returns_histogram(returns, output_path, bins=50, title=None):
     """Plot a histogram of episode returns."""
@@ -295,9 +250,6 @@ def create_balanced_dataset(data, episode_data, selected_indices, output_path):
     total_kept = np.sum(keep_mask)
     print(f"Keeping {total_kept} transitions out of {len(episode_ids)}")
 
-    # Check for NaN values in the selected data
-    has_nans = False
-
     for key in data.keys():
         if isinstance(data[key], torch.Tensor):
             # Keep only the selected indices
@@ -310,13 +262,11 @@ def create_balanced_dataset(data, episode_data, selected_indices, output_path):
                 print(
                     f"  Warning: {key} has {nan_count}/{selected_tensor.numel()} NaN values. Replacing with zeros."
                 )
+                import ipdb; ipdb.set_trace()
                 selected_tensor = torch.nan_to_num(selected_tensor, nan=0.0)
 
             new_data[key] = selected_tensor
             print(f"  {key}: {new_data[key].shape}")
-
-    if has_nans:
-        print("Warning: NaN values were found and replaced with zeros.")
 
     # Save the new dataset
     print(f"Saving balanced dataset to {output_path}_balanced")
@@ -379,31 +329,11 @@ def main():
 
     args = parser.parse_args()
 
-    # List available datasets
-    list_available_datasets()
-
-    # If no data path or index is specified, use the first dataset
-    if args.data_path is None and args.dataset_idx is None:
-        args.dataset_idx = 0
-        print(
-            f"No dataset specified. Using first dataset (index 0): {DEFAULT_DATA_PATHS[0]}"
-        )
-
-    # Get data path from index if specified
-    if args.dataset_idx is not None:
-        if args.dataset_idx < 0 or args.dataset_idx >= len(DEFAULT_DATA_PATHS):
-            print(f"Error: Dataset index {args.dataset_idx} is out of range")
-            return
-        args.data_path = DEFAULT_DATA_PATHS[args.dataset_idx]
-
     # Create output directory
     os.makedirs(args.output_dir, exist_ok=True)
 
     # Load data
     data = load_tensordict(args.data_path)
-
-    # Check for NaN values
-    check_data_for_nans(data)
 
     # Extract episode returns
     episode_data = extract_episode_returns(data)

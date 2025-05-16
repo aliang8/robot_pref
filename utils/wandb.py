@@ -4,15 +4,16 @@ import os
 from pathlib import Path
 
 
-def log_to_wandb(metrics, prefix="", epoch=None):
+def log_to_wandb(metrics, prefix="", epoch=None, wandb_run=None):
     """Simplified function to log metrics to wandb with prefix support.
 
     Args:
         metrics: Dict of metrics to log
         prefix: Prefix to add to metric names (e.g., "train", "eval")
         epoch: Current epoch (optional)
+        wandb_run: Wandb run object (optional)
     """
-    if not wandb.run:
+    if not wandb_run:
         return
 
     # Add prefix to keys
@@ -39,4 +40,4 @@ def log_to_wandb(metrics, prefix="", epoch=None):
 
     # Log scalar metrics
     if log_dict:
-        wandb.log(log_dict)
+        wandb_run.log(log_dict)

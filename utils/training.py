@@ -47,46 +47,23 @@ def evaluate_model_on_test_set(model, test_loader, device):
                 # Replicate preferences for ensemble models
                 ensemble_pref = pref.unsqueeze(0).repeat(model.num_models, 1)
                 
-                # Compute loss using ensemble preferences
-                loss = bradley_terry_loss(return1, return2, ensemble_pref)
-                if isinstance(loss, torch.Tensor) and loss.dim() > 0:
-                    loss = loss.mean()  # Average across ensemble models
-                test_loss += loss.item()
-                
-                # For predictions and accuracy, use the mean prediction across ensemble
-                ensemble_return1 = return1.mean(dim=0)  # Average across models
-                ensemble_return2 = return2.mean(dim=0)
-                
-                # Use averaged returns for prediction and accuracy
-                pred_pref = torch.where(ensemble_return1 > ensemble_return2, 
-                                       torch.ones_like(pref), 
-                                       torch.ones_like(pref) * 2)
-                
-                # Compute logpdf using mean predictions for consistency
-                bt_logits = ensemble_return1 - ensemble_return2
-                bt_probs = torch.sigmoid(bt_logits)
-                p = torch.where(pref == 1, bt_probs, 1 - bt_probs)
-                logp = torch.log(p)
-                
+                import ipdb; ipdb.set_trace()
             else:
                 # Standard non-ensemble model
                 return1 = reward1.sum(dim=1)  # Sum over time dimension
                 return2 = reward2.sum(dim=1)
                 
-                # Compute standard loss
-                loss = bradley_terry_loss(return1, return2, pref)
-                test_loss += loss.item()
-                
-                # Get predictions
-                pred_pref = torch.where(return1 > return2, 
-                                        torch.ones_like(pref), 
-                                        torch.ones_like(pref) * 2)
-                
-                # Compute logpdf
-                bt_logits = return1 - return2
-                bt_probs = torch.sigmoid(bt_logits)
-                p = torch.where(pref == 1, bt_probs, 1 - bt_probs)
-                logp = torch.log(p)
+            # Compute standard loss
+            loss = bradley_terry_loss(return1, return2, pref)
+            test_loss += loss.item()
+            
+            # Get predictions
+            pred_pref = torch.where(return1 > return2, 
+                                    torch.ones_like(pref), 
+                                    torch.ones_like(pref) * 2)
+            
+            # Compute logpdf
+            logp = -loss
             
             # Compute accuracy (same for both cases)
             correct = (pred_pref == pref).sum().item()

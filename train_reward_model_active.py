@@ -15,13 +15,10 @@ from omegaconf import DictConfig, OmegaConf
 
 import wandb
 
-# Import shared models and utilities
 from models import EnsembleRewardModel, RewardModel
 from utils.active_query_selection import (
     select_active_pref_query,
 )
-
-# Import utility functions
 from utils.data import (
     get_gt_preferences,
     load_tensordict,
@@ -30,6 +27,7 @@ from utils.dataset import PreferenceDataset, create_data_loaders
 from utils.seed import set_seed
 from utils.training import evaluate_model_on_test_set, train_model
 from utils.wandb import log_to_wandb
+from utils.analyze_rewards import analyze_rewards 
 
 
 def find_similar_segments_dtw(query_idx, k, distance_matrix):
@@ -57,45 +55,6 @@ def find_similar_segments_dtw(query_idx, k, distance_matrix):
 
     similar_indices = np.argsort(distances)[:k]
     return similar_indices.tolist()
-
-
-def run_reward_analysis(model_path, data_path, output_dir, num_episodes=9, device=None, random_seed=42, wandb_run=None):
-    """Run reward analysis on the trained model and log results to wandb.
-    
-    Args:
-        model_path: Path to the trained reward model
-        data_path: Path to the dataset
-        output_dir: Directory to save the analysis plots
-        num_episodes: Number of episodes to analyze
-        device: Device to run the analysis on
-        random_seed: Random seed for reproducibility
-        wandb_run: Wandb run object for logging
-    """
-    # Import analyze_rewards here to avoid circular imports
-    from analyze_rewards import analyze_rewards
-    
-    print("\n--- Running Reward Analysis ---")
-    
-    # Run the analysis
-    analyze_rewards(
-        data_path=data_path,
-        model_path=model_path,
-        output_dir=output_dir,
-        num_episodes=num_episodes,
-        device=device,
-        random_seed=random_seed
-    )
-    
-    # Log the analysis results to wandb
-    if wandb_run is not None and wandb_run.run:
-        reward_grid_path = os.path.join(output_dir, "reward_grid.png")
-        if os.path.exists(reward_grid_path):
-            print("Logging reward analysis grid to wandb")
-            wandb_run.log({"reward_analysis/grid": wandb.Image(reward_grid_path)})
-        else:
-            print(f"Warning: Could not find reward grid image at {reward_grid_path}")
-    
-    print("Reward analysis completed successfully")
 
 
 def train_final_reward_model(labeled_pairs, segment_indices, labeled_preferences, data_cpu, 
@@ -219,13 +178,7 @@ def active_preference_learning(cfg, dataset_name=None):
     # Get random seed from config (already set in main)
     random_seed = cfg.get('random_seed', 42)
     
-    # Setup device
-    if cfg.hardware.use_cpu:
-        device = torch.device("cpu")
-    else:
-        cuda_device = f"cuda:{cfg.hardware.gpu}" if torch.cuda.is_available() else "cpu"
-        device = torch.device(cuda_device)
-    
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
     
     # Initialize wandb
@@ -240,7 +193,7 @@ def active_preference_learning(cfg, dataset_name=None):
             run_name = f"active_reward_{dataset_name}_{time.strftime('%Y%m%d_%H%M%S')}"
         
         # Initialize wandb
-        wandb.init(
+        wandb_run = wandb.init(
             project=cfg.wandb.project,
             entity=cfg.wandb.entity,
             name=run_name,
@@ -249,7 +202,7 @@ def active_preference_learning(cfg, dataset_name=None):
             notes=cfg.wandb.notes
         )
         
-        print(f"Wandb initialized: {wandb.run.name}")
+        print(f"Wandb initialized: {wandb_run.name}")
     
     # Create output directory
     os.makedirs(cfg.output.output_dir, exist_ok=True)
@@ -271,25 +224,9 @@ def active_preference_learning(cfg, dataset_name=None):
     
     print(f"Observation dimension: {state_dim}, Action dimension: {action_dim}")
 
-    # # Load data into trajectories
-    # trajectories = process_data_trajectories(cfg.data.data_path)
-
-    # # Dynamic segment length calculation
-    # segments_per_trajectory = len(trajectories[0]["obs"]) // cfg.data.segment_length + 1
-    # print(f"Using segments per trajectory: {segments_per_trajectory}")
-
-    # # Segment trajectories
-    # segmented_trajectories = []
-    # for trajectory in trajectories:
-    #     segmented_trajectories.extend(segment_trajectory(trajectory, cfg.data.segment_length, segments_per_trajectory))
-    
-    # assert len(segmented_trajectories) == len(trajectories) * segments_per_trajectory, f"Total segments: {len(segmented_trajectories)}, should equal len(trajectories) {len(trajectories)} * segments_per_trajectory {segments_per_trajectory} = {len(trajectories) * segments_per_trajectory}"
-    
     # Load pre-computed DTW distance matrix and segment indices if augmentation is enabled
     distance_matrix = None
     segment_indices = None
-    # idx_mapping_dtw = None
-    # original_to_dtw_idx = None
 
     if dtw_enabled:
         print("\nLoading pre-computed DTW distance matrix and segment indices...")
@@ -314,13 +251,6 @@ def active_preference_learning(cfg, dataset_name=None):
     test_indices = random.sample(range(len(all_segment_pairs)), test_size)
     test_pairs = [all_segment_pairs[i] for i in test_indices]
 
-    # # For each segment index in the test pairs, collect the corresponding segment indices
-    # test_segment_indices = []
-    # for idx1, idx2 in test_pairs:
-    #     test_segment_indices.append(segment_indices[idx1])
-    #     test_segment_indices.append(segment_indices[idx2])
-    # # Remove duplicates, since some segments may appear in multiple pairs
-    # test_segment_indices = list({tuple(x) for x in test_segment_indices})
     # Compute test preferences using the ground truth function
     test_preferences = get_gt_preferences(data_cpu, segment_indices, test_pairs)
     
@@ -664,6 +594,7 @@ def active_preference_learning(cfg, dataset_name=None):
     # Clean up resources before final model training
     gc.collect()
     torch.cuda.empty_cache()
+
     # Train final model on all labeled data
     final_model, final_metrics, train_losses, val_losses = train_final_reward_model(
         labeled_pairs, 
@@ -694,7 +625,7 @@ def active_preference_learning(cfg, dataset_name=None):
             "consistent_test_loss": consistent_metrics["test_loss"],
             "total_queries": total_labeled,
             "total_iterations": iteration
-        })
+        }, wandb_run=wandb_run)
     
     # Get model directory name from config
     model_dir_name = cfg.output.model_dir_name
@@ -753,66 +684,36 @@ def active_preference_learning(cfg, dataset_name=None):
     learning_curve_path = os.path.join(model_dir, "learning_curve.png")
     plt.savefig(learning_curve_path, dpi=300, bbox_inches='tight')
     
-    if cfg.wandb.use_wandb:
-        wandb.log({"learning_curve": wandb.Image(learning_curve_path)})
+    if wandb_run:
+        wandb_run.log({"learning_curve": wandb.Image(learning_curve_path)})
     
     # Save final model in model directory
-    model_path = os.path.join(model_dir, "final_model.pt")
+    model_path = os.path.join(model_dir, "model.pt")
     torch.save(final_model.state_dict(), model_path)
     
-    # Save metrics
     metrics_path = os.path.join(model_dir, "metrics.pkl")
     with open(metrics_path, "wb") as f:
         pickle.dump(metrics, f)
     
-    # Save configuration
     config_path = os.path.join(model_dir, "config.yaml")
     with open(config_path, "w") as f:
         f.write(OmegaConf.to_yaml(cfg))
     
     print(f"\nActive learning completed. Final model saved to {model_path}")
     
-    # Run reward analysis on the final model
-    analysis_dir = os.path.join(model_dir, "analysis")
-    os.makedirs(analysis_dir, exist_ok=True)
-    
-    # Check if reward analysis is enabled (default to True)
-    run_analysis = cfg.get('run_reward_analysis', True)
-    
-    if run_analysis:
-        try:
-            run_reward_analysis(
-                model_path=model_path,
-                data_path=cfg.data.data_path,
-                output_dir=analysis_dir,
-                num_episodes=cfg.get('analysis_episodes', 9),
-                device=device,
-                random_seed=random_seed,
-                wandb_run=wandb if cfg.wandb.use_wandb else None
-            )
-        except Exception as e:
-            print(f"Warning: Error during reward analysis: {e}")
-    
-    # Log artifacts to wandb
-    # if cfg.wandb.use_wandb:
-    #     log_artifact(
-    #         model_path,
-    #         artifact_type="model",
-    #         metadata={
-    #             "method": cfg.active_learning.uncertainty_method,
-    #             "fine_tune": cfg.active_learning.fine_tune,
-    #             "initial_size": cfg.active_learning.initial_size,
-    #             "max_queries": cfg.active_learning.max_queries,
-    #             "batch_size": cfg.active_learning.batch_size,
-    #             "num_queries": total_labeled,
-    #             "final_accuracy": final_metrics["test_accuracy"],
-    #             "consistent_accuracy": consistent_metrics["test_accuracy"]
-    #         }
-    #     )
-        
-    #     # Finish wandb run
-    #     wandb.finish()
 
+    print("\n--- Running Reward Analysis ---")
+    
+    # Run the analysis
+    analyze_rewards(
+        data_path=cfg.data.data_path,
+        model_path=model_path,
+        output_dir=model_dir,
+        num_episodes=9,
+        device=device,
+        random_seed=random_seed,
+        wandb_run=wandb_run
+    )
 
 @hydra.main(config_path="config", config_name="reward_model_active", version_base=None)
 def main(cfg: DictConfig):

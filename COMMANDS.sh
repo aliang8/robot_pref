@@ -4,6 +4,11 @@ python eef_clustering.py --preprocessed_data preprocessed/assembly_v2_segments.p
 
 python collect_cluster_preferences.py --preprocessed_data preprocessed/assembly_v2_segments.pt --clustering_results results/eef_clustering/clustering_results.pkl --output_dir results/preferences
 
+# make mixed expertise dataset
+python create_mixed_expertise_dataset.py \
+    --data_path=/scr/shared/clam/datasets/metaworld/assembly-v2/buffer_assembly-v2_clean.pt \
+    --output_dir=labeled_datasets
+
 # train reward model without active learning
 python train_reward_model.py \
     data.data_path=/scr/aliang80/robot_pref/labeled_datasets/buffer_assembly-v2_balanced.pt \

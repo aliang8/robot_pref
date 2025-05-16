@@ -12,8 +12,6 @@ active_learning:
   use_random_sampling: false
   # Number of pairs to select in each iteration
   batch_size: 1
-  # Initial number of randomly labeled pairs before active learning starts
-  initial_size: 1
   # Whether to fine-tune the model from the previous iteration or train from scratch
   fine_tune: false
   # If fine-tuning, the learning rate to use

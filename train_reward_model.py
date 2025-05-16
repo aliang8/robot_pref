@@ -6,14 +6,15 @@ from pathlib import Path
 import hydra
 import torch
 from omegaconf import DictConfig, OmegaConf
-from tqdm import tqdm
 
 import wandb
+import random
+import itertools
 
 # Import shared models and utilities
 from models.reward_models import RewardModel
 
-from utils.data import load_tensordict, process_data_trajectories, segment_trajectory
+from utils.data import load_tensordict, segment_episodes, get_gt_preferences, process_data_trajectories
 from utils.dataset import (
     PreferenceDataset,
     create_data_loaders,
@@ -21,7 +22,7 @@ from utils.dataset import (
 from utils.training import train_model, evaluate_model_on_test_set
 from utils.seed import set_seed
 from utils.wandb import log_to_wandb
-from analyze_rewards import analyze_rewards
+from utils.analyze_rewards import analyze_rewards
 
 @hydra.main(config_path="config", config_name="reward_model", version_base=None)
 def main(cfg: DictConfig):
@@ -82,7 +83,6 @@ def main(cfg: DictConfig):
     effective_num_workers = cfg.training.num_workers
     effective_pin_memory = cfg.training.pin_memory
     
-    
     print(f"Loading data from file: {cfg.data.data_path}")
     data = load_tensordict(cfg.data.data_path)
 
@@ -98,26 +98,33 @@ def main(cfg: DictConfig):
     }
     print(f"Loaded data with {len(observations)} observations")
 
-    trajectories = process_data_trajectories(data_cpu)
-    segments = segment_trajectory(trajectories, cfg.data.segment_length)
+    segments, segment_indices = segment_episodes(data_cpu, cfg.data.segment_length)
+
+    # Find all possible segment pairs (num_segments choose 2) and sample data.subsamples from them
+    all_segment_pairs = list(itertools.combinations(range(len(segment_indices)), 2))
+    all_segment_pairs = random.sample(all_segment_pairs, cfg.data.num_pairs)
+    print(f"Sampled {len(all_segment_pairs)} pairs from {len(all_segment_pairs)} total pairs")
+
+    print("Computing preference labels")
+    preferences = get_gt_preferences(data_cpu, segment_indices, all_segment_pairs)
 
     print(
         f"Final data stats - Observation dimension: {state_dim}, Action dimension: {action_dim}"
     )
     print(
-        f"Working with {len(segment_pairs) if segment_pairs is not None else 0} preference pairs across {len(segment_indices) if segment_indices is not None else 0} segments"
+        f"Working with {len(all_segment_pairs) if all_segment_pairs is not None else 0} preference pairs across {len(segment_indices) if segment_indices is not None else 0} segments"
     )
 
     # Create dataset
     preference_dataset = PreferenceDataset(
-        data_cpu, segment_pairs, segment_indices, preferences
+        data_cpu, all_segment_pairs, segment_indices, preferences
     )
 
     # Create data loaders
     dataloaders = create_data_loaders(
         preference_dataset,
-        train_ratio=0.8,  # 80% for training
-        val_ratio=0.1,  # 10% for validation
+        train_ratio=0.8,  
+        val_ratio=0.1,  
         batch_size=cfg.training.batch_size,
         num_workers=effective_num_workers,
         pin_memory=effective_pin_memory,
@@ -132,29 +139,11 @@ def main(cfg: DictConfig):
 
     # Initialize reward model
     model = RewardModel(state_dim, action_dim, hidden_dims=cfg.model.hidden_dims)
-
-    # Log model info to wandb
-    if cfg.wandb.use_wandb:
-        wandb.config.update(
-            {
-                "model_info": {
-                    "hidden_dims": cfg.model.hidden_dims,
-                    "total_parameters": sum(p.numel() for p in model.parameters()),
-                }
-            }
-        )
-
-        # Log model graph if possible
-        if hasattr(wandb, "watch"):
-            wandb.watch(model, log="all")
-
     print(f"Reward model: {model}")
     print(f"Total parameters: {sum(p.numel() for p in model.parameters())}")
 
     # Start timing the training
     start_time = time.time()
-
-    # Logging
     os.makedirs(output_dir, exist_ok=True)
     model_dir = output_dir
     dataset_name = Path(cfg.data.data_path).stem
@@ -168,14 +157,14 @@ def main(cfg: DictConfig):
 
     # Train the model
     print("\nTraining reward model...")
-    model, train_losses, val_losses = train_model(
+    model, *_ = train_model(
         model,
         train_loader,
         val_loader,
         device,
         num_epochs=cfg.training.num_epochs,
         lr=cfg.model.lr,
-        wandb=wandb_run,
+        wandb_run=wandb_run,
         output_path=training_curve_path,
     )
 
@@ -190,38 +179,26 @@ def main(cfg: DictConfig):
     test_metrics = evaluate_model_on_test_set(model, test_loader, device)
 
     # Log final test results to wandb
-    if cfg.wandb.use_wandb:
+    if wandb_run is not None:
         log_to_wandb(test_metrics, prefix="test")
 
     # Save the model
     torch.save(model.state_dict(), model_path)
-    print(f"Model saved with detailed name: {model_path}")
+    print(f"Model saved to: {model_path}")
 
     # Run reward analysis
-    analysis_dir = os.path.join(model_dir, sub_dir, "analysis")
-    os.makedirs(analysis_dir, exist_ok=True)
-
-     # Run the analysis
+    episodes = process_data_trajectories(cfg.data.data_path)    
+    reward_max = data_cpu["reward"].max().item()
+    reward_min = data_cpu["reward"].min().item()
     analyze_rewards(
-        data_path=cfg.data.data_path,
-        model_path=model_path,
-        output_dir=output_dir,
-        num_episodes=cfg.data.num_episodes,
-        device=device,
-        random_seed=random_seed,
+        model=model,
+        episodes=episodes,
+        output_dir=os.path.join(model_dir, sub_dir),
+        wandb_run=wandb_run,
+        reward_max=reward_max,
+        reward_min=reward_min
     )
-
-    # Log the analysis results to wandb
-    if wandb_run is not None:
-        reward_grid_path = os.path.join(output_dir, "reward_grid.png")
-        if os.path.exists(reward_grid_path):
-            print("Logging reward analysis grid to wandb")
-            wandb.log({"reward_analysis/grid": wandb.Image(reward_grid_path)})
-        else:
-            print(f"Warning: Could not find reward grid image at {reward_grid_path}")
-
-
-    # Finish wandb run
+    
     if wandb_run is not None:
         wandb.finish()
 

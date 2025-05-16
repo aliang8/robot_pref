@@ -1,6 +1,6 @@
 import torch
 import numpy as np
-
+import tqdm
 
 # Define a simple AttrDict class that provides dot access to dictionaries
 class AttrDict(dict):
@@ -114,19 +114,14 @@ def get_gt_preferences(data, segment_indices, pairs):
         list: List of preference labels (1 if first segment preferred, 2 if second segment preferred).
     """
     preference_labels = []
-    import tqdm
 
     for idx1, idx2 in tqdm.tqdm(pairs):
         # Get the segment indices
-        episode_idx1, start_idx1, end_idx1 = segment_indices[idx1]
-        episode_idx2, start_idx2, end_idx2 = segment_indices[idx2]
-
-        # Extract the rewards for each segment
-        episode_mask1 = data["episode"] == episode_idx1
-        episode_mask2 = data["episode"] == episode_idx2
+        start_idx1, end_idx1 = segment_indices[idx1]
+        start_idx2, end_idx2 = segment_indices[idx2]    
         
-        reward1 = data["reward"][episode_mask1][start_idx1:end_idx1].sum().item()
-        reward2 = data["reward"][episode_mask2][start_idx2:end_idx2].sum().item()
+        reward1 = data["reward"][start_idx1:end_idx1].sum().item()
+        reward2 = data["reward"][start_idx2:end_idx2].sum().item()
 
         # Determine preference
         if reward1 > reward2:

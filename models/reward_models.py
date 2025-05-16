@@ -17,7 +17,7 @@ class RewardModel(nn.Module):
             layers.append(
                 nn.LayerNorm(hidden_dim)
             )  # Add layer normalization for stability
-            layers.append(nn.ReLU())
+            layers.append(nn.LeakyReLU(0.1))
             prev_dim = hidden_dim
 
         layers.append(nn.Linear(prev_dim, output_dim))
