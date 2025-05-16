@@ -20,7 +20,7 @@ def compute_uncertainty_scores(
     Args:
         model: Reward model (either single model or ensemble)
         segment_pairs: List of segment pair indices
-        segment_indices: List of (start_idx, end_idx) tuples for each segment
+        segment_indices: List of (start_idx, end_idx) or (ep, start, end) tuples for each segment
         data: Data dictionary containing observations and actions
         device: Device to run computation on
         method: Uncertainty estimation method ("entropy", "disagreement", or "random")
@@ -40,6 +40,11 @@ def compute_uncertainty_scores(
     data_cpu = {
         k: v.cpu() if isinstance(v, torch.Tensor) else v for k, v in data.items()
     }
+
+    # Determine if segment_indices is (ep, start, end) or (start, end)
+    # We'll check the type/length of the first entry
+    first_entry = segment_indices[0]
+    is_ep_format = len(first_entry) == 3
 
     # Extract unique segments to avoid redundant computations
     unique_segments = set()
@@ -64,9 +69,18 @@ def compute_uncertainty_scores(
             batch_actions = []
 
             for seg_idx in batch_segments:
-                start, end = segment_indices[seg_idx]
-                batch_obs.append(data_cpu[obs_key][start:end].clone())
-                batch_actions.append(data_cpu[action_key][start:end].clone())
+                if is_ep_format:
+                    ep, start, end = segment_indices[seg_idx]
+                    episode_mask = data_cpu["episode"] == ep
+                    # Assume data_cpu[obs_key] and data_cpu[action_key] are lists of tensors per episode
+                    obs = data_cpu[obs_key][episode_mask][start:end].clone()
+                    act = data_cpu[action_key][episode_mask][start:end].clone()
+                else:
+                    start, end = segment_indices[seg_idx]
+                    obs = data_cpu[obs_key][start:end].clone()
+                    act = data_cpu[action_key][start:end].clone()
+                batch_obs.append(obs)
+                batch_actions.append(act)
 
             # Stack into batch tensors
             stacked_obs = torch.stack(batch_obs).to(device)
@@ -135,7 +149,7 @@ def compute_uncertainty_scores(
 
 def select_active_pref_query(
     reward_model,
-    segments,
+    num_segments,
     segment_indices,
     data,
     device,
@@ -149,7 +163,7 @@ def select_active_pref_query(
 
     Args:
         reward_model: Trained reward model for uncertainty estimation
-        segments: List of trajectory segments
+        num_segments: Number of segments in the dataset
         segment_indices: List of (start_idx, end_idx) for each segment
         data: TensorDict with observations and actions
         device: Device to run computation on
@@ -162,8 +176,6 @@ def select_active_pref_query(
     Returns:
         all_pairs_ranked: List of all segment pairs ranked by uncertainty (highest to lowest)
     """
-    n_segments = len(segments)
-
     # Determine approach based on parameters
     if candidate_pairs is not None:
         # Use provided candidate pairs directly
@@ -174,13 +186,13 @@ def select_active_pref_query(
         print(f"Using random candidate sampling with {n_candidates} candidate pairs")
         candidate_pairs = []
         for _ in range(n_candidates):
-            i, j = random.sample(range(n_segments), 2)
+            i, j = random.sample(range(num_segments), 2)
             candidate_pairs.append((i, j))
     else:
         # Approach 2: Generate all possible segment pairs (more thorough but expensive)
-        print(f"Generating all possible pairs from {n_segments} segments")
+        print(f"Generating all possible pairs from {num_segments} segments")
         candidate_pairs = [
-            (i, j) for i in range(n_segments) for j in range(i + 1, n_segments)
+            (i, j) for i in range(num_segments) for j in range(i + 1, num_segments)
         ]
 
         # If too many pairs, warn and limit

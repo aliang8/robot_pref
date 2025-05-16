@@ -9,7 +9,7 @@ import numpy as np
 from tqdm import tqdm
 
 import utils.dtw as dtw
-from utils.trajectory import process_data_trajectories, segment_trajectory
+from utils.data import load_tensordict, segment_episodes
 
 
 def compute_dtw_distance_matrix(segments):
@@ -100,25 +100,20 @@ def main():
         if os.path.exists(dtw_matrix_file) and overwrite:
             print(f"Overwriting existing DTW matrix file: {dtw_matrix_file}")
 
-        trajectories = process_data_trajectories(data_path)
-        segments_per_trajectory = len(trajectories[0]["obs"]) // segment_length + 1
-        print(f"Using segments per trajectory: {segments_per_trajectory}")
+        data = load_tensordict(data_path)
 
-        segments = []
-        for trajectory in trajectories:
-            segments.extend(segment_trajectory(trajectory, segment_length, segments_per_trajectory))
-
-        assert len(segments) == len(trajectories) * segments_per_trajectory, (
-            f"Total segments: {len(segments)}, should equal len(trajectories) {len(trajectories)} * segments_per_trajectory {segments_per_trajectory} = {len(trajectories) * segments_per_trajectory}"
-        )
+        segments, segment_indices = segment_episodes(data, segment_length)
 
         dtw_matrix = compute_dtw_distance_matrix(segments)
 
         print(f"Saving DTW matrix and segment IDs to cache: {dtw_matrix_file}")
         with open(dtw_matrix_file, "wb") as f:
-            pickle.dump(dtw_matrix, f)
+            pickle.dump((dtw_matrix, segment_indices), f)
 
+    print(f"len(segments): {len(segments)}")
+    print(f"len(segment_indices): {len(segment_indices)}")
     print(f"DTW matrix shape: {dtw_matrix.shape}")
+
 
 
 if __name__ == "__main__":

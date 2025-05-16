@@ -1,4 +1,4 @@
-import numpy as np
+import torch
 
 
 # Define a simple AttrDict class that provides dot access to dictionaries
@@ -99,3 +99,90 @@ def segment_trajectory(trajectory, segment_length, segments_per_trajectory=3):
         segments.append(segment)
 
     return segments
+
+def get_gt_preferences(data, segment_indices, pairs):
+    """
+    Get ground truth preferences for segments based on cumulative rewards.
+
+    Args:
+        data (dict): Raw data containing all trajectories.
+        segment_indices (list): List of tuples containing (episode_idx, start_idx, end_idx) for each segment.
+        pairs (list): List of tuples containing segment indices to compute ground truth preferences.
+
+    Returns:
+        list: List of preference labels (1 if first segment preferred, 2 if second segment preferred).
+    """
+    preference_labels = []
+    import tqdm
+
+    for idx1, idx2 in tqdm.tqdm(pairs):
+        # Get the segment indices
+        episode_idx1, start_idx1, end_idx1 = segment_indices[idx1]
+        episode_idx2, start_idx2, end_idx2 = segment_indices[idx2]
+
+        # Extract the rewards for each segment
+        episode_mask1 = data["episode"] == episode_idx1
+        episode_mask2 = data["episode"] == episode_idx2
+        
+        reward1 = data["reward"][episode_mask1][start_idx1:end_idx1].sum().item()
+        reward2 = data["reward"][episode_mask2][start_idx2:end_idx2].sum().item()
+
+        # Determine preference
+        if reward1 > reward2:
+            preference_labels.append(1)
+        else:
+            preference_labels.append(2)
+
+    return preference_labels
+
+
+def segment_episodes(data, segment_length):
+    """Segment episodes into smaller segments.
+
+    Args:
+        data: Raw TensorDict data to segment
+        segment_length: Length of each segment
+
+    Returns:
+        segments: List of segments
+    """
+    episode_lengths = [len(np.where(data["episode"] == i)[0]) for i in np.unique(data["episode"])]
+    assert len(set(episode_lengths)) == 1, "All episodes should be the same length"
+
+    # Calculate segments_per_trajectory based on the episode length
+    segments_per_trajectory = episode_lengths[0] // segment_length + 1
+    
+    # Get segments from each episode
+    segments = []
+    segment_indices = []
+    unique_episodes = np.unique(data["episode"])
+    
+    for episode_idx in unique_episodes:
+        # Extract the current episode data
+        episode_mask = data["episode"] == episode_idx
+        episode_data = {k: v[episode_mask] for k, v in data.items()}
+        
+        total_length = len(episode_data["obs"])
+        
+        # Create segments_per_trajectory evenly spaced segments
+        for i in range(segments_per_trajectory):
+            # Calculate evenly spaced starting points across the trajectory
+            start_idx = (
+                i * (total_length - segment_length) // max(1, segments_per_trajectory - 1)
+            )
+            end_idx = start_idx + segment_length
+            
+            # Ensure end_idx doesn't exceed the episode length
+            end_idx = min(end_idx, total_length)
+
+            segment_indices.append((episode_idx, start_idx, end_idx))
+            
+            # Create segment dictionary
+            segment = {}
+            for key in episode_data.keys():
+                segment[key] = episode_data[key][start_idx:end_idx]
+            
+            segments.append(segment)
+        
+    return segments, segment_indices
+
