@@ -1,4 +1,5 @@
 import torch
+import numpy as np
 
 
 # Define a simple AttrDict class that provides dot access to dictionaries
@@ -151,19 +152,29 @@ def segment_episodes(data, segment_length):
 
     # Calculate segments_per_trajectory based on the episode length
     segments_per_trajectory = episode_lengths[0] // segment_length + 1
-    
+
     # Get segments from each episode
     segments = []
     segment_indices = []
     unique_episodes = np.unique(data["episode"])
-    
+
+    # Compute the starting absolute index for each episode in the full dataset
+    episode_start_indices = {}
+    abs_idx = 0
+    for episode_idx in unique_episodes:
+        episode_mask = data["episode"] == episode_idx
+        episode_len = np.sum(episode_mask.numpy())
+        episode_start_indices[episode_idx] = abs_idx
+        abs_idx += episode_len
+
     for episode_idx in unique_episodes:
         # Extract the current episode data
         episode_mask = data["episode"] == episode_idx
         episode_data = {k: v[episode_mask] for k, v in data.items()}
-        
+
         total_length = len(episode_data["obs"])
-        
+        episode_abs_start = episode_start_indices[episode_idx]
+
         # Create segments_per_trajectory evenly spaced segments
         for i in range(segments_per_trajectory):
             # Calculate evenly spaced starting points across the trajectory
@@ -171,18 +182,22 @@ def segment_episodes(data, segment_length):
                 i * (total_length - segment_length) // max(1, segments_per_trajectory - 1)
             )
             end_idx = start_idx + segment_length
-            
+
             # Ensure end_idx doesn't exceed the episode length
             end_idx = min(end_idx, total_length)
 
-            segment_indices.append((episode_idx, start_idx, end_idx))
-            
+            # Compute absolute indices in the full dataset
+            abs_start_idx = episode_abs_start + start_idx
+            abs_end_idx = episode_abs_start + end_idx
+
+            segment_indices.append((abs_start_idx, abs_end_idx))
+
             # Create segment dictionary
             segment = {}
             for key in episode_data.keys():
                 segment[key] = episode_data[key][start_idx:end_idx]
-            
+
             segments.append(segment)
-        
+
     return segments, segment_indices
 

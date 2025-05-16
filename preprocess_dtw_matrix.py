@@ -115,6 +115,5 @@ def main():
     print(f"DTW matrix shape: {dtw_matrix.shape}")
 
 
-
 if __name__ == "__main__":
     main()

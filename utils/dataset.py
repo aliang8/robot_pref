@@ -12,8 +12,8 @@ class PreferenceDataset(Dataset):
         
         Args:
             data: Dictionary containing observations and actions, or tensor
-            segment_pairs: List of pairs of segment indices [(i, j), ...] or [(ep1, start1, end1), (ep2, start2, end2)]
-            segment_indices: List of segment start/end indices [(start, end), ...] or [(ep, start, end), ...]
+            segment_pairs: List of pairs of segment indices [(i, j), ...]
+            segment_indices: List of segment start/end indices [(start, end), ...]
             preferences: List of preferences (1 = first segment preferred, 2 = second segment preferred)
             normalize_obs: Whether to normalize observations (default: False)
             norm_method: Normalization method ('standard' or 'minmax')
@@ -114,58 +114,20 @@ class PreferenceDataset(Dataset):
         return len(self.segment_pairs)
 
     def __getitem__(self, idx):
-        # Support two formats for segment_pairs:
-        # 1. segment_pairs is a list of (i, j) where i, j are indices into segment_indices
-        # 2. segment_pairs is a list of ((ep1, start1, end1), (ep2, start2, end2))
-        seg1, seg2 = self.segment_pairs[idx]
+        seg_idx1, seg_idx2 = self.segment_pairs[idx]
+        start1, end1 = self.segment_indices[seg_idx1]
+        start2, end2 = self.segment_indices[seg_idx2]
 
-        # Case 1: segment_pairs are indices into segment_indices
-        if (isinstance(seg1, int) and isinstance(seg2, int)):
-            # segment_indices can be (start, end) or (ep, start, end)
-            seg_idx1, seg_idx2 = seg1, seg2
-            seg1_info = self.segment_indices[seg_idx1]
-            seg2_info = self.segment_indices[seg_idx2]
-        # Case 2: segment_pairs are tuples of (ep, start, end)
-        elif (isinstance(seg1, (tuple, list)) and len(seg1) == 3 and isinstance(seg2, (tuple, list)) and len(seg2) == 3):
-            seg1_info = seg1
-            seg2_info = seg2
-        else:
-            raise ValueError("segment_pairs must be a list of (i, j) indices or ((ep1, start1, end1), (ep2, start2, end2)) tuples")
-
-        # Now seg1_info and seg2_info are each (ep, start, end) or (start, end)
-        # If segment info is (ep, start, end), we need to extract the correct episode
-        if len(seg1_info) == 3:
-            ep1, start1, end1 = seg1_info
-            mask1 = (self.data["episode"] == ep1)
+        if isinstance(self.data, dict):
             obs_key = self.obs_key
             action_key = "action"
-            obs1 = self.data[obs_key][mask1][start1:end1].clone().detach()
-            actions1 = self.data[action_key][mask1][start1:end1].clone().detach()
-        elif len(seg1_info) == 2:
-            start1, end1 = seg1_info
-            obs_key = self.obs_key
-            action_key = "action"
-            obs1 = self.data[obs_key][start1:end1].clone().detach()
+
+            # Safely extract data
+            obs1 = self.data[obs_key][start1 : end1].clone().detach()
             actions1 = self.data[action_key][start1:end1].clone().detach()
-        else:
-            raise ValueError("Segment info must be (start, end) or (ep, start, end)")
-
-        if len(seg2_info) == 3:
-            ep2, start2, end2 = seg2_info
-            mask2 = (self.data["episode"] == ep2)
-            obs_key = self.obs_key
-            action_key = "action"
-            obs2 = self.data[obs_key][mask2][start2:end2].clone().detach()
-            actions2 = self.data[action_key][mask2][start2:end2].clone().detach()
-        elif len(seg2_info) == 2:
-            start2, end2 = seg2_info
-            obs_key = self.obs_key
-            action_key = "action"
-            obs2 = self.data[obs_key][start2:end2].clone().detach()
+            obs2 = self.data[obs_key][start2 : end2].clone().detach()
             actions2 = self.data[action_key][start2:end2].clone().detach()
-        else:
-            raise ValueError("Segment info must be (start, end) or (ep, start, end)")
-
+   
         # Apply normalization to observations
         if self.normalize_obs:
             obs1 = self._normalize_observations(obs1)
