@@ -35,27 +35,19 @@ def compute_dtw_distance_matrix(segments):
     with tqdm(total=total_comparisons, desc="Computing DTW distances") as pbar:
         for i in range(n_segments):
             for j in range(i + 1, n_segments):
-                query = segments[i]["obs"].numpy()
-                reference = segments[j]["obs"].numpy()
-                try:
-                    cost, _, _ = dtw.get_single_match(query, reference)
-                    if not np.isfinite(cost):
-                        print(f"WARNING: Non-finite cost ({cost}) for segments {i} and {j}")
-                        cost = np.mean((query.mean(0) - reference.mean(0)) ** 2)
-                        non_finite_count += 1
-                    distance_matrix[i, j] = cost
-                    distance_matrix[j, i] = cost
-                    if np.isfinite(cost):
-                        min_dist = min(min_dist, cost)
-                        max_dist = max(max_dist, cost)
-                        sum_dist += cost
-                        count += 1
-                except Exception as e:
-                    print(f"Error computing DTW for segments {i} and {j}: {e}")
-                    fallback_cost = np.mean((query.mean(0) - reference.mean(0)) ** 2)
-                    distance_matrix[i, j] = fallback_cost
-                    distance_matrix[j, i] = fallback_cost
-                    non_finite_count += 1
+                # EE positions
+                query = segments[i]["obs"].numpy()[:, :3] 
+                reference = segments[j]["obs"].numpy()[:, :3] 
+
+                # Relative
+                query = query[1:] - query[:-1]
+                reference = reference[1:] - reference[:-1]
+
+                cost, _ = dtw.get_single_match(query, reference)
+
+                distance_matrix[i, j] = cost
+                distance_matrix[j, i] = cost
+
                 pbar.update(1)
 
     if count > 0:

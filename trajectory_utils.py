@@ -558,3 +558,36 @@ def segment_trajectory(trajectory, segment_length, segments_per_trajectory=3):
         segments.append(segment)
 
     return segments
+
+
+def get_gt_preferences(segmented_trajectories, pairs):
+    """
+    Get ground truth preferences for segments based on cumulative rewards.
+
+    Args:
+        segmented_trajectories (list): List of all segmented trajectories.
+        pairs (list): List of tuples containing segment indices to compute ground truth preferences.
+
+    Returns:
+        list: List of tuples containing segment indices and their corresponding preferences.
+    """
+    preference_labels = []
+
+    for idx1, idx2 in pairs:
+        # Get the segments
+        segment1 = segmented_trajectories[idx1]
+        segment2 = segmented_trajectories[idx2]
+
+        # Compute cumulative rewards
+        reward1 = segment1["reward"].sum().item()
+        reward2 = segment2["reward"].sum().item()
+
+        # Determine preference
+        if reward1 > reward2:
+            preference_labels.append(1)
+        else:
+            preference_labels.append(2)
+
+    return preference_labels
+
+    
