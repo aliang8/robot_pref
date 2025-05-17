@@ -68,29 +68,12 @@ def compute_uncertainty_scores(
             stacked_obs = torch.stack(batch_obs).to(device)
             stacked_actions = torch.stack(batch_actions).to(device)
 
-            # Forward pass through the model
-            if method == "entropy":
-                if hasattr(model, "mean_reward"):
-                    # Use mean prediction from ensemble
-                    batch_rewards = model.mean_reward(stacked_obs, stacked_actions)
-                else:
-                    # Single model
-                    batch_rewards = model(stacked_obs, stacked_actions)
+            # [N, B, T]
+            batch_rewards = model(stacked_obs, stacked_actions)
 
-                # Store rewards for each segment in the batch
-                for j, seg_idx in enumerate(batch_segments):
-                    segment_rewards[seg_idx] = batch_rewards[j]
-
-            elif method == "disagreement":
-                if not hasattr(model, "models"):
-                    raise ValueError("Disagreement method requires an ensemble model")
-
-                # Get reward predictions from all models
-                batch_rewards = model(stacked_obs, stacked_actions)
-
-                # Store rewards for each segment in the batch
-                for j, seg_idx in enumerate(batch_segments):
-                    segment_rewards[seg_idx] = batch_rewards[:, j]
+            # Store rewards for each segment in the batch
+            for j, seg_idx in enumerate(batch_segments):
+                segment_rewards[seg_idx] = batch_rewards[:, j]
 
     # Now compute uncertainty scores for each pair using pre-computed rewards
     uncertainty_scores = []
@@ -124,6 +107,8 @@ def compute_uncertainty_scores(
 
             # better to compute variance over raw reward differences
             score = logits.var().item()
+        else:
+            raise ValueError(f"Invalid method: {method}")
 
         uncertainty_scores.append(score)
 

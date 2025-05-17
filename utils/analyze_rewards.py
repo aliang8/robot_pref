@@ -142,24 +142,10 @@ def plot_reward_grid(
                     fontsize=14,
                 )
 
-            # Smooth ground truth rewards
-            if smooth_window > 1 and len(normalized_gt) > smooth_window:
-                gt_rewards_smooth = np.convolve(normalized_gt, kernel, mode="valid")
-                gt_steps_smooth = steps[smooth_window - 1 :]
-
-                # Plot on same axis with different color (save line object for legend)
-                gt_line = ax.plot(
-                    gt_steps_smooth,
-                    gt_rewards_smooth,
-                    "g--",
-                    linewidth=3,
-                    label="Ground Truth",
-                )[0]  # Get the line object
-            else:
-                # Plot on same axis with different color
-                gt_line = ax.plot(
-                    steps, normalized_gt, "g--", linewidth=2, label="Ground Truth"
-                )[0]  # Get the line object
+            # Plot on same axis with different color
+            gt_line = ax.plot(
+                steps, normalized_gt, "g--", linewidth=2, label="Ground Truth"
+            )[0]  # Get the line object
 
             # Set grid
             ax.grid(True, alpha=0.3)
