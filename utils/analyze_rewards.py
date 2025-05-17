@@ -9,6 +9,7 @@ from tqdm import tqdm
 import random
 import wandb
 import seaborn as sns
+from utils.seed import set_seed
 
 sns.set_style("white")
 sns.set_style("ticks")
@@ -42,7 +43,7 @@ def predict_rewards(model, episodes):
 def plot_reward_grid(
     episodes,
     rand_indices,
-    output_dir,
+    output_file,
     grid_size=(3, 3),
     smooth_window=5,
     reward_min=None,
@@ -174,23 +175,25 @@ def plot_reward_grid(
         )
 
     # Save the figure
-    os.makedirs(output_dir, exist_ok=True)
-    plt.savefig(f"{output_dir}/reward_grid.png", dpi=300, bbox_inches="tight")
+    plt.savefig(output_file, dpi=300, bbox_inches="tight")
     plt.close()
 
 
 def analyze_rewards(
-    model, episodes, output_dir=None, num_episodes=9, reward_min=None, reward_max=None, wandb_run=None
+    model, episodes, output_file=None, num_episodes=9, reward_min=None, reward_max=None, wandb_run=None, random_seed=None
 ):
     """Analyze rewards for episodes in the dataset.
 
     Args:
         model: Trained reward model
         episodes: List of episode dictionaries
-        output_dir: Directory to save the plots. If None, uses the model directory.
+        output_file: Directory to save the plots. If None, uses the model directory.
         num_episodes: Number of episodes to analyze
         wandb_run: Wandb run to log
     """
+    if random_seed is not None:
+        set_seed(random_seed)
+
     print(f"Sampling {num_episodes} random episodes from {len(episodes)} total")
     rand_indices = random.sample(range(len(episodes)), num_episodes)
     sampled_episodes = [episodes[i] for i in rand_indices]
@@ -199,21 +202,18 @@ def analyze_rewards(
     print("Predicting rewards for episodes")
     sampled_episodes = predict_rewards(model, sampled_episodes)
 
-    # Create output directory
-    os.makedirs(output_dir, exist_ok=True)
-
     # Plot rewards in a grid
     print("Creating reward grid plot")
     plot_reward_grid(
         sampled_episodes,
         rand_indices,
-        output_dir,
+        output_file,
         grid_size=(3, 3),
         reward_min=reward_min,
         reward_max=reward_max,
     )
 
-    print(f"Analysis complete. Results saved to {output_dir}")
+    print(f"Analysis complete. Results saved to {output_file}")
 
     if wandb_run:
-        wandb_run.log({"reward_grid": wandb.Image(os.path.join(output_dir, "reward_grid.png"))})
+        wandb_run.log({"reward_grid": wandb.Image(output_file)})

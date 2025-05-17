@@ -13,14 +13,14 @@ def compute_entropy(probs):
 
 
 def compute_uncertainty_scores(
-    model, segment_pairs, segment_indices, data, method="entropy", device="cuda"   
+    model, segment_pairs, segment_start_end, data, method="entropy", device="cuda"   
 ):
     """Compute uncertainty scores for segment pairs using specified method.
 
     Args:
         model: Reward model (either single model or ensemble)
         segment_pairs: List of segment pair indices
-        segment_indices: List of (start_idx, end_idx) or (ep, start, end) tuples for each segment
+        segment_start_end: List of (start_idx, end_idx) or (ep, start, end) tuples for each segment
         data: Data dictionary containing observations and actions
         method: Uncertainty estimation method ("entropy", "disagreement", or "random")
 
@@ -35,14 +35,7 @@ def compute_uncertainty_scores(
     obs_key = "obs" if "obs" in data else "state"
     action_key = "action"
 
-    # Extract unique segments to avoid redundant computations
-    unique_segments = set()
-    for seg_idx1, seg_idx2 in segment_pairs:
-        unique_segments.add(seg_idx1)
-        unique_segments.add(seg_idx2)
-
-    unique_segments = sorted(list(unique_segments))
-    print(f"Computing rewards for {len(unique_segments)} unique segments")
+    print(f"Predicting rewards for {len(segment_start_end)} segment pairs")
 
     # Process segments in batches for more efficient forward passes
     batch_size = 256
@@ -50,15 +43,14 @@ def compute_uncertainty_scores(
 
     with torch.no_grad():
         # Process segments in batches
-        for i in range(0, len(unique_segments), batch_size):
-            batch_segments = unique_segments[i : i + batch_size]
-
+        for i in range(0, len(segment_start_end), batch_size):
             # Collect observations and actions for this batch
             batch_obs = []
             batch_actions = []
+            batch_inds = np.arange(i, min(i + batch_size, len(segment_start_end)))
 
-            for seg_idx in batch_segments:
-                start, end = segment_indices[seg_idx]
+            for seg_idx in batch_inds:
+                start, end = segment_start_end[seg_idx]
                 obs = data[obs_key][start:end]
                 act = data[action_key][start:end]
                 batch_obs.append(obs)
@@ -72,7 +64,7 @@ def compute_uncertainty_scores(
             batch_rewards = model(stacked_obs, stacked_actions)
 
             # Store rewards for each segment in the batch
-            for j, seg_idx in enumerate(batch_segments):
+            for j, seg_idx in enumerate(batch_inds):
                 segment_rewards[seg_idx] = batch_rewards[:, j]
 
     # Now compute uncertainty scores for each pair using pre-computed rewards
@@ -116,7 +108,7 @@ def compute_uncertainty_scores(
 
 def select_active_pref_query(
     reward_model,
-    segment_indices,
+    segment_start_end,
     data,
     uncertainty_method="entropy",
     max_pairs=None,
@@ -126,7 +118,7 @@ def select_active_pref_query(
 
     Args:
         reward_model: Trained reward model for uncertainty estimation
-        segment_indices: List of (start_idx, end_idx) for each segment
+        segment_start_end: List of (start_idx, end_idx) for each segment
         data: TensorDict with observations and actions
         device: Device to run computation on
         uncertainty_method: Method for uncertainty estimation ("entropy", "disagreement", "random")
@@ -141,7 +133,7 @@ def select_active_pref_query(
     uncertainty_scores = compute_uncertainty_scores(
         reward_model,
         candidate_pairs,
-        segment_indices,
+        segment_start_end,
         data,
         method=uncertainty_method,
     )

@@ -59,13 +59,13 @@ def find_similar_segments_dtw(query_idx, k, distance_matrix):
     return similar_indices.tolist()
 
 
-def train_final_reward_model(labeled_pairs, segment_indices, labeled_preferences, data, 
+def train_final_reward_model(labeled_pairs, segment_start_end, labeled_preferences, data, 
                            state_dim, action_dim, device, cfg, random_seed, wandb_run, output_dir):
     """Train the final reward model on all labeled data.
     
     Args:
         labeled_pairs: List of labeled segment pairs
-        segment_indices: List of segment indices
+        segment_start_end: List of segment indices
         labeled_preferences: List of preferences for labeled pairs
         data: Data dictionary containing observations and actions
         state_dim: Dimension of state space
@@ -84,7 +84,7 @@ def train_final_reward_model(labeled_pairs, segment_indices, labeled_preferences
     print(f"Training on all {len(labeled_pairs)} labeled pairs")
 
     # Create dataset from all labeled pairs
-    final_dataset = PreferenceDataset(data, labeled_pairs, segment_indices, labeled_preferences)
+    final_dataset = PreferenceDataset(data, labeled_pairs, segment_start_end, labeled_preferences)
     
     # Use the utility function to create data loaders
     data_loaders = create_data_loaders(
@@ -151,9 +151,6 @@ def active_preference_learning(cfg, dataset_name=None):
     if dtw_enabled:
         print(f"  K augment (similar segments): {dtw_k_augment}")
 
-    # Get random seed from config (already set in main)
-    random_seed = cfg.get('random_seed', 42)
-    
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
     
@@ -187,7 +184,10 @@ def active_preference_learning(cfg, dataset_name=None):
     print(f"Loading data from {cfg.data.data_path}")
     data = load_tensordict(cfg.data.data_path)
     data = {k: v.cpu() if isinstance(v, torch.Tensor) else v for k, v in data.items()}
-    
+    episodes = process_data_trajectories(cfg.data.data_path)
+    reward_max = data["reward"].max().item()
+    reward_min = data["reward"].min().item()
+
     # Get observation and action dimensions
     observations = data["obs"] if "obs" in data else data["state"]
     actions = data["action"]
@@ -200,7 +200,7 @@ def active_preference_learning(cfg, dataset_name=None):
 
     # Load pre-computed DTW distance matrix and segment indices if augmentation is enabled
     distance_matrix = None
-    segment_indices = None
+    segment_start_end = None
 
     if dtw_enabled:
         print("\nLoading pre-computed DTW distance matrix and segment indices...")
@@ -210,12 +210,12 @@ def active_preference_learning(cfg, dataset_name=None):
             print(f"Warning: DTW matrix file not found at {dtw_matrix_file}")
             assert False, "DTW matrix file not found. Please run preprocess_dtw_matrix.py"
         else:
-            distance_matrix, segment_indices = pickle.load(open(dtw_matrix_file, "rb"))
+            distance_matrix, segment_start_end = pickle.load(open(dtw_matrix_file, "rb"))
             print(f"Successfully loaded DTW distance matrix with shape: {distance_matrix.shape}")
     else:
-        segments, segment_indices = segment_episodes(data, cfg.data.segment_length)
+        segments, segment_start_end = segment_episodes(data, cfg.data.segment_length)
 
-    num_segments = len(segment_indices)
+    num_segments = len(segment_start_end)
 
     # Find all possible segment pairs (num_segments choose 2) and sample data.subsamples from them
     all_segment_pairs = list(itertools.combinations(range(num_segments), 2))
@@ -227,8 +227,8 @@ def active_preference_learning(cfg, dataset_name=None):
     test_pairs = [all_segment_pairs[i] for i in test_indices]
 
     # Compute test preferences using the ground truth function
-    test_preferences = get_gt_preferences(data, segment_indices, test_pairs)
-    test_dataset = PreferenceDataset(data, test_pairs, segment_indices, test_preferences)
+    test_preferences = get_gt_preferences(data, segment_start_end, test_pairs)
+    test_dataset = PreferenceDataset(data, test_pairs, segment_start_end, test_preferences)
     test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=64)
     print(f"Created test dataset with {len(test_dataset)} pairs")
 
@@ -247,11 +247,6 @@ def active_preference_learning(cfg, dataset_name=None):
         "iterations": [],
         "val_losses": []  # Track validation losses across iterations
     }
-    
-    # Create a mapping from pair to original index for preference lookup
-    pair_to_original_idx = {}
-    for i, pair_val in enumerate(all_segment_pairs): 
-        pair_to_original_idx[tuple(pair_val)] = i
 
     # Get model directory name from config for checkpoints
     model_dir_name = cfg.output.model_dir_name
@@ -262,6 +257,8 @@ def active_preference_learning(cfg, dataset_name=None):
     os.makedirs(checkpoint_dir, exist_ok=True)
     rm_dir = os.path.join(model_dir, "rm_training")
     os.makedirs(rm_dir, exist_ok=True)
+    analysis_dir = os.path.join(model_dir, "reward_analysis")
+    os.makedirs(analysis_dir, exist_ok=True)
 
     # Main active learning loop
     iteration = 0
@@ -288,13 +285,11 @@ def active_preference_learning(cfg, dataset_name=None):
         else:
             print("Warning: No pairs found in DTW matrix. Using all unlabeled pairs.")
 
-    while total_labeled < max_queries and len(unlabeled_pairs) > 0:
-        
+    while total_labeled < max_queries and len(unlabeled_pairs) > 0:        
         iteration += 1
         print(f"\n--- Active Learning Iteration {iteration} ---")
         print(f"Currently have {total_labeled} labeled pairs")
         
-        print(f"Computing uncertainty scores using {cfg.active_learning.uncertainty_method} method...")
         if iteration == 1:
             rand_idx = random.randint(0, len(candidate_pairs) - 1)
             selected_query_pair = [candidate_pairs[rand_idx]]
@@ -302,7 +297,7 @@ def active_preference_learning(cfg, dataset_name=None):
             # Use the unified function for uncertainty-based selection
             selected_query_pair = select_active_pref_query(
                 ensemble,
-                segment_indices,
+                segment_start_end,
                 data,
                 uncertainty_method=cfg.active_learning.uncertainty_method,
                 max_pairs=1,
@@ -314,11 +309,22 @@ def active_preference_learning(cfg, dataset_name=None):
             print("No query pair was selected. Ending active learning loop.")
             break
         
-        selected_query_pref = get_gt_preferences(data, segment_indices, selected_query_pair)
+        selected_query_pref = get_gt_preferences(data, segment_start_end, selected_query_pair)
+
+        print(f"Selected query pair: {selected_query_pair}")    
+        print(f"Selected query preference: {selected_query_pref}")
+
+        # Add human annotated query 
+        total_labeled += 1
+        labeled_pairs.extend(selected_query_pair)
+        labeled_preferences.extend(selected_query_pref)
+
+        # remove selected query pair from candidate pairs
+        candidate_pairs = list(set(candidate_pairs) - set(selected_query_pair))
 
         # --- DTW Augmentation Start ---
-        current_iter_augmented_pairs = []
-        current_iter_augmented_preferences = []
+        dtw_augmented_pairs = []
+        dtw_augmented_preferences = []
 
         if dtw_enabled and distance_matrix is not None and len(selected_query_pair) > 0:
             print(f"Augmenting {len(selected_query_pair)} selected pairs using DTW (k={dtw_k_augment})...")
@@ -332,92 +338,38 @@ def active_preference_learning(cfg, dataset_name=None):
                 if preference_val == 1:
                     similar_to_dtw_i_indices = find_similar_segments_dtw(dtw_i, dtw_k_augment, distance_matrix)
                     for sim_idx in similar_to_dtw_i_indices:
-                        if sim_idx != j and sim_idx != i:  # Avoid (x,x) and already queried j
-                            current_iter_augmented_pairs.append([sim_idx, j])
-                            current_iter_augmented_preferences.append(1)
+                        if sim_idx != j and sim_idx != i:
+                            dtw_augmented_pairs.append([sim_idx, j])
+                            dtw_augmented_preferences.append(1)
 
                     similar_to_dtw_j_indices = find_similar_segments_dtw(dtw_j, dtw_k_augment, distance_matrix)
                     for sim_idx in similar_to_dtw_j_indices:
                         if sim_idx != i and sim_idx != j:  # Avoid (x,x) and already queried i
-                            current_iter_augmented_pairs.append([i, sim_idx])
-                            current_iter_augmented_preferences.append(1)
+                            dtw_augmented_pairs.append([i, sim_idx])
+                            dtw_augmented_preferences.append(1)
 
                 elif preference_val == 2:  # original_j is preferred over original_i
                     similar_to_dtw_j_indices = find_similar_segments_dtw(dtw_j, dtw_k_augment, distance_matrix)
                     for sim_idx in similar_to_dtw_j_indices:
                         if sim_idx != i and sim_idx != j:
-                            current_iter_augmented_pairs.append([i, sim_idx])
-                            current_iter_augmented_preferences.append(2)
+                            dtw_augmented_pairs.append([i, sim_idx])
+                            dtw_augmented_preferences.append(2)
 
                     similar_to_dtw_i_indices = find_similar_segments_dtw(dtw_i, dtw_k_augment, distance_matrix)
                     for sim_idx in similar_to_dtw_i_indices:
                         if sim_idx != j and sim_idx != i:
-                            current_iter_augmented_pairs.append([sim_idx, j])
-                            current_iter_augmented_preferences.append(2)
+                            dtw_augmented_pairs.append([sim_idx, j])
+                            dtw_augmented_preferences.append(2)
 
-            labeled_pairs.extend(current_iter_augmented_pairs)
-            labeled_preferences.extend(current_iter_augmented_preferences)
+            # Add dtw augmentations
+            labeled_pairs.extend(dtw_augmented_pairs)
+            labeled_preferences.extend(dtw_augmented_preferences)
+            candidate_pairs = list(set(candidate_pairs) - set(dtw_augmented_pairs))
         # --- DTW Augmentation End ---
 
-        # Combine human-queried and augmented pairs, then add uniquely to labeled_pairs
-        all_new_pairs_this_iteration = []
-        all_new_preferences_this_iteration = []
 
-        all_new_pairs_this_iteration.extend(selected_query_pair) # Human-queried
-        all_new_preferences_this_iteration.extend(selected_query_pref)
-
-        if current_iter_augmented_pairs:
-            all_new_pairs_this_iteration.extend(current_iter_augmented_pairs) # Augmented
-            all_new_preferences_this_iteration.extend(current_iter_augmented_preferences)
-            print(f"Generated {len(current_iter_augmented_pairs)} raw augmented pairs this iteration.")
-        
-        # Filter all new pairs to ensure they are unique and not already labeled
-        uniquely_added_to_labeled_pairs = []
-        uniquely_added_to_labeled_preferences = []
-        
-        # Set of (sorted_tuple_of_pair_indices) already in the main labeled_pairs list
-        current_global_labeled_pairs_tuples = set(tuple(sorted(p)) for p in labeled_pairs)
-
-        for new_pair, new_pref in zip(all_new_pairs_this_iteration, all_new_preferences_this_iteration):
-            if new_pair[0] == new_pair[1]: # Skip self-loops
-                continue
-            
-            pair_tuple_sorted = tuple(sorted(new_pair))
-            if pair_tuple_sorted not in current_global_labeled_pairs_tuples:
-                uniquely_added_to_labeled_pairs.append(new_pair)
-                uniquely_added_to_labeled_preferences.append(new_pref)
-                current_global_labeled_pairs_tuples.add(pair_tuple_sorted) # Add to set to ensure uniqueness within this batch
-
-        if uniquely_added_to_labeled_pairs:
-            labeled_pairs.extend(uniquely_added_to_labeled_pairs)
-            labeled_preferences.extend(uniquely_added_to_labeled_preferences)
-            
-            # Count how many were original human queries vs augmented, among those *actually added*
-            num_human_added_this_iter = 0
-            selected_pairs_tuples = set(tuple(sorted(p)) for p in selected_query_pair)
-            for added_p in uniquely_added_to_labeled_pairs:
-                if tuple(sorted(added_p)) in selected_pairs_tuples:
-                     num_human_added_this_iter +=1
-            num_aug_added_this_iter = len(uniquely_added_to_labeled_pairs) - num_human_added_this_iter
-            print(f"Added {num_human_added_this_iter} unique human-queried and {num_aug_added_this_iter} unique augmented pairs to labeled set.")
-
-        # total_labeled tracks number of *human queries attempted* in this iteration
-        total_labeled += len(selected_query_pair) 
-        
-        # Remove selected pairs (human-queried ones) and any newly labeled (augmented) pairs from the unlabeled set
-        # Rebuild the set of all labeled pairs for efficient filtering of unlabeled_pairs
-        final_labeled_tuples_for_unlabeled_filtering = set(tuple(sorted(p)) for p in labeled_pairs)
-        
-        new_unlabeled_pairs_list = []
-        for p_unlabeled in unlabeled_pairs:
-            if tuple(sorted(p_unlabeled)) not in final_labeled_tuples_for_unlabeled_filtering:
-                new_unlabeled_pairs_list.append(p_unlabeled)
-        unlabeled_pairs = new_unlabeled_pairs_list
-        
-        print(f"Now have {len(labeled_pairs)} labeled (human + augmented) and {len(unlabeled_pairs)} unlabeled pairs")
-        
         # Create dataset for training the ensemble
-        ensemble_dataset = PreferenceDataset(data, labeled_pairs, segment_indices, labeled_preferences)
+        ensemble_dataset = PreferenceDataset(data, labeled_pairs, segment_start_end, labeled_preferences)
 
         # Use utility function to create data loaders with all data for training
         data_loaders = create_data_loaders(
@@ -425,7 +377,7 @@ def active_preference_learning(cfg, dataset_name=None):
             train_ratio=1.0,  # Use all data for training
             val_ratio=0.0,    # No validation set
             batch_size=cfg.training.batch_size,
-            seed=random_seed
+            seed=cfg.random_seed
         )
         
         train_loader = data_loaders['train']
@@ -506,22 +458,47 @@ def active_preference_learning(cfg, dataset_name=None):
         if batch_size <= 0 or len(unlabeled_pairs) == 0:
             print("Reached maximum number of queries or no more unlabeled data")
             break
+
+        # Run reward analysis
+        print("\n--- Running Reward Analysis ---")
+        analyze_rewards(
+            model=ensemble.models[0],
+            episodes=episodes,
+            output_file=os.path.join(model_dir, "reward_analysis", f"reward_grid_iter_{iteration}.png"),
+            num_episodes=9,
+            wandb_run=wandb_run,
+            reward_max=reward_max,
+            reward_min=reward_min,
+            random_seed=cfg.random_seed
+        )
+
             
     # Train final model on all labeled data
     final_model, final_metrics, train_losses, val_losses = train_final_reward_model(
         labeled_pairs, 
-        segment_indices, 
+        segment_start_end, 
         labeled_preferences, 
         data, 
         state_dim, 
         action_dim, 
         device, 
         cfg, 
-        random_seed,
+        cfg.random_seed,
         wandb_run,
         output_dir=model_dir
     )
-    
+
+    analyze_rewards(
+        model=final_model,
+        episodes=episodes,
+        plot_reward_grid=os.path.join(model_dir, "reward_grid.png"),
+        num_episodes=9,
+        wandb_run=wandb_run,
+        reward_max=reward_max,
+        reward_min=reward_min,
+        random_seed=cfg.random_seed
+    )
+
     # Also evaluate on the consistent test set if available
     if test_loader is not None:
         consistent_metrics = evaluate_model_on_test_set(final_model, test_loader, device)
@@ -602,17 +579,6 @@ def active_preference_learning(cfg, dataset_name=None):
     
     print(f"\nActive learning completed. Final model saved to {model_path}")
     
-
-    print("\n--- Running Reward Analysis ---")
-    episodes = process_data_trajectories(cfg.data.data_path)
-    analyze_rewards(
-        model=final_model,
-        episodes=episodes,
-        output_dir=model_dir,
-        num_episodes=9,
-        wandb_run=wandb_run
-    )
-
 @hydra.main(config_path="config", config_name="reward_model_active", version_base=None)
 def main(cfg: DictConfig):
     """Main entry point for active preference learning."""

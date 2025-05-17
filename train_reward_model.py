@@ -193,7 +193,7 @@ def main(cfg: DictConfig):
     analyze_rewards(
         model=model,
         episodes=episodes,
-        output_dir=os.path.join(model_dir, sub_dir),
+        output_file=os.path.join(model_dir, sub_dir, "reward_grid.png"),
         wandb_run=wandb_run,
         reward_max=reward_max,
         reward_min=reward_min
