@@ -60,7 +60,7 @@ def find_similar_segments_dtw(query_idx, k, distance_matrix):
 
 
 def train_final_reward_model(labeled_pairs, segment_indices, labeled_preferences, data, 
-                           state_dim, action_dim, device, cfg, random_seed, wandb_run):
+                           state_dim, action_dim, device, cfg, random_seed, wandb_run, output_dir):
     """Train the final reward model on all labeled data.
     
     Args:
@@ -86,23 +86,13 @@ def train_final_reward_model(labeled_pairs, segment_indices, labeled_preferences
     # Create dataset from all labeled pairs
     final_dataset = PreferenceDataset(data, labeled_pairs, segment_indices, labeled_preferences)
     
-    # Adjust batch size and workers for small datasets
-    effective_batch_size = min(cfg.training.batch_size, len(final_dataset))
-    if effective_batch_size <= 1:
-        effective_batch_size = 1
-        
-    effective_workers = cfg.training.get('num_workers', 4)
-    if effective_batch_size < 4 and effective_workers > 0:
-        effective_workers = 0
-        print("Reducing worker count to 0 for small batch size")
-    
     # Use the utility function to create data loaders
     data_loaders = create_data_loaders(
         final_dataset,
-        train_ratio=0.8,
-        val_ratio=0.2,
-        batch_size=effective_batch_size,
-        num_workers=effective_workers,
+        train_ratio=1.0,
+        val_ratio=0.0,
+        batch_size=cfg.training.batch_size,
+        num_workers=cfg.training.num_workers,
         pin_memory=True,
         seed=random_seed
     )
@@ -110,18 +100,7 @@ def train_final_reward_model(labeled_pairs, segment_indices, labeled_preferences
     train_loader = data_loaders['train']
     val_loader = data_loaders['val']
     print(f"Using all {data_loaders['train_size']} labeled samples for training the final model (no validation split)")
-    # Train final model
     final_model = RewardModel(state_dim, action_dim, hidden_dims=cfg.model.hidden_dims)
-    
-    # Get model directory name from config
-    model_dir_name = cfg.output.model_dir_name
-    
-    # Create the model directory
-    model_dir = os.path.join(cfg.output.output_dir, model_dir_name)
-    os.makedirs(model_dir, exist_ok=True)
-    
-    # Path for training curve
-    training_curve_path = os.path.join(model_dir, "training_curve.png")
     
     # No ensemble training for final model
     final_model, train_losses, val_losses = train_model(
@@ -133,7 +112,7 @@ def train_final_reward_model(labeled_pairs, segment_indices, labeled_preferences
         lr=cfg.model.lr,
         wandb_run=wandb_run,
         is_ensemble=False,
-        output_path=training_curve_path
+        output_path=os.path.join(output_dir, "training_curve.png")
     )
     return final_model, None, train_losses, val_losses
 
@@ -539,7 +518,8 @@ def active_preference_learning(cfg, dataset_name=None):
         device, 
         cfg, 
         random_seed,
-        wandb_run
+        wandb_run,
+        output_dir=model_dir
     )
     
     # Also evaluate on the consistent test set if available
@@ -568,35 +548,43 @@ def active_preference_learning(cfg, dataset_name=None):
     model_dir = os.path.join(cfg.output.output_dir, model_dir_name)
     os.makedirs(model_dir, exist_ok=True)
     
-    # Create a 2x2 grid of plots instead of 1x4
-    fig, axs = plt.subplots(2, 2, figsize=(15, 12), constrained_layout=True)
+    # Create a 1x2 grid (2 plots side by side)
+    fig, axs = plt.subplots(1, 2, figsize=(15, 6), constrained_layout=False, sharex=True)
     
-    # Common styling for all plots
-    dot_size = 8  # Larger dots
-    line_color = 'blue'  # Consistent color for all plots
+    dot_size = 10 
+    line_color = 'blue' 
     
-    # Plot test accuracy (top-left)
-    ax1 = axs[0, 0]
+    # Plot test accuracy (left)
+    ax1 = axs[0] 
     ax1.plot(metrics["num_labeled"], metrics["test_accuracy"], marker='o', markersize=dot_size, color=line_color)
-    ax1.set_xlabel("Number of Labeled Pairs")
-    ax1.set_ylabel("Test Accuracy")
-    ax1.set_title(f"Test Accuracy vs Labeled Pairs ({cfg.active_learning.uncertainty_method})")
+    ax1.set_ylabel("Test Accuracy", fontsize=16)
+    ax1.set_title("Test Accuracy vs Labeled Pairs")
     ax1.grid(True, alpha=0.3)
     # Remove top and right spines
     ax1.spines['top'].set_visible(False)
     ax1.spines['right'].set_visible(False)
     
-    # Plot test loss (Bradley-Terry) (top-right)
-    ax2 = axs[0, 1]
+    # Plot test loss (Bradley-Terry) (right)
+    ax2 = axs[1] 
     ax2.plot(metrics["num_labeled"], metrics["test_loss"], marker='o', markersize=dot_size, color=line_color)
-    ax2.set_xlabel("Number of Labeled Pairs")
-    ax2.set_ylabel("Bradley-Terry Loss (BCE)")
-    ax2.set_title(f"Preference Learning Loss vs Labeled Pairs ({cfg.active_learning.uncertainty_method})")
+    ax2.set_ylabel("Bradley-Terry Loss (BCE)", fontsize=16)
+    ax2.set_title("Preference Learning Loss vs Labeled Pairs")
     ax2.grid(True, alpha=0.3)
     # Remove top and right spines
     ax2.spines['top'].set_visible(False)
     ax2.spines['right'].set_visible(False)
-
+    
+    # Ensure x-axis has only integer ticks
+    from matplotlib.ticker import MaxNLocator
+    for ax in axs:
+        ax.xaxis.set_major_locator(MaxNLocator(integer=True))
+    
+    # Make sure there's space for the common x-label
+    plt.subplots_adjust(bottom=0.2)
+    
+    # Add a common x-axis label for the entire figure
+    fig.supxlabel("Number of Labeled Pairs", fontsize=16, y=0.05)
+    
     # Save plot in the model directory
     learning_curve_path = os.path.join(model_dir, "active_learning_metrics.png")
     plt.savefig(learning_curve_path, dpi=300, bbox_inches='tight')
