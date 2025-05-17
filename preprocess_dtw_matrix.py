@@ -7,6 +7,7 @@ from pathlib import Path
 
 import numpy as np
 from tqdm import tqdm
+import torch 
 
 import utils.dtw as dtw
 from utils.data import load_tensordict, segment_episodes
@@ -101,7 +102,7 @@ def main():
             print(f"Overwriting existing DTW matrix file: {dtw_matrix_file}")
 
         data = load_tensordict(data_path)
-
+        data = {k: v.cpu() if isinstance(v, torch.Tensor) else v for k, v in data.items()}
         segments, segment_indices = segment_episodes(data, segment_length)
 
         dtw_matrix = compute_dtw_distance_matrix(segments)

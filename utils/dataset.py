@@ -121,12 +121,10 @@ class PreferenceDataset(Dataset):
         if isinstance(self.data, dict):
             obs_key = self.obs_key
             action_key = "action"
-
-            # Safely extract data
-            obs1 = self.data[obs_key][start1 : end1].clone().detach()
-            actions1 = self.data[action_key][start1:end1].clone().detach()
-            obs2 = self.data[obs_key][start2 : end2].clone().detach()
-            actions2 = self.data[action_key][start2:end2].clone().detach()
+            obs1 = self.data[obs_key][start1 : end1]
+            actions1 = self.data[action_key][start1:end1]
+            obs2 = self.data[obs_key][start2 : end2]
+            actions2 = self.data[action_key][start2:end2]
    
         # Apply normalization to observations
         if self.normalize_obs:
@@ -136,7 +134,7 @@ class PreferenceDataset(Dataset):
         # Convert preference to tensor
         if isinstance(self.preferences[idx], torch.Tensor):
             # If it's already a tensor, just clone it
-            pref = self.preferences[idx].clone().detach().long()
+            pref = self.preferences[idx].long()
         else:
             # Otherwise create a new tensor
             pref = torch.tensor(self.preferences[idx], dtype=torch.long)
@@ -184,8 +182,9 @@ def shuffle_preference_dataset(dataset, seed=42):
 
 
 def create_data_loaders(preference_dataset, train_ratio=0.8, val_ratio=0.1, batch_size=32, 
-                    num_workers=4, pin_memory=True, seed=42, normalize_obs=False, 
-                    norm_method='standard', shuffle_dataset=True):
+                        num_workers=4,
+                        pin_memory=True, seed=42, normalize_obs=False, 
+                        norm_method='standard', shuffle_dataset=True):
     """Create data loaders for training, validation, and testing.
 
     Args:
@@ -236,41 +235,33 @@ def create_data_loaders(preference_dataset, train_ratio=0.8, val_ratio=0.1, batc
 
     print(f"Split data: Train={train_size}, Validation={val_size}, Test={test_size}")
 
-    # Determine effective settings for CPU vs GPU
-    effective_num_workers = num_workers
-    effective_pin_memory = pin_memory
-
-    # Adjust for CPU-only mode
-    if not torch.cuda.is_available():
-        effective_pin_memory = False
-
     # Create data loaders
     train_loader = DataLoader(
         train_dataset,
         batch_size=batch_size,
         shuffle=True,
-        num_workers=effective_num_workers,
-        pin_memory=effective_pin_memory,
-        persistent_workers=effective_num_workers > 0,
-        prefetch_factor=2 if effective_num_workers > 0 else None,
+        num_workers=num_workers,
+        pin_memory=True,
+        persistent_workers=True,
+        prefetch_factor=2,
     )
 
     val_loader = DataLoader(
         val_dataset,
         batch_size=batch_size,
-        num_workers=effective_num_workers,
-        pin_memory=effective_pin_memory,
-        persistent_workers=effective_num_workers > 0,
-        prefetch_factor=2 if effective_num_workers > 0 else None,
+        num_workers=num_workers,
+        pin_memory=True,
+        persistent_workers=True,
+        prefetch_factor=2,
     )
 
     test_loader = DataLoader(
         test_dataset,
         batch_size=batch_size,
-        num_workers=effective_num_workers,
-        pin_memory=effective_pin_memory,
-        persistent_workers=effective_num_workers > 0,
-        prefetch_factor=2 if effective_num_workers > 0 else None,
+        num_workers=num_workers,
+        pin_memory=True,
+        persistent_workers=True,
+        prefetch_factor=2,
     )
 
     return {

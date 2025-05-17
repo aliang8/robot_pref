@@ -173,7 +173,7 @@ def plot_reward_grid(
     plt.subplots_adjust(left=0.12, bottom=0.15, right=0.95, top=0.95)
     
     fig.supxlabel("Environment Steps", fontsize=20, y=0.1)
-    fig.supylabel("Per-step reward", fontsize=20, x=0.1)
+    fig.supylabel("Per-step reward", fontsize=20, x=0.05)
     
     # Add a common legend at the bottom of the figure with two columns
     if pred_line and gt_line:

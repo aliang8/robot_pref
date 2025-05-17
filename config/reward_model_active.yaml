@@ -18,6 +18,7 @@ data:
   num_segments: 10000
   num_pairs: 5000
   subsamples: 50000
+  num_test_pairs: 500
 
 # DTW augmentation parameters
 dtw_augmentation:
@@ -34,11 +35,11 @@ hardware:
 output:
   output_dir: results/active_reward_model
   # Use fixed placeholder for dataset name that will be replaced in code
-  model_dir_name: "DATASET_NAME_active_${active_learning.uncertainty_method}_init${active_learning.initial_size}_max${active_learning.max_queries}_batch${active_learning.batch_size}_aug${dtw_augmentation.enabled}"
-  # Artifact name for wandb
-  artifact_name: "DATASET_NAME_active_${active_learning.uncertainty_method}_init${active_learning.initial_size}_max${active_learning.max_queries}_aug${dtw_augmentation.enabled}"
-  
-# Wandb configuration
+  model_dir_name: "DATASET_NAME_active_${active_learning.uncertainty_method}_max${active_learning.max_queries}_${active_learning.num_queries_per_iteration}_aug${dtw_augmentation.enabled}"
+
+training:
+  save_model_every: 5
+
 wandb:
   use_wandb: false
   project: "robot_pref"

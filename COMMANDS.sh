@@ -14,6 +14,12 @@ python train_reward_model.py \
     data.data_path=/scr/aliang80/robot_pref/labeled_datasets/buffer_assembly-v2_balanced.pt \
     data.num_pairs=100 
 
+# preprocess DTW matrix
+python preprocess_dtw_matrix.py \
+    --data_path=/scr/aliang80/robot_pref/labeled_datasets/buffer_assembly-v2_balanced.pt \
+    --segment_length=32 \
+    --overwrite
+
 # train reward model with active offline learning
 python train_reward_model_active.py \
     data.data_path=/scr/aliang80/robot_pref/labeled_datasets/buffer_assembly-v2_balanced.pt \

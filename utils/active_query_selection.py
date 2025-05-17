@@ -13,7 +13,7 @@ def compute_entropy(probs):
 
 
 def compute_uncertainty_scores(
-    model, segment_pairs, segment_indices, data, device, method="entropy"
+    model, segment_pairs, segment_indices, data, method="entropy", device="cuda"   
 ):
     """Compute uncertainty scores for segment pairs using specified method.
 
@@ -22,7 +22,6 @@ def compute_uncertainty_scores(
         segment_pairs: List of segment pair indices
         segment_indices: List of (start_idx, end_idx) or (ep, start, end) tuples for each segment
         data: Data dictionary containing observations and actions
-        device: Device to run computation on
         method: Uncertainty estimation method ("entropy", "disagreement", or "random")
 
     Returns:
@@ -35,16 +34,6 @@ def compute_uncertainty_scores(
     # Extract observation and action keys
     obs_key = "obs" if "obs" in data else "state"
     action_key = "action"
-
-    # Ensure data is on CPU for indexing operations
-    data_cpu = {
-        k: v.cpu() if isinstance(v, torch.Tensor) else v for k, v in data.items()
-    }
-
-    # Determine if segment_indices is (ep, start, end) or (start, end)
-    # We'll check the type/length of the first entry
-    first_entry = segment_indices[0]
-    is_ep_format = len(first_entry) == 3
 
     # Extract unique segments to avoid redundant computations
     unique_segments = set()
@@ -69,16 +58,9 @@ def compute_uncertainty_scores(
             batch_actions = []
 
             for seg_idx in batch_segments:
-                if is_ep_format:
-                    ep, start, end = segment_indices[seg_idx]
-                    episode_mask = data_cpu["episode"] == ep
-                    # Assume data_cpu[obs_key] and data_cpu[action_key] are lists of tensors per episode
-                    obs = data_cpu[obs_key][episode_mask][start:end].clone()
-                    act = data_cpu[action_key][episode_mask][start:end].clone()
-                else:
-                    start, end = segment_indices[seg_idx]
-                    obs = data_cpu[obs_key][start:end].clone()
-                    act = data_cpu[action_key][start:end].clone()
+                start, end = segment_indices[seg_idx]
+                obs = data[obs_key][start:end]
+                act = data[action_key][start:end]
                 batch_obs.append(obs)
                 batch_actions.append(act)
 
@@ -149,58 +131,26 @@ def compute_uncertainty_scores(
 
 def select_active_pref_query(
     reward_model,
-    num_segments,
     segment_indices,
     data,
-    device,
     uncertainty_method="entropy",
     max_pairs=None,
-    use_random_candidate_sampling=False,
-    n_candidates=100,
     candidate_pairs=None,
 ):
     """Compute uncertainty for all possible segment pairs
 
     Args:
         reward_model: Trained reward model for uncertainty estimation
-        num_segments: Number of segments in the dataset
         segment_indices: List of (start_idx, end_idx) for each segment
         data: TensorDict with observations and actions
         device: Device to run computation on
         uncertainty_method: Method for uncertainty estimation ("entropy", "disagreement", "random")
         max_pairs: Maximum number of pairs to select (None = select all pairs)
-        use_random_candidate_sampling: If True, sample random candidates; if False, evaluate all pairs
-        n_candidates: Number of random candidate pairs to consider if using sampling
-        candidate_pairs: Optional list of candidate pairs to evaluate directly
+        candidate_pairs: List of candidate pairs to evaluate
 
     Returns:
         all_pairs_ranked: List of all segment pairs ranked by uncertainty (highest to lowest)
     """
-    # Determine approach based on parameters
-    if candidate_pairs is not None:
-        # Use provided candidate pairs directly
-        print(f"Using {len(candidate_pairs)} provided candidate pairs")
-        candidate_pairs = candidate_pairs
-    elif use_random_candidate_sampling:
-        # Approach 1: Sample random candidates (more efficient)
-        print(f"Using random candidate sampling with {n_candidates} candidate pairs")
-        candidate_pairs = []
-        for _ in range(n_candidates):
-            i, j = random.sample(range(num_segments), 2)
-            candidate_pairs.append((i, j))
-    else:
-        # Approach 2: Generate all possible segment pairs (more thorough but expensive)
-        print(f"Generating all possible pairs from {num_segments} segments")
-        candidate_pairs = [
-            (i, j) for i in range(num_segments) for j in range(i + 1, num_segments)
-        ]
-
-        # If too many pairs, warn and limit
-        if len(candidate_pairs) > 10000:
-            print(
-                f"Warning: Generated {len(candidate_pairs)} pairs, which may be memory intensive"
-            )
-
     # Compute uncertainty scores
     print(f"Computing uncertainty for {len(candidate_pairs)} candidate pairs...")
     uncertainty_scores = compute_uncertainty_scores(
@@ -208,7 +158,6 @@ def select_active_pref_query(
         candidate_pairs,
         segment_indices,
         data,
-        device,
         method=uncertainty_method,
     )
 
