@@ -13,7 +13,7 @@ import utils.dtw as dtw
 from utils.data import load_tensordict, segment_episodes
 
 
-def compute_dtw_distance_matrix(segments):
+def compute_dtw_distance_matrix(segments, use_relative_eef: bool):
     """Compute DTW distance matrix between segments.
 
     Args:
@@ -41,8 +41,9 @@ def compute_dtw_distance_matrix(segments):
                 reference = segments[j]["obs"].numpy()[:, :3] 
 
                 # Relative
-                query = query[1:] - query[:-1]
-                reference = reference[1:] - reference[:-1]
+                if use_relative_eef:
+                    query = query[1:] - query[:-1]
+                    reference = reference[1:] - reference[:-1]
 
                 cost, _ = dtw.get_single_match(query, reference)
 
@@ -74,6 +75,11 @@ def main():
         help="Length of each trajectory segment",
     )
     parser.add_argument(
+        "--use_relative_eef",
+        action="store_true",
+        help="Use relative EEF positions instead of absolute",
+    )
+    parser.add_argument(
         "--overwrite",
         action="store_true",
         help="Overwrite existing DTW matrix file if it exists",
@@ -83,6 +89,7 @@ def main():
     data_path = args.data_path
     segment_length = args.segment_length
     overwrite = args.overwrite
+    use_relative_eef = args.use_relative_eef        
 
     dtw_matrix_file = Path(data_path).parent / f"dtw_matrix_{segment_length}.pkl"
 
@@ -105,7 +112,7 @@ def main():
         data = {k: v.cpu() if isinstance(v, torch.Tensor) else v for k, v in data.items()}
         segments, segment_indices = segment_episodes(data, segment_length)
 
-        dtw_matrix = compute_dtw_distance_matrix(segments)
+        dtw_matrix = compute_dtw_distance_matrix(segments, use_relative_eef)
 
         print(f"Saving DTW matrix and segment IDs to cache: {dtw_matrix_file}")
         with open(dtw_matrix_file, "wb") as f:

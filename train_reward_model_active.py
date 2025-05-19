@@ -270,6 +270,7 @@ def active_preference_learning(cfg, dataset_name=None):
     prev_ensemble = None
     labeled_pairs = []
     labeled_preferences = []
+    augmented_accuracy = []
 
     # If DTW augmentation is enabled, only sample from pairs that are in the DTW matrix
     candidate_pairs = unlabeled_pairs
@@ -349,7 +350,7 @@ def active_preference_learning(cfg, dataset_name=None):
 
                     similar_to_dtw_j_indices = find_similar_segments_dtw(dtw_j, dtw_k_augment, distance_matrix)
                     for sim_idx in similar_to_dtw_j_indices:
-                        if sim_idx != i and sim_idx != j:  # Avoid (x,x) and already queried i
+                        if sim_idx != i and sim_idx != j: 
                             dtw_augmented_pairs.append((i, sim_idx))
                             dtw_augmented_preferences.append(1)
 
@@ -370,6 +371,12 @@ def active_preference_learning(cfg, dataset_name=None):
             labeled_pairs.extend(dtw_augmented_pairs)
             labeled_preferences.extend(dtw_augmented_preferences)
 
+            # Let's check the accuracy of the augmented pairs compared to the ground truth
+            augmented_pref_with_rewards = get_gt_preferences(data, segment_start_end, dtw_augmented_pairs)
+            augmented_acc = (np.array(augmented_pref_with_rewards) == np.array(dtw_augmented_preferences)).mean()
+
+            print(f"\tAugmented accuracy: {augmented_acc:.4f}")
+            augmented_accuracy.append(augmented_acc)
             print(f"\tNumber of dtw augmented pairs: {len(dtw_augmented_pairs)}")
             print(f"\tNumber of labeled pairs after DTW augmentation: {len(labeled_pairs)}")
             candidate_pairs = list(set(candidate_pairs) - set(dtw_augmented_pairs))
@@ -534,8 +541,8 @@ def active_preference_learning(cfg, dataset_name=None):
     model_dir = os.path.join(cfg.output.output_dir, model_dir_name)
     os.makedirs(model_dir, exist_ok=True)
     
-    # Create a 1x2 grid (2 plots side by side)
-    fig, axs = plt.subplots(1, 2, figsize=(15, 6), constrained_layout=False, sharex=True)
+    # Create a 1x3 grid (3 plots side by side)
+    fig, axs = plt.subplots(1, 3, figsize=(18, 6), constrained_layout=False, sharex=True)
     
     dot_size = 10 
     line_color = 'blue' 
@@ -559,6 +566,15 @@ def active_preference_learning(cfg, dataset_name=None):
     # Remove top and right spines
     ax2.spines['top'].set_visible(False)
     ax2.spines['right'].set_visible(False)
+    
+    # Plot augmented accuracy
+    ax3 = axs[2]
+    ax3.plot(metrics["num_labeled"], augmented_accuracy, marker='o', markersize=dot_size, color=line_color)
+    ax3.set_ylabel("Augmented Accuracy", fontsize=16)
+    ax3.set_title("Augmented Accuracy vs Labeled Pairs")
+    ax3.grid(True, alpha=0.3)
+    ax3.spines['top'].set_visible(False)
+    ax3.spines['right'].set_visible(False)
     
     # Ensure x-axis has only integer ticks
     from matplotlib.ticker import MaxNLocator

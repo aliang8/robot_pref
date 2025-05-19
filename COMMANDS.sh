@@ -9,6 +9,26 @@ python create_mixed_expertise_dataset.py \
     --data_path=/scr/shared/clam/datasets/metaworld/assembly-v2/buffer_assembly-v2_clean.pt \
     --output_dir=labeled_datasets
 
+python preprocess_dtw_matrix.py \
+    --data_path=/scr/shared/clam/datasets/metaworld/assembly-v2/buffer_assembly-v2_clean.pt \
+    --segment_length=32 \
+    --overwrite
+
+python train_policy.py \
+    --config-name=iql \
+    data.data_path=/scr/shared/clam/datasets/metaworld/assembly-v2/buffer_assembly-v2_clean.pt \
+    wandb.use_wandb=true \
+    data.use_ground_truth=true \
+    random_seed=521,522,523 \
+    --multirun
+
+
+
+
+
+
+
+
 # train reward model without active learning
 python train_reward_model.py \
     data.data_path=/scr/aliang80/robot_pref/labeled_datasets/buffer_assembly-v2_balanced.pt \
@@ -31,6 +51,7 @@ python train_reward_model_active.py \
     data.data_path=/scr/aliang80/robot_pref/labeled_datasets/buffer_assembly-v2_balanced.pt \
     active_learning.uncertainty_method=disagreement \
     dtw_augmentation.enabled=true \
+    training.num_epochs=100
     --multirun
 
 # train policy using learned reward model
