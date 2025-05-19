@@ -14,9 +14,20 @@ python preprocess_dtw_matrix.py \
     --segment_length=32 \
     --overwrite
 
+python train_reward_model.py \
+    data.data_path=/scr/shared/clam/datasets/metaworld/assembly-v2/buffer_assembly-v2_clean.pt \
+    data.num_pairs=100 
+
+python train_reward_model_active.py \
+    data.data_path=/scr/shared/clam/datasets/metaworld/assembly-v2/buffer_assembly-v2_clean.pt \
+    active_learning.uncertainty_method=disagreement \
+    dtw_augmentation.enabled=true \
+    --multirun
+
 python train_policy.py \
     --config-name=iql \
     data.data_path=/scr/shared/clam/datasets/metaworld/assembly-v2/buffer_assembly-v2_clean.pt \
+    data.reward_model_path=/scr/shared/clam/robot_pref/results/reward_model/state_action_reward_model.pt \
     wandb.use_wandb=true \
     data.use_ground_truth=true \
     random_seed=521,522,523 \

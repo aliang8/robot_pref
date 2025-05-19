@@ -142,11 +142,12 @@ def segment_episodes(data, segment_length):
     Returns:
         segments: List of segments
     """
-    episode_lengths = [len(np.where(data["episode"] == i)[0]) for i in np.unique(data["episode"])]
-    assert len(set(episode_lengths)) == 1, "All episodes should be the same length"
+    episode_lens = [len(np.where(data["episode"] == i)[0]) for i in np.unique(data["episode"])]
+    assert len(set(episode_lens)) == 1, "All episodes should be the same length"
+    episode_len = episode_lens[0]
 
     # Calculate segments_per_trajectory based on the episode length
-    segments_per_trajectory = episode_lengths[0] // segment_length + 1
+    segments_per_trajectory = episode_len // segment_length + 1
 
     # Get segments from each episode
     segments = []
@@ -156,30 +157,26 @@ def segment_episodes(data, segment_length):
     # Compute the starting absolute index for each episode in the full dataset
     episode_start_indices = {}
     abs_idx = 0
+    print(f"Segmenting {len(unique_episodes)} episodes")
     for episode_idx in unique_episodes:
         episode_mask = data["episode"] == episode_idx
         episode_len = np.sum(episode_mask.numpy())
         episode_start_indices[episode_idx] = abs_idx
         abs_idx += episode_len
 
-    for episode_idx in unique_episodes:
-        # Extract the current episode data
-        episode_mask = data["episode"] == episode_idx
-        episode_data = {k: v[episode_mask] for k, v in data.items()}
-
-        total_length = len(episode_data["obs"])
+    for episode_idx in tqdm.tqdm(unique_episodes):
         episode_abs_start = episode_start_indices[episode_idx]
 
         # Create segments_per_trajectory evenly spaced segments
         for i in range(segments_per_trajectory):
             # Calculate evenly spaced starting points across the trajectory
             start_idx = (
-                i * (total_length - segment_length) // max(1, segments_per_trajectory - 1)
+                i * (episode_len - segment_length) // max(1, segments_per_trajectory - 1)
             )
             end_idx = start_idx + segment_length
 
             # Ensure end_idx doesn't exceed the episode length
-            end_idx = min(end_idx, total_length)
+            end_idx = min(end_idx, episode_len)
 
             # Compute absolute indices in the full dataset
             abs_start_idx = episode_abs_start + start_idx
@@ -189,10 +186,10 @@ def segment_episodes(data, segment_length):
 
             # Create segment dictionary
             segment = {}
-            for key in episode_data.keys():
-                segment[key] = episode_data[key][start_idx:end_idx]
+            for key in data.keys():
+                segment[key] = data[key][abs_start_idx:abs_end_idx]
 
             segments.append(segment)
 
+    print(f"Segmented {len(segments)} segments")
     return segments, segment_indices
-

@@ -382,7 +382,6 @@ def active_preference_learning(cfg, dataset_name=None):
             candidate_pairs = list(set(candidate_pairs) - set(dtw_augmented_pairs))
         # --- DTW Augmentation End ---
 
-
         # Create dataset for training the ensemble
         ensemble_dataset = PreferenceDataset(data, labeled_pairs, segment_start_end, labeled_preferences)
 
