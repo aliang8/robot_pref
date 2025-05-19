@@ -1,4 +1,3 @@
-import gc
 import itertools
 import os
 import pickle
@@ -14,22 +13,21 @@ import torch
 from omegaconf import DictConfig, OmegaConf
 
 import wandb
-
 from models import EnsembleRewardModel, RewardModel
 from utils.active_query_selection import (
     select_active_pref_query,
 )
+from utils.analyze_rewards import analyze_rewards
 from utils.data import (
     get_gt_preferences,
     load_tensordict,
-    segment_episodes,
     process_data_trajectories,
+    segment_episodes,
 )
 from utils.dataset import PreferenceDataset, create_data_loaders
 from utils.seed import set_seed
 from utils.training import evaluate_model_on_test_set, train_model
 from utils.wandb import log_to_wandb
-from utils.analyze_rewards import analyze_rewards 
 
 
 def find_similar_segments_dtw(query_idx, k, distance_matrix):
@@ -315,6 +313,7 @@ def active_preference_learning(cfg, dataset_name=None):
             break
         
         selected_query_pref = get_gt_preferences(data, segment_start_end, selected_query_pair)
+        import ipdb; ipdb.set_trace()
 
         print(f"Selected query pair: {selected_query_pair}")    
         print(f"Selected query preference: {selected_query_pref}")
@@ -376,6 +375,7 @@ def active_preference_learning(cfg, dataset_name=None):
         # --- DTW Augmentation End ---
 
         # Create dataset for training the ensemble
+        import ipdb; ipdb.set_trace()
         ensemble_dataset = PreferenceDataset(data, labeled_pairs, segment_start_end, labeled_preferences)
 
         # Use utility function to create data loaders with all data for training

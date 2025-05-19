@@ -1,11 +1,11 @@
 import matplotlib.pyplot as plt
 import numpy as np
+import seaborn as sns
 import torch
 from torch import optim
 from tqdm import tqdm
-import wandb
-import seaborn as sns
 
+import wandb
 from utils.loss import bradley_terry_loss
 
 sns.set_style("white")
