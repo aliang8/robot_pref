@@ -1,6 +1,6 @@
 import numpy as np
 import wandb
-from utils.wandb import log_to_wandb, log_artifact
+from utils.wandb import log_to_wandb
 import os
 
 
@@ -83,12 +83,9 @@ class WandbCallback:
 
         return summary
 
-    def log_model_artifact(self, model_path, metadata=None):
-        """Log model as a wandb artifact."""
-        if not self.use_wandb or not wandb.run:
-            return None
-
-        return log_artifact(model_path, artifact_type="model", metadata=metadata)
+    def log_model_artifact(self, *args, **kwargs):
+        """Log model as a wandb artifact (using log_to_wandb)."""
+        return log_to_wandb(*args, **kwargs)
 
 
 class CompositeCallback:

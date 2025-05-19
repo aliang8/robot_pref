@@ -41,7 +41,7 @@ def load_tensordict(file_path):
     print(f"Fields: {list(data.keys())}")
     return data
 
-def process_data_trajectories(data_path):
+def process_data_trajectories(data_path, device="cpu"):
     """
     Load and process data into trajectories based on "episode" key from a data file.
 
@@ -52,7 +52,7 @@ def process_data_trajectories(data_path):
         trajectories: List of processed trajectories.
     """
     data = load_tensordict(data_path)
-
+    data = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in data.items()}
     # Group data by episode
     unique_episodes = data["episode"].unique()
 

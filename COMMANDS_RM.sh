@@ -8,7 +8,13 @@ python train_reward_model_active.py \
     data.data_path="/scr2/shared/pref/datasets/robomimic/lift/mg_image_dense.pt" \
     active_learning.uncertainty_method=random \
     data.segment_length=64 \
-    active_learning.max_queries=50
+    active_learning.max_queries=50 \
+    data.data_path=/scr2/shared/pref/datasets/robomimic/lift/dtw_matrix_64.pkl
+    
+# precompute dtw matrix
+python preprocess_dtw_matrix.py \
+    --data_path="/scr2/shared/pref/datasets/robomimic/lift/mg_image_dense.pt" \
+    --segment_length=64 
     
 # train reward model with active offline learning + augmentations
 python train_reward_model_active.py \

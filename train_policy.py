@@ -31,11 +31,11 @@ from d3rlpy.algos import IQL, DiscreteBC, BC, BCConfig, IQLConfig
 from d3rlpy.models.encoders import VectorEncoderFactory
 
 # Import utility functions
-from utils.trajectory import load_tensordict, RANDOM_SEED
+from utils.data import load_tensordict
 from utils.env import MetaWorldEnvCreator, RobomimicEnvCreator
 from utils.callbacks import WandbCallback, CompositeCallback
 from utils.wandb import log_to_wandb
-from utils.eval import evaluate_policy_manual, custom_evaluate_on_environment
+from utils.eval import evaluate_policy_manual, custom_evaluate_on_environment, RANDOM_SEED
 from utils.data import AttrDict
 from utils.viz import create_video_grid
 from utils.seed import set_seed

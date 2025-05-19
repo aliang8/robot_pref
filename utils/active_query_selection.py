@@ -4,14 +4,6 @@ import random
 from tqdm import tqdm
 
 
-def compute_entropy(probs):
-    """Compute entropy of preference probabilities."""
-    # Add small epsilon to avoid log(0)
-    eps = 1e-8
-    probs = torch.clamp(probs, min=eps, max=1 - eps)
-    return -torch.sum(probs * torch.log(probs), dim=-1)
-
-
 def compute_uncertainty_scores(
     model, segment_pairs, segment_start_end, data, method="entropy", device="cuda"   
 ):
@@ -85,19 +77,14 @@ def compute_uncertainty_scores(
             p = torch.clamp(probs, min=eps, max=1 - eps)
             entropy = -p * torch.log(p) - (1 - p) * torch.log(1 - p)
 
-            # Take mean entropy over timesteps
+            # Take mean entropy over models
             score = entropy.mean().item()
 
         elif method == "disagreement":
             # Compute preference probability for each model
             logits = reward1 - reward2  # Shape: [num_models]
-            # probs = torch.sigmoid(logits)  # Shape: [num_models]
 
-            # probs = probs.sum(dim=-1) # sum over timesteps
-            # # Disagreement is variance in preference probabilities across models
-            # score = probs.var().item()
-
-            # better to compute variance over raw reward differences
+            # Compute variance over models
             score = logits.var().item()
         else:
             raise ValueError(f"Invalid method: {method}")
