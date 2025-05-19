@@ -30,10 +30,10 @@ def log_to_wandb(metrics, prefix="", epoch=None):
             log_dict[f"{prefix}{key}"] = value
         elif isinstance(value, wandb.Video):
             # Log videos separately
-            wandb.log({f"{prefix}{key}": value})
+            wandb_run.log({f"{prefix}{key}": value})
         elif isinstance(value, wandb.Image):
             # Log images separately
-            wandb.log({f"{prefix}{key}": value})
+            wandb_run.log({f"{prefix}{key}": value})
 
     # Log scalar metrics
     if log_dict:

@@ -25,7 +25,7 @@ from sklearn.preprocessing import StandardScaler
 
 # Import d3rlpy components
 from d3rlpy.dataset import MDPDataset
-from d3rlpy.algos import IQL, DiscreteBC, BC, BCConfig, IQLConfig
+from d3rlpy.algos import IQL, BC
 
 # from d3rlpy.metrics.scorer import evaluate_on_environment
 from d3rlpy.models.encoders import VectorEncoderFactory
@@ -40,30 +40,6 @@ from utils.data import AttrDict
 from utils.viz import create_video_grid
 from utils.seed import set_seed
 from models import RewardModel
-
-# Import evaluation and rendering utilities
-from utils.eval import evaluate_policy_manual, custom_evaluate_on_environment
-
-# Import environment utilities
-from utils.env import get_metaworld_env, MetaWorldEnvCreator
-
-# Import visualization utilities
-from utils.viz import create_video_grid
-
-# Import data utilities
-from utils.data import AttrDict
-
-# Import callback utilities
-from utils.callbacks import WandbCallback, CompositeCallback
-
-# Import wandb utilities
-from utils.wandb import log_to_wandb
-
-# Set seed for reproducibility
-torch.manual_seed(RANDOM_SEED)
-np.random.seed(RANDOM_SEED)
-random.seed(RANDOM_SEED)
-
 
 def is_valid_video_file(file_path):
     """Simple check if a video file exists and is valid."""
@@ -332,10 +308,6 @@ def main(cfg: DictConfig):
             "DATASET_NAME", dataset_name
         )
 
-    if hasattr(cfg.output, "artifact_name"):
-        cfg.output.artifact_name = cfg.output.artifact_name.replace(
-            "DATASET_NAME", dataset_name
-        )
 
     print("\n" + "=" * 50)
     print(f"Training {algorithm_name.upper()} policy")
@@ -358,7 +330,7 @@ def main(cfg: DictConfig):
             run_name = f"{algorithm_name.upper()}_{dataset_name}_{time.strftime('%Y%m%d_%H%M%S')}"
 
         # Initialize wandb
-        wandb.init(
+        wandb_run = wandb.init(
             project=cfg.wandb.project,
             entity=cfg.wandb.entity,
             name=run_name,
@@ -367,7 +339,9 @@ def main(cfg: DictConfig):
             notes=cfg.wandb.notes,
         )
 
-        print(f"Wandb initialized: {wandb.run.name}")
+        print(f"Wandb initialized: {wandb_run.name}")
+    else:
+        wandb_run = None
 
     # Create output directory
     os.makedirs(cfg.output.output_dir, exist_ok=True)
@@ -396,7 +370,7 @@ def main(cfg: DictConfig):
     if algorithm_name.lower() == "iql":
         # For IQL, we need a reward model
         # Load reward model
-        if not cfg.data.use_zero_rewards:
+        if not cfg.data.use_zero_rewards and not cfg.data.use_ground_truth:
             reward_model = RewardModel(
                 state_dim, action_dim, hidden_dims=cfg.model.hidden_dims
             )
@@ -495,32 +469,32 @@ def main(cfg: DictConfig):
 
     if algorithm_name.lower() == "iql":
         # Initialize IQL algorithm
-        # algo = IQL(
-        #     actor_learning_rate=cfg.model.actor_learning_rate,
-        #     critic_learning_rate=cfg.model.critic_learning_rate,
-        #     batch_size=cfg.model.batch_size,
-        #     gamma=cfg.model.gamma,
-        #     tau=cfg.model.tau,
-        #     n_critics=cfg.model.n_critics,
-        #     expectile=cfg.model.expectile,
-        #     weight_temp=cfg.model.weight_temp,
-        #     encoder_factory=VectorEncoderFactory(cfg.model.encoder_dims),
-        #     use_gpu=torch.cuda.is_available()
-        # )
-        iql_config = IQLConfig(**cfg.iql)
-        algo = iql_config.create()
+        algo = IQL(
+            actor_learning_rate=cfg.model.actor_learning_rate,
+            critic_learning_rate=cfg.model.critic_learning_rate,
+            batch_size=cfg.model.batch_size,
+            gamma=cfg.model.gamma,
+            tau=cfg.model.tau,
+            n_critics=cfg.model.n_critics,
+            expectile=cfg.model.expectile,
+            weight_temp=cfg.model.weight_temp,
+            encoder_factory=VectorEncoderFactory(cfg.model.encoder_dims),
+            use_gpu=torch.cuda.is_available()
+        )
+        # iql_config = IQLConfig(**cfg.iql)
+        # algo = iql_config.create()
 
     elif algorithm_name.lower() == "bc":
         # Initialize BC algorithm
         # TODO: This doesn't work because of version mismatch I think (using d3rlpy 2.8.1)
-        # algo = BC(
-        #     learning_rate=cfg.model.learning_rate,
-        #     batch_size=cfg.model.batch_size,
-        #     encoder_factory=VectorEncoderFactory(cfg.model.encoder_dims),
-        #     use_gpu=torch.cuda.is_available()
-        # )
-        bc_config = BCConfig(**cfg.bc)
-        algo = bc_config.create()
+        algo = BC(
+            learning_rate=cfg.model.learning_rate,
+            batch_size=cfg.model.batch_size,
+            encoder_factory=VectorEncoderFactory(cfg.model.encoder_dims),
+            use_gpu=torch.cuda.is_available()
+        )
+        # bc_config = BCConfig(**cfg.bc)
+        # algo = bc_config.create()
 
         # For BC with weight decay
         if hasattr(cfg.model, "use_weight_decay") and cfg.model.use_weight_decay:
@@ -550,7 +524,7 @@ def main(cfg: DictConfig):
     print(f"Training for {n_epochs} epochs")
 
     # Initialize wandb callback
-    wandb_callback = WandbCallback(use_wandb=cfg.wandb.use_wandb)
+    wandb_callback = WandbCallback(wandb_run=wandb_run)
 
     # For tracking evaluation metrics
     evaluation_results = []
@@ -623,11 +597,11 @@ def main(cfg: DictConfig):
         evaluation_results.append((epoch, eval_metrics_with_best))
 
         # Log metrics to wandb if enabled
-        if cfg.wandb.use_wandb:
-            log_to_wandb(eval_metrics_with_best, prefix="eval", epoch=epoch)
+        if wandb_run:
+            log_to_wandb(eval_metrics_with_best, prefix="eval", epoch=epoch, wandb_run=wandb_run)
 
             # Log video grid if videos were recorded
-            if video_recording and video_path and wandb.run:
+            if video_recording and video_path and wandb_run:
                 try:
                     video_files = glob.glob(f"{video_path}*.mp4")
                     # Filter out invalid video files
@@ -658,7 +632,7 @@ def main(cfg: DictConfig):
                                     fps=cfg.evaluation.video_fps,
                                     format="mp4",
                                 )
-                                log_to_wandb({"video_grid": video_obj}, prefix="eval")
+                                log_to_wandb({"video_grid": video_obj}, prefix="eval", wandb_run=wandb_run)
                         except Exception as e:
                             print(f"Error creating video grid: {e}")
                 except Exception as e:
@@ -680,28 +654,28 @@ def main(cfg: DictConfig):
 
     # Train the model
     # TODO: This doesn't work because of version mismatch I think (using d3rlpy 2.8.1)
-    # training_metrics = algo.fit(
-    #     dataset,
-    #     n_epochs=n_epochs,
-    #     eval_episodes=None,  # Don't use the built-in eval which expects episodes format
-    #     save_interval=10,
-    #     scorers=scorers,
-    #     experiment_name=experiment_name,
-    #     with_timestamp=True,
-    #     logdir=d3rlpy_logdir,
-    #     verbose=True,
-    #     callback=composite_callback  # Use the composite callback instead of a list
-    # )
     training_metrics = algo.fit(
         dataset,
-        n_steps=n_epochs * cfg.training.n_steps_per_epoch,
-        n_steps_per_epoch=cfg.training.n_steps_per_epoch,
+        n_epochs=n_epochs,
+        eval_episodes=None,  # Don't use the built-in eval which expects episodes format
         save_interval=10,
-        evaluators=scorers,
+        scorers=scorers,
         experiment_name=experiment_name,
         with_timestamp=True,
-        callback=composite_callback,  # Use the composite callback instead of a list
+        logdir=d3rlpy_logdir,
+        verbose=True,
+        callback=composite_callback  # Use the composite callback instead of a list
     )
+    # training_metrics = algo.fit(
+    #     dataset,
+    #     n_steps=n_epochs * cfg.training.n_steps_per_epoch,
+    #     n_steps_per_epoch=cfg.training.n_steps_per_epoch,
+    #     save_interval=10,
+    #     evaluators=scorers,
+    #     experiment_name=experiment_name,
+    #     with_timestamp=True,
+    #     callback=composite_callback,  # Use the composite callback instead of a list
+    # )
 
     # Print the training metrics summary
     print("\nTraining metrics summary:")
@@ -732,11 +706,11 @@ def main(cfg: DictConfig):
         print(f"Error printing metrics: {e}")
 
     # Log final training metrics to wandb
-    if cfg.wandb.use_wandb:
+    if wandb_run:
         # Log training metrics if available
         if training_metrics:
             try:
-                log_to_wandb(training_metrics, prefix="train_final")
+                log_to_wandb(training_metrics, prefix="train_final", wandb_run=wandb_run)
             except:
                 print("Warning: Could not log algorithm's training metrics to wandb")
 
@@ -765,9 +739,9 @@ def main(cfg: DictConfig):
                     summary_metrics[f"best_{k}"] = v
 
         # Log the combined summary
-        log_to_wandb(summary_metrics, prefix="summary")
+        log_to_wandb(summary_metrics, prefix="summary", wandb_run=wandb_run)
         # Also log a final plot of training losses if available
-        if wandb.run and wandb_callback.training_losses:
+        if wandb_run and wandb_callback.training_losses:
             try:
                 # Create plot of training losses
                 plt.figure(figsize=(10, 6))
@@ -782,7 +756,7 @@ def main(cfg: DictConfig):
                 plt.tight_layout()
 
                 # Log to wandb
-                log_to_wandb({"media/plots/training_losses": wandb.Image(plt)})
+                log_to_wandb({"media/plots/training_losses": wandb.Image(plt)}, wandb_run=wandb_run)
                 plt.close()
             except Exception as e:
                 print(f"Warning: Could not create training loss plot: {e}")
@@ -806,8 +780,7 @@ def main(cfg: DictConfig):
     algo.save_model(model_path)
     print(f"Model saved to {model_path}")
 
-    # Log model as wandb artifact if enabled
-    if cfg.wandb.use_wandb and wandb.run:
+    if wandb_run:
         try:
             # Create metadata about the model
             model_metadata = {
@@ -825,20 +798,6 @@ def main(cfg: DictConfig):
                         v, (int, float, np.int64, np.float32, np.float64, np.number)
                     ):
                         model_metadata[f"best_{k}"] = v
-
-            # Use artifact name from config if available
-            if hasattr(cfg.output, "artifact_name"):
-                artifact_name = cfg.output.artifact_name
-            else:
-                # Fall back to a default name
-                artifact_name = f"{algorithm_name}_{Path(cfg.data.data_path).stem}"
-
-            # Log the artifact with metadata
-            artifact = wandb_callback.log_model_artifact(
-                model_path, artifact_name=artifact_name, metadata=model_metadata
-            )
-            if artifact:
-                print(f"Model logged to wandb as artifact: {artifact.name}")
         except Exception as e:
             print(f"Warning: Could not log model as wandb artifact: {e}")
 
@@ -876,11 +835,11 @@ def main(cfg: DictConfig):
         )
 
         # Log final results to wandb
-        if cfg.wandb.use_wandb:
-            log_to_wandb(evaluation_metrics, prefix="final_eval")
+        if wandb_run:
+            log_to_wandb(evaluation_metrics, prefix="final_eval", wandb_run=wandb_run)
 
             # Log videos if available
-            if video_recording and video_path and wandb.run:
+            if video_recording and video_path and wandb_run:
                 try:
                     video_files = glob.glob(f"{video_path}*.mp4")
                     print(f"Found {len(video_files)} final evaluation video files")

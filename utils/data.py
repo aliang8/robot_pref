@@ -120,11 +120,11 @@ def get_gt_preferences(data, segment_indices, pairs):
         start_idx1, end_idx1 = segment_indices[idx1]
         start_idx2, end_idx2 = segment_indices[idx2]    
         
-        reward1 = data["reward"][start_idx1:end_idx1].sum().item()
-        reward2 = data["reward"][start_idx2:end_idx2].sum().item()
+        return1 = data["reward"][start_idx1:end_idx1].sum().item()
+        return2 = data["reward"][start_idx2:end_idx2].sum().item()
 
         # Determine preference
-        if reward1 > reward2:
+        if return1 > return2:
             preference_labels.append(1)
         else:
             preference_labels.append(2)

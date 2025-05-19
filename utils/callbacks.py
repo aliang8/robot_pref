@@ -1,14 +1,13 @@
 import numpy as np
-import wandb
+
 from utils.wandb import log_to_wandb
-import os
 
 
 class WandbCallback:
     """Simplified callback for d3rlpy to log metrics to wandb."""
 
-    def __init__(self, use_wandb=True, prefix="train"):
-        self.use_wandb = use_wandb
+    def __init__(self, wandb_run, prefix="train"):
+        self.wandb_run = wandb_run
         self.prefix = prefix
         self.epoch = 0
         self.best_eval_metrics = None
@@ -24,27 +23,22 @@ class WandbCallback:
         metrics = {"epoch": epoch, "total_step": total_step}
 
         # Get metrics from logger if available
-        try:
-            logger = algo._active_logger
-            if hasattr(logger, "_metrics_buffer"):
-                for name, buffer in logger._metrics_buffer.items():
-                    if buffer:  # Check if there are values
-                        # Calculate the mean of accumulated values
-                        mean_value = np.mean(buffer)
-                        metrics[name] = mean_value
 
-                        # Track loss values for plotting
-                        if name.endswith("_loss") or name.startswith("loss"):
-                            self.training_losses[name] = self.training_losses.get(
-                                name, []
-                            ) + [mean_value]
-        except Exception as e:
-            print(f"Error processing metrics: {e}")
+        logger = algo._active_logger
+        if hasattr(logger, "_metrics_buffer"):
+            for name, buffer in logger._metrics_buffer.items():
+                if buffer:  # Check if there are values
+                    # Calculate the mean of accumulated values
+                    mean_value = np.mean(buffer)
+                    metrics[name] = mean_value
 
-        # Log to wandb if enabled
-        if self.use_wandb and wandb.run:
-            log_to_wandb(metrics, prefix=self.prefix, epoch=epoch)
+                    # Track loss values for plotting
+                    if name.endswith("_loss") or name.startswith("loss"):
+                        self.training_losses[name] = self.training_losses.get(
+                            name, []
+                        ) + [mean_value]
 
+        log_to_wandb(metrics, prefix=self.prefix, epoch=epoch, wandb_run=self.wandb_run)
         return metrics
 
     def update_eval_metrics(self, eval_metrics, epoch):
@@ -82,11 +76,6 @@ class WandbCallback:
                 summary[f"mean_{loss_name}"] = np.mean(values)
 
         return summary
-
-    def log_model_artifact(self, *args, **kwargs):
-        """Log model as a wandb artifact (using log_to_wandb)."""
-        return log_to_wandb(*args, **kwargs)
-
 
 class CompositeCallback:
     """A callback that combines multiple callbacks into one."""
