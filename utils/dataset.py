@@ -58,7 +58,7 @@ class PreferenceDataset(Dataset):
             elif self.norm_method == 'minmax':
                 print(f"Observation min: {self.norm_stats['min'].mean().item():.4f}, max: {self.norm_stats['max'].mean().item():.4f}")
         
-        print(f"Dataset initialized with data length: {self.data_length}, normalize_obs={normalize_obs}")
+        # print(f"Dataset initialized with data length: {self.data_length}, normalize_obs={normalize_obs}")
     
     def _compute_normalization_statistics(self):
         """Compute normalization statistics from the dataset."""
@@ -217,7 +217,7 @@ def create_data_loaders(preference_dataset, train_ratio=0.8, val_ratio=0.1, batc
     
     # Shuffle the dataset to ensure random sampling if requested
     if shuffle_dataset:
-        print("Shuffling dataset before splitting...")
+        # print("Shuffling dataset before splitting...")
         preference_dataset = shuffle_preference_dataset(preference_dataset, seed=seed)
     
     # Calculate split sizes

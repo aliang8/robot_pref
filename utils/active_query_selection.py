@@ -138,6 +138,9 @@ def select_active_pref_query(
         method=uncertainty_method,
     )
 
+    sorted_scores = sorted(uncertainty_scores, reverse=True)
+    print("Top 5 uncertainty scores: ", sorted_scores[:5])
+
     # Sort pairs by uncertainty (highest to lowest)
     sorted_indices = np.argsort(uncertainty_scores)[::-1]
 
