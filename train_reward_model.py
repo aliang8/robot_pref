@@ -77,7 +77,6 @@ def main(cfg: DictConfig):
     else:
         wandb_run = None
 
-    output_dir = cfg.output.output_dir
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     effective_num_workers = cfg.training.num_workers
@@ -144,16 +143,13 @@ def main(cfg: DictConfig):
 
     # Start timing the training
     start_time = time.time()
-    os.makedirs(output_dir, exist_ok=True)
-    model_dir = output_dir
     dataset_name = Path(cfg.data.data_path).stem
-    hidden_dims_str = "_".join(map(str, cfg.model.hidden_dims))
+    cfg.output.model_dir_name = cfg.output.model_dir_name.replace("DATASET_NAME", dataset_name)
+    model_dir_name = os.path.join(cfg.output.output_dir, cfg.output.model_dir_name)
+    os.makedirs(model_dir_name, exist_ok=True)
+    model_path = os.path.join(model_dir_name, "model.pt")
 
-    sub_dir = f"{dataset_name}_model_seg{cfg.data.segment_length}_hidden{hidden_dims_str}_epochs{cfg.training.num_epochs}_pairs{cfg.data.num_pairs}"
-    os.makedirs(os.path.join(model_dir, sub_dir), exist_ok=True)
-    model_path = os.path.join(model_dir, sub_dir, "model.pt")
-
-    training_curve_path = os.path.join(model_dir, sub_dir, "training_curve.png")
+    training_curve_path = os.path.join(model_dir_name, "training_curve.png")
 
     # Train the model
     print("\nTraining reward model...")
@@ -193,7 +189,7 @@ def main(cfg: DictConfig):
     analyze_rewards(
         model=model,
         episodes=episodes,
-        output_file=os.path.join(model_dir, sub_dir, "reward_grid.png"),
+        output_file=os.path.join(model_dir_name, "reward_grid.png"),
         wandb_run=wandb_run,
         reward_max=reward_max,
         reward_min=reward_min

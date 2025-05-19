@@ -137,7 +137,7 @@ def plot_reward_grid(
                 normalized_gt = np.tanh(gt_rewards)
 
                 # Add range information to the title
-                raw_min, raw_max = gt_rewards.min(), gt_rewards.max()
+                raw_min, raw_max = gt_rewards.mibn(), gt_rewards.max()
                 ax.set_title(
                     f"Episode {ep_id}, GT Range: [{raw_min:.2f}, {raw_max:.2f}]",
                     fontsize=14,
@@ -145,7 +145,7 @@ def plot_reward_grid(
 
             # Plot on same axis with different color
             gt_line = ax.plot(
-                steps, normalized_gt, "g--", linewidth=2, label="Ground Truth"
+                steps, normalized_gt, "g--", linewidth=3, label="Ground Truth"
             )[0]  # Get the line object
 
             # Set grid

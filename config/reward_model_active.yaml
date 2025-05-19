@@ -39,6 +39,7 @@ output:
 
 training:
   save_model_every: 5
+  reward_analysis_every: 5
 
 wandb:
   use_wandb: false

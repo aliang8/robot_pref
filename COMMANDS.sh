@@ -23,7 +23,14 @@ python preprocess_dtw_matrix.py \
 # train reward model with active offline learning
 python train_reward_model_active.py \
     data.data_path=/scr/aliang80/robot_pref/labeled_datasets/buffer_assembly-v2_balanced.pt \
-    active_learning.uncertainty_method=entropy,disagreement \
+    active_learning.uncertainty_method=disagreement \
+    --multirun
+
+# with augmentations
+python train_reward_model_active.py \
+    data.data_path=/scr/aliang80/robot_pref/labeled_datasets/buffer_assembly-v2_balanced.pt \
+    active_learning.uncertainty_method=disagreement \
+    dtw_augmentation.enabled=true \
     --multirun
 
 # train policy using learned reward model

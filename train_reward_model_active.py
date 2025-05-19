@@ -219,8 +219,9 @@ def active_preference_learning(cfg, dataset_name=None):
 
     # Find all possible segment pairs (num_segments choose 2) and sample data.subsamples from them
     all_segment_pairs = list(itertools.combinations(range(num_segments), 2))
+    total_pairs = len(all_segment_pairs)
     all_segment_pairs = random.sample(all_segment_pairs, cfg.data.subsamples)
-    print(f"Sampled {len(all_segment_pairs)} pairs from {len(all_segment_pairs)} total pairs")
+    print(f"Sampled {len(all_segment_pairs)} pairs from {total_pairs} total pairs")
 
     # Test set
     test_indices = random.sample(range(len(all_segment_pairs)), cfg.data.num_test_pairs)
@@ -287,8 +288,12 @@ def active_preference_learning(cfg, dataset_name=None):
 
     while total_labeled < max_queries and len(unlabeled_pairs) > 0:        
         iteration += 1
-        print(f"\n--- Active Learning Iteration {iteration} ---")
-        print(f"Currently have {total_labeled} labeled pairs")
+        print("\n" + "=" * 80)
+        print(f"ACTIVE LEARNING ITERATION {iteration}")
+        print("=" * 80)
+        print(f"Progress: {total_labeled}/{max_queries} labeled pairs ({total_labeled/max_queries*100:.1f}%)")
+        print(f"Number candidate pairs: {len(candidate_pairs)}")
+        print("-" * 80)
         
         if iteration == 1:
             rand_idx = random.randint(0, len(candidate_pairs) - 1)
@@ -327,7 +332,7 @@ def active_preference_learning(cfg, dataset_name=None):
         dtw_augmented_preferences = []
 
         if dtw_enabled and distance_matrix is not None and len(selected_query_pair) > 0:
-            print(f"Augmenting {len(selected_query_pair)} selected pairs using DTW (k={dtw_k_augment})...")
+            print(f"\tAugmenting {len(selected_query_pair)} selected pairs using DTW (k={dtw_k_augment})...")
             
             for qp, preference_val in zip(selected_query_pair, selected_query_pref):
                 i, j = qp # These are original segment indices
@@ -364,6 +369,9 @@ def active_preference_learning(cfg, dataset_name=None):
             # Add dtw augmentations
             labeled_pairs.extend(dtw_augmented_pairs)
             labeled_preferences.extend(dtw_augmented_preferences)
+
+            print(f"\tNumber of dtw augmented pairs: {len(dtw_augmented_pairs)}")
+            print(f"\tNumber of labeled pairs after DTW augmentation: {len(labeled_pairs)}")
             candidate_pairs = list(set(candidate_pairs) - set(dtw_augmented_pairs))
         # --- DTW Augmentation End ---
 
@@ -459,18 +467,18 @@ def active_preference_learning(cfg, dataset_name=None):
             break
 
         # Run reward analysis
-        print("\n--- Running Reward Analysis ---")
-
-        analyze_rewards(
-            model=ensemble.models[0],
-            episodes=episodes,
-            output_file=os.path.join(model_dir, "reward_analysis", f"reward_grid_iter_{iteration}.png"),
-            num_episodes=9,
-            wandb_run=wandb_run,
-            reward_max=reward_max,
-            reward_min=reward_min,
-            random_seed=cfg.random_seed
-        )
+        if iteration % cfg.training.reward_analysis_every == 0:
+            print("\n--- Running Reward Analysis ---")
+            analyze_rewards(
+                model=ensemble.models[0],
+                episodes=episodes,
+                output_file=os.path.join(model_dir, "reward_analysis", f"reward_grid_iter_{iteration}.png"),
+                num_episodes=9,
+                wandb_run=wandb_run,
+                reward_max=reward_max,
+                reward_min=reward_min,
+                random_seed=cfg.random_seed
+            )
 
             
     # Train final model on all labeled data
@@ -488,16 +496,16 @@ def active_preference_learning(cfg, dataset_name=None):
         output_dir=model_dir
     )
 
-    # analyze_rewards(
-    #     model=final_model,
-    #     episodes=episodes,
-    #     output_file=os.path.join(model_dir, "reward_grid.png"),
-    #     num_episodes=9,
-    #     wandb_run=wandb_run,
-    #     reward_max=reward_max,
-    #     reward_min=reward_min,
-    #     random_seed=cfg.random_seed
-    # )
+    analyze_rewards(
+        model=final_model,
+        episodes=episodes,
+        output_file=os.path.join(model_dir, "reward_grid.png"),
+        num_episodes=9,
+        wandb_run=wandb_run,
+        reward_max=reward_max,
+        reward_min=reward_min,
+        random_seed=cfg.random_seed
+    )
 
     # Also evaluate on the consistent test set if available
     if test_loader is not None:

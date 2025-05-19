@@ -4,8 +4,14 @@ import torch
 from torch import optim
 from tqdm import tqdm
 import wandb
+import seaborn as sns
 
 from utils.loss import bradley_terry_loss
+
+sns.set_style("white")
+sns.set_style("ticks")
+sns.set_context('talk')
+plt.rc('text', usetex=True)  # camera-ready formatting + latex in plots
 
 def evaluate_model_on_test_set(model, test_loader, device):
     """Evaluate model performance on the test set.
@@ -248,14 +254,20 @@ def train_model(
 
     # Plot training curve
     if train_losses:
-        plt.figure(figsize=(10, 6))
-        plt.plot(train_losses, label="Train Loss")
+        plt.figure(figsize=(6, 4))
+        plt.plot(train_losses, label="Train Loss", linewidth=2)
         if val_losses:
-            plt.plot(val_losses, label="Validation Loss")
+            plt.plot(val_losses, label="Validation Loss", linewidth=2)
         plt.xlabel("Epoch")
         plt.ylabel("Loss")
-        plt.title("Reward Model Training")
         plt.legend()
+        plt.tight_layout()
+        # remove top and right spines
+        plt.gca().spines['top'].set_visible(False)
+        plt.gca().spines['right'].set_visible(False)
+
+        # remove border legend
+        plt.legend(frameon=False, loc='upper right', handlelength=1, fontsize=12)
 
         # Use the provided output path or default
         plot_path = output_path if output_path else "reward_model_training.png"
