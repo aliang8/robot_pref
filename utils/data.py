@@ -121,7 +121,7 @@ def get_gt_preferences(data, segment_indices, pairs):
     """
     preference_labels = []
 
-    for idx1, idx2 in tqdm.tqdm(pairs):
+    for idx1, idx2 in tqdm(pairs):
         # Get the segment indices
         start_idx1, end_idx1 = segment_indices[idx1]
         start_idx2, end_idx2 = segment_indices[idx2]
@@ -173,7 +173,7 @@ def segment_episodes(data, segment_length):
         episode_start_indices[episode_idx] = abs_idx
         abs_idx += episode_len
 
-    for episode_idx in tqdm.tqdm(unique_episodes):
+    for episode_idx in tqdm(unique_episodes):
         episode_abs_start = episode_start_indices[episode_idx]
 
         # Create segments_per_trajectory evenly spaced segments

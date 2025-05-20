@@ -240,7 +240,7 @@ def main(cfg: DictConfig):
             f.write("=" * 50 + "\n")
         
     print("\nReward model training complete!")
-
+    print("Model saved to: ", model_path)
 
 if __name__ == "__main__":
     main()

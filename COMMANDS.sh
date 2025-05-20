@@ -124,3 +124,5 @@ python train_reward_model_active.py \
     dtw_augmentation.enabled=true \
     hydra/launcher=slurm \
     --multirun
+
+python run_reward_policy_pipeline.py 
