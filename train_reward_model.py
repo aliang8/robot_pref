@@ -99,7 +99,7 @@ def main(cfg: DictConfig):
 
     segments, segment_indices = segment_episodes(data_cpu, cfg.data.segment_length)
 
-    # Find all possible segment pairs (num_segments choose 2) and sample data.subsamples from them
+    # Find all possible segment pairs (num_segments choose 2) and sample data.num_pairs from them
     all_segment_pairs = list(itertools.combinations(range(len(segment_indices)), 2))
     all_segment_pairs = random.sample(all_segment_pairs, cfg.data.num_pairs)
     print(f"Sampled {len(all_segment_pairs)} pairs from {len(all_segment_pairs)} total pairs")
@@ -183,7 +183,7 @@ def main(cfg: DictConfig):
     print(f"Model saved to: {model_path}")
 
     # Run reward analysis
-    episodes = process_data_trajectories(cfg.data.data_path)    
+    episodes = process_data_trajectories(data, device)    
     reward_max = data_cpu["reward"].max().item()
     reward_min = data_cpu["reward"].min().item()
     analyze_rewards(
