@@ -13,8 +13,9 @@ from utils.seed import set_seed
 
 sns.set_style("white")
 sns.set_style("ticks")
-sns.set_context('talk')
-plt.rc('text', usetex=True)  # camera-ready formatting + latex in plots
+sns.set_context("talk")
+plt.rc("text", usetex=True)  # camera-ready formatting + latex in plots
+
 
 def predict_rewards(model, episodes):
     """Predict rewards for each step in the episodes using the reward model.
@@ -60,11 +61,18 @@ def plot_reward_grid(
         reward_max: Global maximum reward for normalization
     """
     rows, cols = grid_size
-    fig, axes = plt.subplots(rows, cols, figsize=(5 * cols, 4 * rows), squeeze=False, sharex='col', sharey=True)
+    fig, axes = plt.subplots(
+        rows,
+        cols,
+        figsize=(5 * cols, 4 * rows),
+        squeeze=False,
+        sharex="col",
+        sharey=True,
+    )
 
     # Define smoothing kernel once
     kernel = np.ones(smooth_window) / smooth_window
-    
+
     # Keep track of the line objects for the legend
     pred_line = None
     gt_line = None
@@ -88,8 +96,8 @@ def plot_reward_grid(
                 continue
 
             # Remove top and right spines
-            ax.spines['top'].set_visible(False)
-            ax.spines['right'].set_visible(False)
+            ax.spines["top"].set_visible(False)
+            ax.spines["right"].set_visible(False)
 
             pred_rewards = episode["predicted_rewards"].detach().cpu().numpy()
             steps = np.arange(len(pred_rewards))
@@ -150,28 +158,28 @@ def plot_reward_grid(
 
             # Set grid
             ax.grid(True, alpha=0.3)
-            ax.set_ylim(-1.05, 1.05)  # Consistent y-range for all plots                
+            ax.set_ylim(-1.05, 1.05)  # Consistent y-range for all plots
             ax.tick_params(axis="both", labelsize=14)
 
     # First do a tight layout to get proper spacing
     plt.tight_layout()
-    
+
     # Adjust layout with more space at bottom for labels and legend
     plt.subplots_adjust(left=0.12, bottom=0.15, right=0.95, top=0.95)
-    
+
     fig.supxlabel("Environment Steps", fontsize=20, y=0.1)
     fig.supylabel("Per-step reward", fontsize=20, x=0.05)
-    
+
     # Add a common legend at the bottom of the figure with two columns
     if pred_line and gt_line:
         fig.legend(
-            [pred_line, gt_line], 
-            ["Predicted Rewards", "Ground Truth"], 
-            loc="lower center", 
-            ncol=2, 
+            [pred_line, gt_line],
+            ["Predicted Rewards", "Ground Truth"],
+            loc="lower center",
+            ncol=2,
             fontsize=14,
             frameon=False,
-            bbox_to_anchor=(0.5, 0.05)
+            bbox_to_anchor=(0.5, 0.05),
         )
 
     # Save the figure
@@ -180,7 +188,14 @@ def plot_reward_grid(
 
 
 def analyze_rewards(
-    model, episodes, output_file=None, num_episodes=9, reward_min=None, reward_max=None, wandb_run=None, random_seed=None
+    model,
+    episodes,
+    output_file=None,
+    num_episodes=9,
+    reward_min=None,
+    reward_max=None,
+    wandb_run=None,
+    random_seed=None,
 ):
     """Analyze rewards for episodes in the dataset.
 

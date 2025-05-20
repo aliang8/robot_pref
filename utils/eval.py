@@ -1,12 +1,21 @@
+import glob
 import os
-import gym
-import numpy as np
 import random
 import time
-import torch
-from tqdm import tqdm
+from pathlib import Path
+
+import gym
 import imageio
-from multiprocessing import get_context
+import numpy as np
+from tqdm import tqdm
+
+# from d3rlpy.metrics.scorer import evaluate_on_environment
+# Import d3rlpy components
+import wandb
+
+# Import utility functions
+from utils.viz import create_video_grid
+from utils.wandb import log_to_wandb
 
 # Default random seed for reproducibility
 RANDOM_SEED = 42
@@ -604,7 +613,7 @@ def evaluate_policy_manual(
 
             # Print environment info for the first episode
             if verbose and episode == 0:
-                print(f"Evaluating on environment with:")
+                print("Evaluating on environment with:")
                 print(f"  Observation space: {episode_env.observation_space}")
                 print(f"  Action space: {episode_env.action_space}")
 
@@ -740,7 +749,7 @@ def evaluate_policy_manual(
         mean_steps = np.mean(steps_to_complete)
 
         if verbose:
-            print(f"\nEvaluation Results:")
+            print("\nEvaluation Results:")
             print(f"  Mean return: {mean_return:.2f} ± {std_return:.2f}")
             print(f"  Success rate: {success_rate_pct:.1f}%")
             print(f"  Average steps per episode: {mean_steps:.1f}")
@@ -855,3 +864,85 @@ def custom_evaluate_on_environment(env):
         return avg_reward
 
     return scorer
+
+
+def eval_model(env, algo, cfg, epoch):
+    """
+    Run an evaluation of the trained policy in the environment,
+    optionally recording videos and logging results to wandb.
+    """
+
+    # Set up video directory for final evaluation
+    video_recording = getattr(cfg.evaluation, "record_video", False)
+    video_path = None
+
+    if video_recording:
+        video_path = Path(cfg.output.output_dir) / f"evaluation_epoch{epoch}" / "videos"
+        os.makedirs(video_path, exist_ok=True)
+        print(f"Epoch {epoch} evaluation videos will be saved to: {video_path}")
+
+    # Run evaluation
+    evaluation_metrics = evaluate_policy_manual(
+        env,
+        algo,
+        n_episodes=cfg.training.eval_episodes,
+        verbose=True,
+        parallel=getattr(cfg.evaluation, "parallel_eval", False),
+        num_workers=getattr(cfg.evaluation, "eval_workers", 1),
+        record_video=video_recording,
+        video_path=video_path,
+        video_fps=getattr(cfg.evaluation, "video_fps", 30),
+    )
+
+    # Print summary
+    print(
+        f"Final evaluation results: Mean return = {evaluation_metrics.get('mean_return', float('nan')):.2f}, "
+        f"Success rate = {evaluation_metrics.get('success_rate', float('nan')):.2f}, "
+        f"Episodes = {evaluation_metrics.get('num_episodes', 0)}"
+    )
+
+    # Log results to wandb
+    if wandb.run is not None:
+        log_to_wandb(evaluation_metrics, prefix="eval")
+
+        # Log videos if available
+        if video_recording and video_path:
+            video_files = glob.glob(f"{video_path}*.mp4")
+            print(f"Found {len(video_files)} final evaluation video files")
+
+            if video_files:
+                # Create a grid of videos if we have multiple
+                if len(video_files) > 1:
+                    print("Creating video grid from final evaluation videos...")
+                    grid_path = (
+                        f"{os.path.dirname(video_path)}/eval_grid_epoch{epoch}.mp4"
+                    )
+                    grid_path = create_video_grid(
+                        video_files,
+                        grid_path,
+                        max_videos=6,
+                        fps=getattr(cfg.evaluation, "video_fps", 30),
+                    )
+                    # Log the grid video with epoch as step for slider
+                    wandb.log(
+                        {
+                            "rollouts/video_grid": wandb.Video(
+                                grid_path,
+                                fps=getattr(cfg.evaluation, "video_fps", 30),
+                                format="mp4",
+                            )
+                        },
+                    )
+                else:
+                    # Log the single video with epoch as step for slider
+                    wandb.log(
+                        {
+                            "rollouts/video": wandb.Video(
+                                video_files[0],
+                                fps=getattr(cfg.evaluation, "video_fps", 30),
+                                format="mp4",
+                            )
+                        },
+                    )
+
+    print("Evaluation complete.")

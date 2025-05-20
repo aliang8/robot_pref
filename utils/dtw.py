@@ -14,11 +14,12 @@ def get_distance_matrix(query: np.ndarray, reference: np.ndarray):
     Returns:
         np.ndarray: Shape (N, M) distance matrix
     """
-    query_squared = np.sum(query ** 2, axis=1)[:, np.newaxis]
-    ref_squared = np.sum(reference ** 2, axis=1)[np.newaxis, :]
+    query_squared = np.sum(query**2, axis=1)[:, np.newaxis]
+    ref_squared = np.sum(reference**2, axis=1)[np.newaxis, :]
     cross_term = np.dot(query, reference.T)
     distance_matrix = np.sqrt(query_squared - 2 * cross_term + ref_squared)
     return distance_matrix
+
 
 @nb.njit
 def compute_accumulated_cost_matrix_dtw(C: np.ndarray):
@@ -42,6 +43,7 @@ def compute_accumulated_cost_matrix_dtw(C: np.ndarray):
         for m in range(1, M):
             D[n, m] = C[n, m] + min(D[n - 1, m], D[n, m - 1], D[n - 1, m - 1])
     return D
+
 
 @nb.njit
 def compute_optimal_warping_path_dtw(D: np.ndarray):
@@ -75,6 +77,7 @@ def compute_optimal_warping_path_dtw(D: np.ndarray):
         path.append((n, m))
     path.reverse()
     return np.array(path)
+
 
 def get_single_match(query: np.ndarray, reference: np.ndarray):
     """

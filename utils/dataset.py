@@ -6,10 +6,20 @@ from torch.utils.data import DataLoader, Dataset, random_split
 
 class PreferenceDataset(Dataset):
     """Dataset for segment preference pairs."""
-    def __init__(self, data, segment_pairs, segment_indices, preferences, normalize_obs=False, norm_method='standard', norm_stats=None):
+
+    def __init__(
+        self,
+        data,
+        segment_pairs,
+        segment_indices,
+        preferences,
+        normalize_obs=False,
+        norm_method="standard",
+        norm_stats=None,
+    ):
         """
         Initialize the dataset for preference learning.
-        
+
         Args:
             data: Dictionary containing observations and actions, or tensor
             segment_pairs: List of pairs of segment indices [(i, j), ...]
@@ -25,7 +35,7 @@ class PreferenceDataset(Dataset):
         self.preferences = preferences
         self.normalize_obs = normalize_obs
         self.norm_method = norm_method
-        
+
         # Determine the data length for bounds checking
         if isinstance(self.data, dict):
             # For dictionary data, use the observation tensor length
@@ -39,7 +49,7 @@ class PreferenceDataset(Dataset):
                 raise ValueError("Data dictionary must contain 'obs' or 'state' key")
         else:
             raise ValueError("Data must be a dictionary")
-        
+
         # Compute or use provided normalization statistics
         self.norm_stats = {}
         if self.normalize_obs:
@@ -51,15 +61,19 @@ class PreferenceDataset(Dataset):
                 # Compute normalization statistics from the data
                 print("Computing observation normalization statistics...")
                 self._compute_normalization_statistics()
-            
+
             # Print summary of normalization statistics
-            if self.norm_method == 'standard':
-                print(f"Observation mean: {self.norm_stats['mean'].mean().item():.4f}, std: {self.norm_stats['std'].mean().item():.4f}")
-            elif self.norm_method == 'minmax':
-                print(f"Observation min: {self.norm_stats['min'].mean().item():.4f}, max: {self.norm_stats['max'].mean().item():.4f}")
-        
+            if self.norm_method == "standard":
+                print(
+                    f"Observation mean: {self.norm_stats['mean'].mean().item():.4f}, std: {self.norm_stats['std'].mean().item():.4f}"
+                )
+            elif self.norm_method == "minmax":
+                print(
+                    f"Observation min: {self.norm_stats['min'].mean().item():.4f}, max: {self.norm_stats['max'].mean().item():.4f}"
+                )
+
         # print(f"Dataset initialized with data length: {self.data_length}, normalize_obs={normalize_obs}")
-    
+
     def _compute_normalization_statistics(self):
         """Compute normalization statistics from the dataset."""
         # Get the observations tensor
@@ -67,49 +81,51 @@ class PreferenceDataset(Dataset):
             obs = self.data[self.obs_key]
         else:
             obs = self.data
-        
+
         # For standard normalization, compute mean and std
-        if self.norm_method == 'standard':
+        if self.norm_method == "standard":
             # Compute along first dimension (time/batch)
             mean = obs.mean(dim=0)
             std = obs.std(dim=0)
             # Ensure std is not zero (replace zeros with ones)
             std = torch.where(std > 1e-6, std, torch.ones_like(std))
-            
-            self.norm_stats['mean'] = mean
-            self.norm_stats['std'] = std
-            
+
+            self.norm_stats["mean"] = mean
+            self.norm_stats["std"] = std
+
         # For min-max normalization, compute min and max
-        elif self.norm_method == 'minmax':
+        elif self.norm_method == "minmax":
             # Compute along first dimension (time/batch)
             min_vals = obs.min(dim=0)[0]
             max_vals = obs.max(dim=0)[0]
             # Ensure range is not zero (replace zero-range with unit range)
             range_vals = max_vals - min_vals
-            valid_range = torch.where(range_vals > 1e-6, range_vals, torch.ones_like(range_vals))
-            
-            self.norm_stats['min'] = min_vals
-            self.norm_stats['max'] = max_vals
-            self.norm_stats['range'] = valid_range
-        
+            valid_range = torch.where(
+                range_vals > 1e-6, range_vals, torch.ones_like(range_vals)
+            )
+
+            self.norm_stats["min"] = min_vals
+            self.norm_stats["max"] = max_vals
+            self.norm_stats["range"] = valid_range
+
         else:
             raise ValueError(f"Unsupported normalization method: {self.norm_method}")
-    
+
     def _normalize_observations(self, obs):
         """Apply normalization to the observations."""
         if not self.normalize_obs or not self.norm_stats:
             return obs
-            
-        if self.norm_method == 'standard':
+
+        if self.norm_method == "standard":
             # Apply standard normalization: (x - mean) / std
-            return (obs - self.norm_stats['mean']) / self.norm_stats['std']
-            
-        elif self.norm_method == 'minmax':
+            return (obs - self.norm_stats["mean"]) / self.norm_stats["std"]
+
+        elif self.norm_method == "minmax":
             # Apply min-max normalization: (x - min) / (max - min)
-            return (obs - self.norm_stats['min']) / self.norm_stats['range']
-            
+            return (obs - self.norm_stats["min"]) / self.norm_stats["range"]
+
         return obs
-    
+
     def __len__(self):
         return len(self.segment_pairs)
 
@@ -121,16 +137,16 @@ class PreferenceDataset(Dataset):
         if isinstance(self.data, dict):
             obs_key = self.obs_key
             action_key = "action"
-            obs1 = self.data[obs_key][start1 : end1]
+            obs1 = self.data[obs_key][start1:end1]
             actions1 = self.data[action_key][start1:end1]
-            obs2 = self.data[obs_key][start2 : end2]
+            obs2 = self.data[obs_key][start2:end2]
             actions2 = self.data[action_key][start2:end2]
-   
+
         # Apply normalization to observations
         if self.normalize_obs:
             obs1 = self._normalize_observations(obs1)
             obs2 = self._normalize_observations(obs2)
-        
+
         # Convert preference to tensor
         if isinstance(self.preferences[idx], torch.Tensor):
             # If it's already a tensor, just clone it
@@ -141,31 +157,32 @@ class PreferenceDataset(Dataset):
 
         return obs1, actions1, obs2, actions2, pref
 
+
 def shuffle_preference_dataset(dataset, seed=42):
     """
     Shuffle a PreferenceDataset to ensure random sampling in train/val/test splits.
-    
+
     Args:
         dataset: PreferenceDataset to shuffle
         seed: Random seed for reproducibility
-        
+
     Returns:
         A new PreferenceDataset with shuffled segment_pairs and preferences
     """
     # Set random seed for reproducibility
     random.seed(seed)
     torch.manual_seed(seed)
-    
+
     # Create a list of indices for the dataset
     indices = list(range(len(dataset.segment_pairs)))
-    
+
     # Shuffle the indices
     random.shuffle(indices)
-    
+
     # Create shuffled segment_pairs and preferences
     shuffled_segment_pairs = [dataset.segment_pairs[i] for i in indices]
     shuffled_preferences = [dataset.preferences[i] for i in indices]
-    
+
     # Create a new dataset with the shuffled pairs
     shuffled_dataset = PreferenceDataset(
         dataset.data,
@@ -174,17 +191,25 @@ def shuffle_preference_dataset(dataset, seed=42):
         shuffled_preferences,
         normalize_obs=dataset.normalize_obs,
         norm_method=dataset.norm_method,
-        norm_stats=dataset.norm_stats
+        norm_stats=dataset.norm_stats,
     )
-    
+
     print(f"Shuffled preference dataset with {len(shuffled_dataset)} pairs")
     return shuffled_dataset
 
 
-def create_data_loaders(preference_dataset, train_ratio=0.8, val_ratio=0.1, batch_size=32, 
-                        num_workers=4,
-                        pin_memory=True, seed=42, normalize_obs=False, 
-                        norm_method='standard', shuffle_dataset=True):
+def create_data_loaders(
+    preference_dataset,
+    train_ratio=0.8,
+    val_ratio=0.1,
+    batch_size=32,
+    num_workers=4,
+    pin_memory=True,
+    seed=42,
+    normalize_obs=False,
+    norm_method="standard",
+    shuffle_dataset=True,
+):
     """Create data loaders for training, validation, and testing.
 
     Args:
@@ -198,7 +223,7 @@ def create_data_loaders(preference_dataset, train_ratio=0.8, val_ratio=0.1, batc
         normalize_obs: Whether to normalize observations
         norm_method: Normalization method ('standard' or 'minmax')
         shuffle_dataset: Whether to shuffle the dataset before splitting
-        
+
     Returns:
         Dictionary containing 'train', 'val', and 'test' data loaders, plus dataset sizes
     """
@@ -212,14 +237,14 @@ def create_data_loaders(preference_dataset, train_ratio=0.8, val_ratio=0.1, batc
             preference_dataset.segment_indices,
             preference_dataset.preferences,
             normalize_obs=True,
-            norm_method=norm_method
+            norm_method=norm_method,
         )
-    
+
     # Shuffle the dataset to ensure random sampling if requested
     if shuffle_dataset:
         # print("Shuffling dataset before splitting...")
         preference_dataset = shuffle_preference_dataset(preference_dataset, seed=seed)
-    
+
     # Calculate split sizes
     total_size = len(preference_dataset)
     train_size = int(train_ratio * total_size)

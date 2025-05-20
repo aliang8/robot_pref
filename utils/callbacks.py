@@ -23,22 +23,24 @@ class WandbCallback:
         metrics = {"epoch": epoch, "total_step": total_step}
 
         # Get metrics from logger if available
+        try:  # TODO: this doesn't work with d3rlpy 2.8
+            logger = algo._active_logger
+            if hasattr(logger, "_metrics_buffer"):
+                for name, buffer in logger._metrics_buffer.items():
+                    if buffer:  # Check if there are values
+                        # Calculate the mean of accumulated values
+                        mean_value = np.mean(buffer)
+                        metrics[name] = mean_value
 
-        logger = algo._active_logger
-        if hasattr(logger, "_metrics_buffer"):
-            for name, buffer in logger._metrics_buffer.items():
-                if buffer:  # Check if there are values
-                    # Calculate the mean of accumulated values
-                    mean_value = np.mean(buffer)
-                    metrics[name] = mean_value
+                        # Track loss values for plotting
+                        if name.endswith("_loss") or name.startswith("loss"):
+                            self.training_losses[name] = self.training_losses.get(
+                                name, []
+                            ) + [mean_value]
+        except AttributeError:
+            print("Logger not available in algo.")
 
-                    # Track loss values for plotting
-                    if name.endswith("_loss") or name.startswith("loss"):
-                        self.training_losses[name] = self.training_losses.get(
-                            name, []
-                        ) + [mean_value]
-
-        log_to_wandb(metrics, prefix=self.prefix, epoch=epoch, wandb_run=self.wandb_run)
+        log_to_wandb(metrics, prefix=self.prefix, epoch=epoch)
         return metrics
 
     def update_eval_metrics(self, eval_metrics, epoch):
@@ -76,6 +78,7 @@ class WandbCallback:
                 summary[f"mean_{loss_name}"] = np.mean(values)
 
         return summary
+
 
 class CompositeCallback:
     """A callback that combines multiple callbacks into one."""

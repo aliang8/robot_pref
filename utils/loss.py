@@ -1,9 +1,10 @@
 import torch
 
+
 def bradley_terry_loss(rewards1, rewards2, preferences):
     """
     Compute the Bradley-Terry preference learning loss (binary cross-entropy).
-    
+
     Args:
         rewards1: Predicted rewards for the first segments in each pair
                  Shape can be [batch_size] or [num_models, batch_size]
@@ -30,10 +31,13 @@ def bradley_terry_loss(rewards1, rewards2, preferences):
         rewards1 - rewards2, min=-50.0, max=50.0
     )  # Clip logits to prevent overflow
     pred_probs = torch.sigmoid(logits)
-    
+
     # Standard binary cross-entropy loss: -(y*log(p) + (1-y)*log(1-p))
     # This is negative log likelihood (higher means worse fit)
-    bce = -(prefs * torch.log(pred_probs + eps) + (1 - prefs) * torch.log(1 - pred_probs + eps))
-    
+    bce = -(
+        prefs * torch.log(pred_probs + eps)
+        + (1 - prefs) * torch.log(1 - pred_probs + eps)
+    )
+
     # Return mean over batch dimension
     return torch.mean(bce, dim=-1)  # Mean over last dimension (batch)

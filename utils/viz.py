@@ -5,6 +5,7 @@ import cv2
 import os
 import numpy as np
 
+
 def create_video_grid(video_files, output_path, max_videos=6, fps=30, title=None):
     """Create a grid of videos from individual mp4 files.
 
@@ -93,7 +94,7 @@ def create_video_grid(video_files, output_path, max_videos=6, fps=30, title=None
         row = i // grid_dims[1]
         col = i % grid_dims[1]
         ax = fig.add_subplot(grid[row, col])
-        ax.axis('off')
+        ax.axis("off")
 
     # Load first frames and create image objects
     images = []

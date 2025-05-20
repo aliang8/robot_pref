@@ -1,7 +1,6 @@
-import wandb
 import numpy as np
-import os
-from pathlib import Path
+
+import wandb
 
 
 def log_to_wandb(metrics, prefix="", epoch=None):
@@ -30,10 +29,10 @@ def log_to_wandb(metrics, prefix="", epoch=None):
             log_dict[f"{prefix}{key}"] = value
         elif isinstance(value, wandb.Video):
             # Log videos separately
-            wandb_run.log({f"{prefix}{key}": value})
+            wandb.run.log({f"{prefix}{key}": value})
         elif isinstance(value, wandb.Image):
             # Log images separately
-            wandb_run.log({f"{prefix}{key}": value})
+            wandb.run.log({f"{prefix}{key}": value})
 
     # Log scalar metrics
     if log_dict:

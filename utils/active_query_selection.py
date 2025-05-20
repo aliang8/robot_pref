@@ -67,6 +67,7 @@ def compute_uncertainty_scores(
 
     return uncertainty_scores
 
+
 def select_active_pref_query(
     reward_model,
     segment_start_end,

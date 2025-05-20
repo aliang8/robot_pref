@@ -8,6 +8,7 @@ import numpy as np
 # Set torch hub cache directory
 os.environ["TORCH_HOME"] = "/scr/aliang80/.cache"
 
+
 def compute_dinov2_embeddings(images, batch_size=32, cache_file=None):
     """Compute DINOv2 embeddings for the images with caching support."""
     # Check if cache exists

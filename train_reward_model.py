@@ -17,7 +17,12 @@ from tqdm import tqdm
 # Import shared models and utilities
 from models.reward_models import RewardModel
 
-from utils.data import load_tensordict, segment_episodes, get_gt_preferences, process_data_trajectories
+from utils.data import (
+    load_tensordict,
+    segment_episodes,
+    get_gt_preferences,
+    process_data_trajectories,
+)
 from utils.dataset import (
     PreferenceDataset,
     create_data_loaders,
@@ -26,6 +31,7 @@ from utils.training import train_model, evaluate_model_on_test_set
 from utils.seed import set_seed
 from utils.wandb import log_to_wandb
 from utils.analyze_rewards import analyze_rewards
+
 
 @hydra.main(config_path="config", config_name="reward_model", version_base=None)
 def main(cfg: DictConfig):
