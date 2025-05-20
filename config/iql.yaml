@@ -38,7 +38,7 @@ training:
 
 # Output parameters
 output:
-  output_dir: "iql_model"
+  output_dir: "results/iql_model"
   model_dir_name: "DATASET_NAME_iql_temp${model.weight_temp}_exp${model.expectile}_gt${data.use_ground_truth}"
   artifact_name: "iql_${data.env_name}_DATASET_NAME_temp${model.weight_temp}_exp${model.expectile}"
 

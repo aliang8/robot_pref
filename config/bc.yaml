@@ -24,7 +24,7 @@ training:
 
 # Output parameters
 output:
-  output_dir: "bc_model"
+  output_dir: "results/bc_model"
   model_dir_name: "DATASET_NAME_bc_lr${model.learning_rate}_epochs${training.n_epochs}"
   artifact_name: "bc_${data.env_name}_DATASET_NAME"
 

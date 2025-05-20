@@ -5,7 +5,6 @@ from pathlib import Path
 
 # from d3rlpy.metrics.scorer import evaluate_on_environment
 import hydra
-import matplotlib.pyplot as plt
 import numpy as np
 import torch
 from d3rlpy.algos import BCConfig, IQLConfig
@@ -13,18 +12,17 @@ from d3rlpy.algos import BCConfig, IQLConfig
 # Import d3rlpy components
 from d3rlpy.dataset import MDPDataset
 from d3rlpy.datasets import MDPDataset
+from d3rlpy.logging import WanDBAdapterFactory
 from omegaconf import DictConfig, OmegaConf
 from tqdm import tqdm
 
 import wandb
 from models import RewardModel
-from utils.callbacks import CompositeCallback, WandbCallback
 
-# from d3rlpy.metrics.scorer import evaluate_on_environment
 # Import utility functions
 from utils.data import AttrDict, load_tensordict
 from utils.env import MetaWorldEnvCreator, RobomimicEnvCreator
-from utils.eval import custom_evaluate_on_environment, evaluate_policy_manual
+from utils.eval import evaluate_policy_manual
 from utils.seed import set_seed
 from utils.viz import create_video_grid
 from utils.wandb import log_to_wandb
@@ -297,7 +295,6 @@ def main(cfg: DictConfig):
             "DATASET_NAME", dataset_name
         )
 
-
     print("\n" + "=" * 50)
     print(f"Training {algorithm_name.upper()} policy")
     print("=" * 50)
@@ -310,27 +307,6 @@ def main(cfg: DictConfig):
     random_seed = cfg.get("random_seed", 42)
     set_seed(random_seed)
     print(f"Global random seed set to {random_seed}")
-
-    # Initialize wandb
-    if cfg.wandb.use_wandb:
-        # Set up a run name if not specified
-        run_name = cfg.wandb.name
-        if run_name is None:
-            run_name = f"{algorithm_name.upper()}_{dataset_name}_{time.strftime('%Y%m%d_%H%M%S')}"
-
-        # Initialize wandb
-        wandb_run = wandb.init(
-            project=cfg.wandb.project,
-            entity=cfg.wandb.entity,
-            name=run_name,
-            config=cfg_dict,  # Use plain dict for wandb config
-            tags=cfg.wandb.tags if hasattr(cfg.wandb, "tags") else [algorithm_name],
-            notes=cfg.wandb.notes,
-        )
-
-        print(f"Wandb initialized: {wandb_run.name}")
-    else:
-        wandb_run = None
 
     # Create output directory
     os.makedirs(cfg.output.output_dir, exist_ok=True)
@@ -416,6 +392,65 @@ def main(cfg: DictConfig):
             use_zero_rewards=cfg.data.get("use_zero_rewards", False),
         )
 
+    # Initialize algorithm based on the algorithm_name
+    print(f"Initializing {algorithm_name.upper()} algorithm...")
+
+    if algorithm_name.lower() == "iql":
+        # Initialize IQL algorithm
+        iql_config = IQLConfig(**cfg.iql)
+        algo = iql_config.create()
+        
+        # This is for wandb logging
+        algo.create_impl(observation_shape=[state_dim], action_size=action_dim)
+
+    elif algorithm_name.lower() == "bc":
+        # Initialize BC algorithm
+        bc_config = BCConfig(**cfg.bc)
+        algo = bc_config.create()
+
+        # This is for wandb logging
+        algo.create_impl(observation_shape=[state_dim], action_size=action_dim)
+
+        # For BC with weight decay
+        if hasattr(cfg.model, "use_weight_decay") and cfg.model.use_weight_decay:
+            if hasattr(algo, "create_impl"):
+                impl = algo.create_impl(
+                    state_dim, action_dim, algo._encoder_factory, algo._optim_factory
+                )
+                # Set weight decay if it's used
+                if hasattr(impl.optim, "param_groups"):
+                    for param_group in impl.optim.param_groups:
+                        param_group["weight_decay"] = cfg.model.weight_decay
+
+            # Fallback for older d3rlpy versions
+            if hasattr(algo, "_impl") and hasattr(algo._impl, "optim"):
+                for param_group in algo._impl.optim.param_groups:
+                    param_group["weight_decay"] = cfg.model.weight_decay
+
+    else:
+        raise ValueError(f"Unsupported algorithm: {algorithm_name}")
+    
+    # Initialize WanDBAdapterFactory for logging
+    if cfg.wandb.use_wandb:
+        # Set up a run name if not specified
+        run_name = cfg.wandb.name
+        if run_name is None:
+            run_name = f"{algorithm_name.upper()}_{dataset_name}_{time.strftime('%Y%m%d_%H%M%S')}"
+
+        wandb_adapter_factory = WanDBAdapterFactory(project=cfg.wandb.project)
+        print("WanDBAdapterFactory initialized")
+    else:
+        wandb_adapter_factory = None
+
+    # Print model architecture details
+    print_model_architecture(algo)
+
+    # Get number of training epochs
+    n_epochs = cfg.training.n_epochs
+    
+    # Train the model
+    print(f"Training {algorithm_name.upper()} for {n_epochs} epochs...")
+
     # Create environment for evaluation
     env = None
     if not cfg.evaluation.skip_env_creation:
@@ -453,302 +488,26 @@ def main(cfg: DictConfig):
             print("Evaluation will be skipped.")
             env = None
 
-    # Initialize algorithm based on the algorithm_name
-    print(f"Initializing {algorithm_name.upper()} algorithm...")
-
-    if algorithm_name.lower() == "iql":
-        # Initialize IQL algorithm
-        # algo = IQL(
-        #     actor_learning_rate=cfg.model.actor_learning_rate,
-        #     critic_learning_rate=cfg.model.critic_learning_rate,
-        #     batch_size=cfg.model.batch_size,
-        #     gamma=cfg.model.gamma,
-        #     tau=cfg.model.tau,
-        #     n_critics=cfg.model.n_critics,
-        #     expectile=cfg.model.expectile,
-        #     weight_temp=cfg.model.weight_temp,
-        #     encoder_factory=VectorEncoderFactory(cfg.model.encoder_dims),
-        #     use_gpu=torch.cuda.is_available()
-        # )
-        iql_config = IQLConfig(**cfg.iql)
-        algo = iql_config.create()
-
-    elif algorithm_name.lower() == "bc":
-        # Initialize BC algorithm
-        # TODO: This doesn't work because of version mismatch I think (using d3rlpy 2.8.1)
-        # algo = BC(
-        #     learning_rate=cfg.model.learning_rate,
-        #     batch_size=cfg.model.batch_size,
-        #     encoder_factory=VectorEncoderFactory(cfg.model.encoder_dims),
-        #     use_gpu=torch.cuda.is_available()
-        # )
-        bc_config = BCConfig(**cfg.bc)
-        algo = bc_config.create()
-
-        # For BC with weight decay
-        if hasattr(cfg.model, "use_weight_decay") and cfg.model.use_weight_decay:
-            if hasattr(algo, "create_impl"):
-                impl = algo.create_impl(
-                    state_dim, action_dim, algo._encoder_factory, algo._optim_factory
-                )
-                # Set weight decay if it's used
-                if hasattr(impl.optim, "param_groups"):
-                    for param_group in impl.optim.param_groups:
-                        param_group["weight_decay"] = cfg.model.weight_decay
-
-            # Fallback for older d3rlpy versions
-            if hasattr(algo, "_impl") and hasattr(algo._impl, "optim"):
-                for param_group in algo._impl.optim.param_groups:
-                    param_group["weight_decay"] = cfg.model.weight_decay
-
-    else:
-        raise ValueError(f"Unsupported algorithm: {algorithm_name}")
-
-    # Print model architecture details
-    print_model_architecture(algo)
-
-    # Get number of training epochs
-    n_epochs = cfg.training.n_epochs
-
-    print(f"Training for {n_epochs} epochs")
-
-    # Initialize wandb callback
-    wandb_callback = WandbCallback(wandb_run=wandb_run)
-
-    # For tracking evaluation metrics
-    evaluation_results = []
-    last_eval_epoch = -1
-
-    # Define callback function for evaluation
-    def evaluation_callback(algo, epoch, total_step):
-        nonlocal last_eval_epoch
-
-        # Only evaluate at specified intervals
-        if epoch <= last_eval_epoch or (
-            epoch % cfg.training.eval_interval != 0 and epoch != n_epochs - 1
-        ):
-            return
-
-        # Update last evaluated epoch
-        last_eval_epoch = epoch
-
-        # Check if environment is available
-        if env is None:
-            print(f"Epoch {epoch}: Skipping evaluation (no environment available)")
-            return
-
-        # Evaluate policy
-        print(f"Evaluating policy at epoch {epoch}...")
-
-        # Set up video recording directory in the d3rlpy results folder
-        video_recording = cfg.evaluation.record_video
-        video_path = None
-
-        if video_recording:
-            # Get the current experiment directory
-            experiment_dir = get_d3rlpy_experiment_path(
-                d3rlpy_logdir, experiment_name, with_timestamp=True
-            )
-
-            if experiment_dir:
-                # Create a videos directory inside the experiment directory
-                video_dir = experiment_dir / "videos" / f"epoch_{epoch}"
-                os.makedirs(video_dir, exist_ok=True)
-                video_path = str(video_dir / "eval")
-                print(f"Videos will be saved to: {video_dir}")
-            else:
-                print(
-                    "Warning: Could not find experiment directory for video recording"
-                )
-                # Fall back to a general videos directory
-                video_dir = Path(cfg.output.output_dir) / "videos" / f"epoch_{epoch}"
-                os.makedirs(video_dir, exist_ok=True)
-                video_path = str(video_dir / "eval")
-
-        # Evaluate policy with video recording if enabled
-        metrics = evaluate_policy_manual(
-            env,
-            algo,
-            n_episodes=cfg.training.eval_episodes,
-            verbose=False,
-            parallel=cfg.evaluation.parallel_eval,
-            num_workers=cfg.evaluation.eval_workers,
-            record_video=video_recording,
-            video_path=video_path,
-            video_fps=cfg.evaluation.video_fps,
-        )
-        print(
-            f"Epoch {epoch} evaluation: Return={metrics['mean_return']:.2f}, Success={metrics['success_rate']:.2f}"
-        )
-
-        # Track best metrics
-        eval_metrics_with_best = wandb_callback.update_eval_metrics(metrics, epoch)
-        evaluation_results.append((epoch, eval_metrics_with_best))
-
-        # Log metrics to wandb if enabled
-        if wandb_run:
-            log_to_wandb(eval_metrics_with_best, prefix="eval", epoch=epoch)
-
-            # Log video grid if videos were recorded
-            if video_recording and video_path and wandb_run:
-                try:
-                    video_files = glob.glob(f"{video_path}*.mp4")
-                    # Filter out invalid video files
-                    valid_video_files = [
-                        f for f in video_files if is_valid_video_file(f)
-                    ]
-                    print(
-                        f"Found {len(valid_video_files)} valid video files out of {len(video_files)}"
-                    )
-
-                    # Create a grid of videos if we have multiple
-                    if len(valid_video_files) > 1:
-                        print("Creating video grid from evaluation videos...")
-                        grid_path = (
-                            f"{os.path.dirname(video_path)}/eval_grid_epoch_{epoch}.mp4"
-                        )
-                        try:
-                            grid_video = create_video_grid(
-                                valid_video_files,
-                                grid_path,
-                                max_videos=6,
-                                fps=cfg.evaluation.video_fps,
-                            )
-                            if grid_video and is_valid_video_file(grid_video):
-                                # Log the grid video
-                                video_obj = wandb.Video(
-                                    grid_video,
-                                    fps=cfg.evaluation.video_fps,
-                                    format="mp4",
-                                )
-                                log_to_wandb({"video_grid": video_obj}, prefix="eval")
-                        except Exception as e:
-                            print(f"Error creating video grid: {e}")
-                except Exception as e:
-                    print(f"Error handling videos: {e}")
-
-    # Create a combined callback that handles both wandb logging and evaluation
-    composite_callback = CompositeCallback([wandb_callback, evaluation_callback])
-
-    # Train the model
-    print(f"Training {algorithm_name.upper()} for {n_epochs} epochs...")
-
-    # Define scorers based on environment availability
-    if env is not None:
-        print("Using environment for evaluation during training")
-        scorers = {"environment": custom_evaluate_on_environment(env)}
-    else:
-        print("Training without environment evaluation")
-        scorers = {}
-
-    # Train the model
-    # TODO: This doesn't work because of version mismatch I think (using d3rlpy 2.8.1)
-    # training_metrics = algo.fit(
-    #     dataset,
-    #     n_epochs=n_epochs,
-    #     eval_episodes=None,  # Don't use the built-in eval which expects episodes format
-    #     save_interval=10,
-    #     scorers=scorers,
-    #     experiment_name=experiment_name,
-    #     with_timestamp=True,
-    #     logdir=d3rlpy_logdir,
-    #     verbose=True,
-    #     callback=composite_callback  # Use the composite callback instead of a list
-    # )
-    training_metrics = algo.fit(
-        dataset,
+    # Training loop
+    for epoch, metrics in algo.fitter(
+        dataset=dataset,
         n_steps=n_epochs * cfg.training.n_steps_per_epoch,
         n_steps_per_epoch=cfg.training.n_steps_per_epoch,
-        save_interval=10,
-        evaluators=scorers,
         experiment_name=experiment_name,
         with_timestamp=True,
-        callback=composite_callback,  # Use the composite callback instead of a list
-    )
+        logger_adapter=wandb_adapter_factory,
+        show_progress=True,
+        save_interval=cfg.training.save_interval,
+    ):
+        # if first epoch, log cfgs
+        if epoch == 0:
+            wandb.run.config.update(cfg_dict)
 
+        if env is not None:
+            eval_model(env=env, algo=algo, cfg=cfg, epoch=epoch)
+        
     # Print the training metrics summary
     print("\nTraining metrics summary:")
-
-    # Try to use algorithm's training metrics if available
-    try:
-        if (
-            training_metrics
-            and isinstance(training_metrics, list)
-            and len(training_metrics) > 0
-        ):
-            # Check if metrics are in expected format
-            if isinstance(training_metrics[0], tuple) and len(training_metrics[0]) == 2:
-                for epoch, metrics in training_metrics:
-                    metrics_str = ", ".join(
-                        [
-                            f"{k}: {v:.4f}"
-                            for k, v in metrics.items()
-                            if isinstance(v, (int, float, np.number))
-                        ]
-                    )
-                    print(f"Epoch {epoch}: {metrics_str}")
-            else:
-                print("Training metrics available but in unexpected format")
-        else:
-            print("No training metrics available from algorithm")
-    except Exception as e:
-        print(f"Error printing metrics: {e}")
-
-    # Log final training metrics to wandb
-    if wandb_run:
-        # Log training metrics if available
-        if training_metrics:
-            try:
-                log_to_wandb(training_metrics, prefix="train_final")
-            except:
-                print("Warning: Could not log algorithm's training metrics to wandb")
-
-        # Get comprehensive training summary from our callback
-        training_summary = wandb_callback.get_training_summary()
-
-        # Create a complete summary with training and evaluation metrics
-        summary_metrics = {
-            "total_epochs": n_epochs,
-            "best_eval_epoch": wandb_callback.best_eval_epoch,
-        }
-
-        # Add training loss metrics
-        for key, val in training_summary.items():
-            if isinstance(
-                val, (int, float, np.int64, np.float32, np.float64, np.number)
-            ):
-                summary_metrics[key] = val
-
-        # Add best metrics if available
-        if wandb_callback.best_eval_metrics:
-            for k, v in wandb_callback.best_eval_metrics.items():
-                if isinstance(
-                    v, (int, float, np.int64, np.float32, np.float64, np.number)
-                ):
-                    summary_metrics[f"best_{k}"] = v
-
-        # Log the combined summary
-        log_to_wandb(summary_metrics, prefix="summary")
-        # Also log a final plot of training losses if available
-        if wandb_run and wandb_callback.training_losses:
-            try:
-                # Create plot of training losses
-                plt.figure(figsize=(10, 6))
-                for loss_name, values in wandb_callback.training_losses.items():
-                    if len(values) > 1:  # Only plot if we have multiple values
-                        plt.plot(values, label=loss_name)
-
-                plt.xlabel("Updates")
-                plt.ylabel("Loss Value")
-                plt.title("Training Losses")
-                plt.legend()
-                plt.tight_layout()
-
-                # Log to wandb
-                log_to_wandb({"media/plots/training_losses": wandb.Image(plt)})
-                plt.close()
-            except Exception as e:
-                print(f"Warning: Could not create training loss plot: {e}")
 
     # Get the model directory name from config if available, or fall back to default
     if hasattr(cfg.output, "model_dir_name"):
@@ -766,111 +525,86 @@ def main(cfg: DictConfig):
         zero_suffix = "_zero_rewards" if cfg.data.get("use_zero_rewards", False) else ""
         model_path = f"{cfg.output.output_dir}/{algorithm_name.lower()}_{Path(cfg.data.data_path).stem}{zero_suffix}.pt"
 
-    algo.save_model(model_path)
     print(f"Model saved to {model_path}")
-
-    if wandb_run:
-        try:
-            # Create metadata about the model
-            model_metadata = {
-                "algorithm": algorithm_name,
-                "dataset": Path(cfg.data.data_path).stem,
-                "epochs": n_epochs,
-                "observation_dim": state_dim,
-                "action_dim": action_dim,
-            }
-
-            # Add best metrics if available
-            if wandb_callback.best_eval_metrics:
-                for k, v in wandb_callback.best_eval_metrics.items():
-                    if isinstance(
-                        v, (int, float, np.int64, np.float32, np.float64, np.number)
-                    ):
-                        model_metadata[f"best_{k}"] = v
-        except Exception as e:
-            print(f"Warning: Could not log model as wandb artifact: {e}")
-
-    # Run final comprehensive evaluation
-    print("\nRunning final comprehensive evaluation...")
-    if env is not None:
-        # Set up video directory for final evaluation
-        video_recording = cfg.evaluation.record_video
-        video_path = None
-
-        if video_recording:
-            # Create a final evaluation video directory
-            video_dir = Path(cfg.output.output_dir) / "videos" / "final_evaluation"
-            os.makedirs(video_dir, exist_ok=True)
-            video_path = str(video_dir / "final_eval")
-            print(f"Final evaluation videos will be saved to: {video_dir}")
-
-        evaluation_metrics = evaluate_policy_manual(
-            env,
-            algo,
-            n_episodes=cfg.training.eval_episodes,
-            verbose=True,
-            parallel=cfg.evaluation.parallel_eval,
-            num_workers=cfg.evaluation.eval_workers,
-            record_video=video_recording,
-            video_path=video_path,
-            video_fps=cfg.evaluation.video_fps,
-        )
-
-        # Print summary
-        print(
-            f"Final evaluation results: Mean return = {evaluation_metrics['mean_return']:.2f}, "
-            + f"Success rate = {evaluation_metrics['success_rate']:.2f}, "
-            + f"Episodes = {evaluation_metrics['num_episodes']}"
-        )
-
-        # Log final results to wandb
-        if wandb_run:
-            log_to_wandb(evaluation_metrics, prefix="final_eval")
-
-            # Log videos if available
-            if video_recording and video_path and wandb_run:
-                try:
-                    video_files = glob.glob(f"{video_path}*.mp4")
-                    print(f"Found {len(video_files)} final evaluation video files")
-
-                    if video_files:
-                        # Upload up to 3 videos
-                        for i, video_file in enumerate(video_files[:3]):
-                            wandb_callback.log_video(
-                                video_file,
-                                name=f"video_{i + 1}",
-                                fps=cfg.evaluation.video_fps,
-                                prefix="final_rollout",
-                            )
-
-                        # Create a grid of videos if we have multiple
-                        if len(video_files) > 1:
-                            print("Creating video grid from final evaluation videos...")
-                            grid_path = (
-                                f"{os.path.dirname(video_path)}/final_eval_grid.mp4"
-                            )
-                            try:
-                                grid_video = create_video_grid(
-                                    video_files,
-                                    grid_path,
-                                    max_videos=6,
-                                    fps=cfg.evaluation.video_fps,
-                                )
-                                if grid_video:
-                                    # Log the grid video
-                                    wandb_callback.log_video(
-                                        grid_video,
-                                        name="video_grid",
-                                        fps=cfg.evaluation.video_fps,
-                                        prefix="final_rollout",
-                                    )
-                            except Exception as e:
-                                print(f"Error creating final video grid: {e}")
-                except Exception as e:
-                    print(f"Error logging final videos to wandb: {e}")
-
     print("\nTraining complete!")
 
+def eval_model(env, algo, cfg, epoch):
+    """
+    Run an evaluation of the trained policy in the environment,
+    optionally recording videos and logging results to wandb.
+    """
+
+    # Set up video directory for final evaluation
+    video_recording = getattr(cfg.evaluation, "record_video", False)
+    video_path = None
+
+    if video_recording:
+        video_path = Path(cfg.output.output_dir) / f"evaluation_epoch{epoch}" / "videos"
+        os.makedirs(video_path, exist_ok=True)
+        print(f"Epoch {epoch} evaluation videos will be saved to: {video_path}")
+
+    # Run evaluation
+    evaluation_metrics = evaluate_policy_manual(
+        env,
+        algo,
+        n_episodes=cfg.training.eval_episodes,
+        verbose=True,
+        parallel=getattr(cfg.evaluation, "parallel_eval", False),
+        num_workers=getattr(cfg.evaluation, "eval_workers", 1),
+        record_video=video_recording,
+        video_path=video_path,
+        video_fps=getattr(cfg.evaluation, "video_fps", 30),
+    )
+
+    # Print summary
+    print(
+        f"Final evaluation results: Mean return = {evaluation_metrics.get('mean_return', float('nan')):.2f}, "
+        f"Success rate = {evaluation_metrics.get('success_rate', float('nan')):.2f}, "
+        f"Episodes = {evaluation_metrics.get('num_episodes', 0)}"
+    )
+
+    # Log results to wandb
+    if wandb.run is not None:
+        log_to_wandb(evaluation_metrics, prefix="eval")
+
+        # Log videos if available
+        if video_recording and video_path:
+            video_files = glob.glob(f"{video_path}*.mp4")
+            print(f"Found {len(video_files)} final evaluation video files")
+
+            if video_files:
+                # Create a grid of videos if we have multiple
+                if len(video_files) > 1:
+                    print("Creating video grid from final evaluation videos...")
+                    grid_path = (
+                        f"{os.path.dirname(video_path)}/eval_grid_epoch{epoch}.mp4"
+                    )
+                    grid_path = create_video_grid(
+                        video_files,
+                        grid_path,
+                        max_videos=6,
+                        fps=getattr(cfg.evaluation, "video_fps", 30),
+                    )
+                    # Log the grid video with epoch as step for slider
+                    wandb.log({
+                        "rollouts/video_grid": wandb.Video(
+                            grid_path,
+                            fps=getattr(cfg.evaluation, "video_fps", 30),
+                            format="mp4"
+                        )
+                    }, step=epoch)
+                else:
+                    # Log the single video with epoch as step for slider
+                    wandb.log({
+                        "rollouts/video": wandb.Video(
+                            video_files[0],
+                            fps=getattr(cfg.evaluation, "video_fps", 30),
+                            format="mp4"
+                        )
+                    }, step=epoch)
+                        
+
+    print("Evaluation complete.")
 
 if __name__ == "__main__":
     main()
