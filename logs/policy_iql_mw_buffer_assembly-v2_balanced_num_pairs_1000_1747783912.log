@@ -1,0 +1,18 @@
+/scr/aliang80/robot_pref/train_policy.py:38: UserWarning: 
+The version_base parameter is not specified.
+Please specify a compatability version level, or None.
+Will assume defaults for version 1.1
+  @hydra.main(config_path="config", config_name="iql")
+[2025-05-20 23:32:01,434][HYDRA] Submitit 'slurm' sweep output dir : results/iql_model
+[2025-05-20 23:32:01,435][HYDRA] 	#0 : data.data_path=/scr/aliang80/robot_pref/dataset_mw/buffer_assembly-v2_balanced.pt training.n_epochs=100 data.use_ground_truth=False data.use_zero_rewards=False data.reward_model_path=/scr/aliang80/robot_pref/\ results/reward_model/buffer_assembly-v2_balanced_model_seg32_epochs100_pairs1000_seed42/model_42.pt wandb.name=iql_mw_buffer_assembly-v2_balanced_num_pairs_1000_1747783912 wandb.use_wandb=True random_seed=521
+[2025-05-20 23:32:01,439][HYDRA] 	#1 : data.data_path=/scr/aliang80/robot_pref/dataset_mw/buffer_assembly-v2_balanced.pt training.n_epochs=100 data.use_ground_truth=False data.use_zero_rewards=False data.reward_model_path=/scr/aliang80/robot_pref/\ results/reward_model/buffer_assembly-v2_balanced_model_seg32_epochs100_pairs1000_seed42/model_42.pt wandb.name=iql_mw_buffer_assembly-v2_balanced_num_pairs_1000_1747783912 wandb.use_wandb=True random_seed=522
+[2025-05-20 23:32:01,451][HYDRA] 	#2 : data.data_path=/scr/aliang80/robot_pref/dataset_mw/buffer_assembly-v2_balanced.pt training.n_epochs=100 data.use_ground_truth=False data.use_zero_rewards=False data.reward_model_path=/scr/aliang80/robot_pref/\ results/reward_model/buffer_assembly-v2_balanced_model_seg32_epochs100_pairs1000_seed42/model_42.pt wandb.name=iql_mw_buffer_assembly-v2_balanced_num_pairs_1000_1747783912 wandb.use_wandb=True random_seeSlurm Slurm accounting storage is disabled
+submitit WARNING (2025-05-20 23:32:01,564) - Call #1 - Bypassing sacct error Command '['sacct', '-o', 'JobID,State,NodeList', '--parsable2', '-j', '30128']' returned non-zero exit status 1., status may be inaccurate.
+submitit WARNING (2025-05-20 23:32:01,564) - Call #1 - Bypassing sacct error Command '['sacct', '-o', 'JobID,State,NodeList', '--parsable2', '-j', '30128']' returned non-zero exit status 1., status may be inaccurate.
+[2025-05-20 23:32:01,564][HYDRA] Call #1 - Bypassing sacct error Command '['sacct', '-o', 'JobID,State,NodeList', '--parsable2', '-j', '30128']' returned non-zero exit status 1., status may be inaccuSlurm Slurm accounting storage is disabled
+submitit WARNING (2025-05-20 23:32:03,593) - Call #2 - Bypassing sacct error Command '['sacct', '-o', 'JobID,State,NodeList', '--parsable2', '-j', '30128']' returned non-zero exit status 1., status may be inaccurate.
+submitit WARNING (2025-05-20 23:32:03,593) - Call #2 - Bypassing sacct error Command '['sacct', '-o', 'JobID,State,NodeList', '--parsable2', '-j', '30128']' returned non-zero exit status 1., status may be inaccurate.
+[2025-05-20 23:32:03,593][HYDRA] Call #2 - Bypassing sacct error Command '['sacct', '-o', 'JobID,State,NodeList', '--parsable2', '-j', '30128']' returned non-zero exit status 1., status may be inaccuSlurm accounting storage is disabled
+submitsubmitit WARNING (2025-05-20 23:32:06,632) - Call #3 - Bypassing sacct error Command '['sacct', '-o', 'JobID,State,NodeList', '--parsable2', '-j', '30128']' returned non-zero exit status 1., status may be inaccurate.
+submitit WARNING (2025-05-20 23:32:06,632) - Call #3 - Bypassing sacct error Command '['sacct', '-o', 'JobID,State,NodeList', '--parsable2', '-j', '30128']' returned non-zero exit status 1., status may be inaccurate.
+[2025-05-20 23:32:06,632][HYDRA] Call #3 - Bypassing sacct error Command '['sacct', '-o', 'JobID,State,NodeList', '--parsable2', '-j', '30128']' returned non-zero exit status 1., status may be inaccurate.

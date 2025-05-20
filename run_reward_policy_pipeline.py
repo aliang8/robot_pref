@@ -29,7 +29,7 @@ REWARD_MODEL_TEMPLATE = [
 
 # Grid search parameters for regular reward model
 REWARD_MODEL_GRID = {
-    "data.num_pairs": [100, 500, 1000],  
+    "data.num_pairs": [500, 1000],  
 }
 
 # Reward model training configuration for active learning
@@ -42,7 +42,7 @@ REWARD_MODEL_TEMPLATE_ACTIVE = [
 # Grid search parameters for active reward model
 ACTIVE_REWARD_MODEL_GRID = {
     "active_learning.uncertainty_method": ["entropy"],  
-    "active_learning.total_queries": [10],   
+    "active_learning.total_queries": [5],   
     "dtw_augmentation.enabled": [True, False]
 }
 
@@ -58,12 +58,12 @@ POLICY_TEMPLATE = [
 ]
 
 # Multirun configuration
-USE_MULTIRUN = False  # Set to True to use multirun
+USE_MULTIRUN = True  # Set to True to use multirun
 RANDOM_SEEDS = "521,522,523"  # Comma-separated list of seeds to use
 LAUNCHER = "slurm"  # Launcher for multirun (usually "slurm" on clusters)
 
 # Current pipeline mode
-USE_ACTIVE_LEARNING = True 
+USE_ACTIVE_LEARNING = False 
 
 def generate_grid_combinations(grid_params):
     """Generate all combinations of grid parameters."""
@@ -163,13 +163,7 @@ def train_reward_model(template, grid_params=None):
             # Add the new parameter
             cmd.append(f"{param_name}={param_value}")
             grid_desc += f"_{param_name.split('.')[-1]}_{param_value}"
-    
-    # Add multirun configuration if enabled
-    if USE_MULTIRUN:
-        cmd.append(f"random_seed={RANDOM_SEEDS}")
-        cmd.append(f"hydra/launcher={LAUNCHER}")
-        cmd.append("--multirun")
-    
+
     # Run reward model training with output capture
     print("\n" + "#" * 100)
     print(f"## REWARD MODEL TRAINING ##")
@@ -184,7 +178,7 @@ def train_reward_model(template, grid_params=None):
         sys.exit(1)
     
     # Search for model paths in the output
-    model_saved_pattern = re.compile(r"Model saved to: (.+/*\d+\.pt)")
+    model_saved_pattern = re.compile(r"Model saved to: (.+/model_\d+\.pt)")
     model_paths = []
     model_dir = None
     
@@ -207,12 +201,12 @@ def train_reward_model(template, grid_params=None):
 
 
 def train_policy(reward_model_path, grid_desc=""):
-    """Train a policy using the trained reward model."""
-    print("\n" + "*" * 100)
-    print(f"** POLICY TRAINING **")
+    """Launch policy training in the background without tracking."""
+    print("\n" + "*" * 80)
+    print(f"** LAUNCHING POLICY TRAINING IN BACKGROUND **")
     print(f"** Policy Algorithm: {POLICY_ALGORITHM.upper()}")
     print(f"** Reward Model: {reward_model_path}")
-    print("*" * 100)
+    print("*" * 80)
         
     # Build the command using the template
     cmd = POLICY_TEMPLATE.copy()
@@ -224,7 +218,8 @@ def train_policy(reward_model_path, grid_desc=""):
     # Add a descriptive name based on grid parameters
     timestamp = int(time.time())
     dataset_name = Path(DATASET).stem
-    cmd.append(f"wandb.name={POLICY_ALGORITHM}_{dataset_name}{grid_desc}_{timestamp}")
+    run_name = f"{POLICY_ALGORITHM}_{dataset_name}{grid_desc}_{timestamp}"
+    cmd.append(f"wandb.name={run_name}")
     
     # Add multirun configuration if enabled
     if USE_MULTIRUN:
@@ -233,8 +228,24 @@ def train_policy(reward_model_path, grid_desc=""):
         cmd.append(f"hydra/launcher={LAUNCHER}")
         cmd.append("--multirun")
     
-    # Run policy training with tqdm support
-    run_with_tqdm_support(cmd)
+    # Create log file for the background process
+    log_dir = "logs"
+    os.makedirs(log_dir, exist_ok=True)
+    log_file = os.path.join(log_dir, f"policy_{run_name}.log")
+    
+    # Start policy training in background
+    print(f"Running command in background: {' '.join(cmd)}")
+    print(f"Log file: {log_file}")
+    
+    with open(log_file, 'w') as f:
+        process = subprocess.Popen(
+            cmd,
+            stdout=f,
+            stderr=subprocess.STDOUT,
+            start_new_session=True  # Run in a new session so it's not tied to this script
+        )
+    
+    print(f"Started process with PID: {process.pid}")
 
 
 def main():
@@ -272,12 +283,14 @@ def main():
         # Train reward model with these parameters
         _, model_paths, grid_desc = train_reward_model(template, params)
         
+        # Launch policy training in background for each model
         for model_path in model_paths:
             train_policy(model_path, grid_desc)
     
     print("\n" + "+" * 100)
     print("+" + " " * 98 + "+")
     print(f"+{' PIPELINE COMPLETED SUCCESSFULLY ':^98}+")
+    print(f"+{' Policy training processes are running in the background ':^98}+")
     print("+" + " " * 98 + "+")
     print("+" * 100)
 
