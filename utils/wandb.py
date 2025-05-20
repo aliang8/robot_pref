@@ -62,6 +62,7 @@ class WanDBAdapter(LoggerAdapter):
     def __init__(
         self,
         algo: AlgProtocol,
+        experiment_name: str,
         n_steps_per_epoch: int,
         wandb_cfg: dict
     ):
@@ -72,6 +73,7 @@ class WanDBAdapter(LoggerAdapter):
         assert algo.impl
 
         cfg = wandb_cfg.copy()
+        cfg["name"] = experiment_name
         if "use_wandb" in cfg:
             del cfg["use_wandb"]
 
@@ -139,6 +141,7 @@ class WanDBAdapterFactory(LoggerAdapterFactory):
     ) -> LoggerAdapter:
         return WanDBAdapter(
             algo=algo,
+            experiment_name=experiment_name,
             n_steps_per_epoch=n_steps_per_epoch,
             wandb_cfg=self._wandb_cfg,
         )
