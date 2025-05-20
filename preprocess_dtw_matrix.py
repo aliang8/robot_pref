@@ -82,12 +82,12 @@ def main():
     )
     parser.add_argument(
         "--use_relative_eef",
-        action="store_True",
+        action="store_true",
         help="Use relative EEF positions instead of absolute",
     )
     parser.add_argument(
         "--overwrite",
-        action="store_True",
+        action="store_true",
         help="Overwrite existing DTW matrix file if it exists",
     )
     args = parser.parse_args()

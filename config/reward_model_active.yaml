@@ -1,17 +1,19 @@
-# Hydra config for reward model training with active learning
-
-# Include common settings
-defaults:
-  - reward_model
-  - active_learning  # Include shared active learning parameters
-  - _self_  # Allow this config to override common settings
-
-# Override active learning parameters if needed
 active_learning:
-  enabled: true
-  retrain_interval: 1  # Retrain every iteration
+  uncertainty_method: "entropy"       # Uncertainty estimation method: "entropy", "disagreement", or "random"
+  num_models: 5                       # Number of models to use for uncertainty estimation
+  total_queries_per_iteration: 1      # Number of pairs to select in each iteration
+  total_queries: 50                   # Total number of queries to make
 
-# Override data parameters
+model:
+  hidden_dims: [256, 256]
+  lr: 1e-4
+
+training:
+  num_epochs: 50
+  batch_size: 256
+  num_workers: 4
+  pin_memory: True
+
 data:
   data_path: "/scr/shared/clam/datasets/metaworld/assembly-v2/buffer_assembly-v2.pt"
   segment_length: 32
@@ -20,23 +22,23 @@ data:
   subsamples: 50000
   num_test_pairs: 500
 
-# DTW augmentation parameters
 dtw_augmentation:
   enabled: false              # Set to true to enable DTW augmentation
   k_augment: 5                # Number of similar segments to find for each part of a pair
   max_dtw_segments: 5000      # Max segments for computing DTW matrix (null or remove for all).
-  
-# Hardware settings
-hardware:
-  gpu: 0
-  use_cpu: false
 
-# Output parameters
 output:
   output_dir: results/active_reward_model
-  # Use fixed placeholder for dataset name that will be replaced in code
   model_dir_name: "DATASET_NAME_active_${active_learning.uncertainty_method}_max${active_learning.total_queries}_${active_learning.total_queries_per_iteration}_aug${dtw_augmentation.enabled}_k${dtw_augmentation.k_augment}"
 
 training:
   save_model_every: 5
   reward_analysis_every: 5
+  num_epochs: 50
+  batch_size: 256
+  num_workers: 4
+  pin_memory: True
+
+defaults:
+  - reward_model
+  - _self_

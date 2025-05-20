@@ -870,7 +870,7 @@ def eval_model(env, algo, cfg, epoch):
     Run an evaluation of the trained policy in the environment,
     optionally recording videos and logging results to wandb.
     """
-
+    
     # Set up video directory for final evaluation
     video_recording = getattr(cfg.evaluation, "record_video", False)
     video_path = None

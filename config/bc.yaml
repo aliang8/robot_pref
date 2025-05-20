@@ -1,28 +1,22 @@
-# Complete BC configuration file
 algorithm: bc
 
-# Include common settings
-defaults:
-  - common
-  - _self_  # Allow this config to override common settings
-
-# Data parameters
 data:
   data_path: "/scr/shared/clam/datasets/metaworld/assembly-v2/buffer_assembly-v2.pt"
   env_name: "assembly-v2-goal-observable"  # Exact name of the MetaWorld environment
 
-# Model architecture
 model:
   hidden_dims: [256, 256]
   learning_rate: 3e-4
   batch_size: 256
 
-# Training parameters specific to BC
 training:
   n_epochs: 100
 
-# Output parameters
 output:
   output_dir: "results/bc_model"
   model_dir_name: "DATASET_NAME_bc_lr${model.learning_rate}_epochs${training.n_epochs}"
   artifact_name: "bc_${data.env_name}_DATASET_NAME"
+
+defaults:
+  - common
+  - _self_

@@ -34,8 +34,6 @@ def find_similar_segments_dtw(query_idx, k, distance_matrix):
     similar_indices = np.argsort(distances)[:k]
     return similar_indices
 
-
-
 def active_preference_learning(cfg, dataset_name=None):
     """Main function for active preference learning."""
     # Print some configs

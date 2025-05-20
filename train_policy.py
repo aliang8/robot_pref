@@ -20,8 +20,8 @@ def print_model_architecture(algo):
     Args:
         algo: A d3rlpy algorithm instance (IQL, BC, etc.)
     """
-    print("\nModel Architecture Details:")
     print("=" * 50)
+    print("\nModel Architecture:")
     print("Policy Network:")
     print(algo._impl._modules.policy)
 
@@ -57,7 +57,6 @@ def main(cfg: DictConfig):
         cfg.output.model_dir_name = cfg.output.model_dir_name.replace(
             "DATASET_NAME", dataset_name
         )
-    import ipdb; ipdb.set_trace()
 
     print("\n" + "=" * 50)
     print(f"Training {algorithm_name.upper()} policy")
@@ -222,7 +221,9 @@ def main(cfg: DictConfig):
         if cfg.wandb.use_wandb and epoch == 1:
             wandb.run.config.update(cfg_dict)
 
-        if env is not None:
+        if env is not None and epoch % cfg.training.eval_interval == 0:
+            # Evaluate the model every eval_interval epochs
+            print(f"Evaluating model at epoch {epoch}...")
             eval_model(env=env, algo=algo, cfg=cfg, epoch=epoch)
 
     # Get the model directory name from config if available, or fall back to default

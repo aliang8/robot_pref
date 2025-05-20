@@ -253,10 +253,6 @@ def load_dataset(
                 "Ground truth rewards requested but 'reward' not found in data."
             )
         rewards = data["reward"].cpu()
-        if use_ground_truth:
-            print(
-                "Using ground truth rewards from data instead of reward model predictions."
-            )
 
     # Make sure data is on CPU for preprocessing
     observations = observations.cpu()

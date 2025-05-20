@@ -21,13 +21,15 @@ plt.rc("text", usetex=True)  # camera-ready formatting + latex in plots
 def create_display_name(path):
     if path == "zero_rewards" or path == "ground_truth":
         return path
+    
+    if "state_action_reward_model" in path:
+        return path
 
     try:
         # Extract parent directory which contains config info
         path_obj = Path(path)
         # In case we are using intermittent saved checkpoints
         parent_dir = path_obj.parent.name if "checkpoints" not in path_obj.parent.name else path_obj.parent.parent.name
-        import ipdb; ipdb.set_trace()
         # Extract key components from the path
         components = {}
 
@@ -47,7 +49,7 @@ def create_display_name(path):
             components["pairs"] = f"Q{pairs_match.group(1)}"
 
         # Look for iteration (for active learning)
-        iter_match = re.search(r"iter(\d+)", path_obj.name)
+        iter_match = re.search(r"iter[_]?(\d+)", path_obj.name)
         if iter_match:
             components["iter"] = f"I{iter_match.group(1)}"
 
@@ -265,7 +267,7 @@ def plot_reward_model_comparisons(df, output_dir="reward_model_plots"):
     print(f"Found {len(algorithms)} algorithms to plot: {algorithms}")
 
     # Loop through each dataset (each separate plot)
-    for dataset in datasets:
+    for dataset in datasets[::-1]:
         # Filter data for this dataset and algorithm
         filtered_df = df_filtered[
             (df_filtered["data.data_path"] == dataset)
