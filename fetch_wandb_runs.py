@@ -576,7 +576,7 @@ def plot_reward_model_comparisons(df, output_dir="reward_model_plots"):
         )
 
         # Extract number of queries from reward model path
-        def extract_num_queries(path):
+        def extract_total_queries(path):
             if not isinstance(path, str) or path == "none":
                 return None
 
@@ -586,16 +586,16 @@ def plot_reward_model_comparisons(df, output_dir="reward_model_plots"):
                 return int(match.group(1))
             return None
 
-        df_filtered["num_queries"] = df_filtered["reward_model"].apply(
-            extract_num_queries
+        df_filtered["total_queries"] = df_filtered["reward_model"].apply(
+            extract_total_queries
         )
         print(
-            f"Extracted num_queries from {df_filtered['num_queries'].notna().sum()} reward models"
+            f"Extracted total_queries from {df_filtered['total_queries'].notna().sum()} reward models"
         )
     else:
         # If reward_model column doesn't exist, create dummy ones
         df_filtered["reward_model_name"] = "unknown"
-        df_filtered["num_queries"] = None
+        df_filtered["total_queries"] = None
 
     if len(df_filtered) == 0:
         print("No runs with valid success rate metrics found. Cannot generate plots.")
@@ -632,13 +632,13 @@ def plot_reward_model_comparisons(df, output_dir="reward_model_plots"):
                 & (df_filtered["algorithm"] == algorithm)
             ]
 
-            # Handle zero_rewards_iql case - if algorithm is iql and num_queries is NaN, it's zero_rewards_iql
+            # Handle zero_rewards_iql case - if algorithm is iql and total_queries is NaN, it's zero_rewards_iql
             if algorithm == "iql":
                 dataset_algo_df.loc[
-                    dataset_algo_df["num_queries"].isna(), "num_queries"
+                    dataset_algo_df["total_queries"].isna(), "total_queries"
                 ] = 0
                 dataset_algo_df.loc[
-                    dataset_algo_df["num_queries"] == 0, "reward_model_name"
+                    dataset_algo_df["total_queries"] == 0, "reward_model_name"
                 ] = "zero_rewards_iql"
 
             # Plot BC as a baseline
@@ -654,10 +654,10 @@ def plot_reward_model_comparisons(df, output_dir="reward_model_plots"):
             # For IQL, exclude 0 from creating its own plot but include it in other plots
             if algorithm == "iql":
                 query_counts = [
-                    q for q in dataset_algo_df["num_queries"].unique() if q != 0
+                    q for q in dataset_algo_df["total_queries"].unique() if q != 0
                 ]
             else:
-                query_counts = dataset_algo_df["num_queries"].unique()
+                query_counts = dataset_algo_df["total_queries"].unique()
 
             # If no query counts found, create a single plot without query count separation
             if len(query_counts) == 0:
@@ -668,20 +668,20 @@ def plot_reward_model_comparisons(df, output_dir="reward_model_plots"):
             )
 
             # For each query count, create a separate plot
-            for num_queries in query_counts:
+            for total_queries in query_counts:
                 # Filter by query count if it's not None
-                if num_queries is not None:
+                if total_queries is not None:
                     if algorithm == "iql":
                         # For IQL, include zero query runs in each plot
                         current_df = dataset_algo_df[
-                            (dataset_algo_df["num_queries"] == num_queries)
-                            | (dataset_algo_df["num_queries"] == 0)
+                            (dataset_algo_df["total_queries"] == total_queries)
+                            | (dataset_algo_df["total_queries"] == 0)
                         ]
                     else:
                         current_df = dataset_algo_df[
-                            dataset_algo_df["num_queries"] == num_queries
+                            dataset_algo_df["total_queries"] == total_queries
                         ]
-                    query_label = f"Queries: {num_queries}"
+                    query_label = f"Queries: {total_queries}"
                 else:
                     current_df = dataset_algo_df
                     query_label = "Unknown query count"
@@ -810,7 +810,7 @@ def plot_reward_model_comparisons(df, output_dir="reward_model_plots"):
 
                     # Add a title and labels
                     plt.title(
-                        f"Reward Model Comparison: {algorithm} on {dataset}\nQueries: {int(num_queries) if num_queries is not None else 'Unknown'}",
+                        f"Reward Model Comparison: {algorithm} on {dataset}\nQueries: {int(total_queries) if total_queries is not None else 'Unknown'}",
                         fontsize=12,
                     )
                     plt.ylabel("Success Rate")
@@ -835,7 +835,7 @@ def plot_reward_model_comparisons(df, output_dir="reward_model_plots"):
                     )  # Add extra padding at bottom
                     output_path = os.path.join(
                         output_dir,
-                        f"{safe_dataset}_{safe_algorithm}_queries{int(num_queries) if num_queries is not None else 'Unknown'}_reward_model_comparison.png",
+                        f"{safe_dataset}_{safe_algorithm}_queries{int(total_queries) if total_queries is not None else 'Unknown'}_reward_model_comparison.png",
                     )
                     plt.savefig(output_path, dpi=300, bbox_inches="tight")
                     print(f"Saved reward model comparison plot to {output_path}")

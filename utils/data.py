@@ -1,6 +1,7 @@
-import torch
 import numpy as np
+import torch
 import tqdm
+
 
 # Define a simple AttrDict class that provides dot access to dictionaries
 class AttrDict(dict):
@@ -41,17 +42,16 @@ def load_tensordict(file_path):
     print(f"Fields: {list(data.keys())}")
     return data
 
-def process_data_trajectories(data_path, device="cpu"):
+def process_data_trajectories(data, device="cpu"):
     """
     Load and process data into trajectories based on "episode" key from a data file.
 
     Args:
-        data_path (str): Path to the data file.
+        data (str): Raw TensorDict data to process.
 
     Returns:
         trajectories: List of processed trajectories.
     """
-    data = load_tensordict(data_path)
     data = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in data.items()}
     # Group data by episode
     unique_episodes = data["episode"].unique()
@@ -106,8 +106,8 @@ def get_gt_preferences(data, segment_indices, pairs):
     Get ground truth preferences for segments based on cumulative rewards.
 
     Args:
-        data (dict): Raw data containing all trajectories.
-        segment_indices (list): List of tuples containing (episode_idx, start_idx, end_idx) for each segment.
+        data (dict): Raw TensorDict data.
+        segment_indices (list): List of tuples containing (start_idx, end_idx) for all segments.
         pairs (list): List of tuples containing segment indices to compute ground truth preferences.
 
     Returns:

@@ -35,7 +35,7 @@ hardware:
 output:
   output_dir: results/active_reward_model
   # Use fixed placeholder for dataset name that will be replaced in code
-  model_dir_name: "DATASET_NAME_active_${active_learning.uncertainty_method}_max${active_learning.max_queries}_${active_learning.num_queries_per_iteration}_aug${dtw_augmentation.enabled}_k${dtw_augmentation.k_augment}"
+  model_dir_name: "DATASET_NAME_active_${active_learning.uncertainty_method}_max${active_learning.total_queries}_${active_learning.total_queries_per_iteration}_aug${dtw_augmentation.enabled}_k${dtw_augmentation.k_augment}"
 
 training:
   save_model_every: 5

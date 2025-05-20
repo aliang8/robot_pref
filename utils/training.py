@@ -158,7 +158,7 @@ def train_model(
             dynamic_ncols=True,
         )
 
-        for batch_idx, (obs1, actions1, obs2, actions2, pref) in enumerate(
+        for _, (obs1, actions1, obs2, actions2, pref) in enumerate(
             progress_bar
         ):
             # Move data to device

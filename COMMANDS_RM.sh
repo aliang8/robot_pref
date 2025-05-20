@@ -8,7 +8,7 @@ python train_reward_model_active.py \
     data.data_path="/scr2/shared/pref/datasets/robomimic/lift/mg_image_dense.pt" \
     active_learning.uncertainty_method=random \
     data.segment_length=64 \
-    active_learning.max_queries=50 \
+    active_learning.total_queries=50 \
     data.data_path=/scr2/shared/pref/datasets/robomimic/lift/dtw_matrix_64.pkl
     
 # precompute dtw matrix
@@ -21,7 +21,7 @@ python train_reward_model_active.py \
     data.data_path="/scr2/shared/pref/datasets/robomimic/lift/mg_image_dense.pt" \
     active_learning.uncertainty_method=random \
     data.segment_length=64 \
-    active_learning.max_queries=50 \
+    active_learning.total_queries=50 \
     dtw_augmentation.enabled=true
 
 # train policy using learned reward model
