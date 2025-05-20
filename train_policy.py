@@ -9,7 +9,7 @@ from tqdm import tqdm
 import pickle
 import metaworld
 import d3rlpy
-from d3rlpy.algos import IQL, BC
+from d3rlpy.algos import IQL, BC, IQLConfig, BCConfig
 from d3rlpy.datasets import MDPDataset
 
 # from d3rlpy.metrics.scorer import evaluate_on_environment
@@ -469,32 +469,32 @@ def main(cfg: DictConfig):
 
     if algorithm_name.lower() == "iql":
         # Initialize IQL algorithm
-        algo = IQL(
-            actor_learning_rate=cfg.model.actor_learning_rate,
-            critic_learning_rate=cfg.model.critic_learning_rate,
-            batch_size=cfg.model.batch_size,
-            gamma=cfg.model.gamma,
-            tau=cfg.model.tau,
-            n_critics=cfg.model.n_critics,
-            expectile=cfg.model.expectile,
-            weight_temp=cfg.model.weight_temp,
-            encoder_factory=VectorEncoderFactory(cfg.model.encoder_dims),
-            use_gpu=torch.cuda.is_available()
-        )
-        # iql_config = IQLConfig(**cfg.iql)
-        # algo = iql_config.create()
+        # algo = IQL(
+        #     actor_learning_rate=cfg.model.actor_learning_rate,
+        #     critic_learning_rate=cfg.model.critic_learning_rate,
+        #     batch_size=cfg.model.batch_size,
+        #     gamma=cfg.model.gamma,
+        #     tau=cfg.model.tau,
+        #     n_critics=cfg.model.n_critics,
+        #     expectile=cfg.model.expectile,
+        #     weight_temp=cfg.model.weight_temp,
+        #     encoder_factory=VectorEncoderFactory(cfg.model.encoder_dims),
+        #     use_gpu=torch.cuda.is_available()
+        # )
+        iql_config = IQLConfig(**cfg.iql)
+        algo = iql_config.create()
 
     elif algorithm_name.lower() == "bc":
         # Initialize BC algorithm
         # TODO: This doesn't work because of version mismatch I think (using d3rlpy 2.8.1)
-        algo = BC(
-            learning_rate=cfg.model.learning_rate,
-            batch_size=cfg.model.batch_size,
-            encoder_factory=VectorEncoderFactory(cfg.model.encoder_dims),
-            use_gpu=torch.cuda.is_available()
-        )
-        # bc_config = BCConfig(**cfg.bc)
-        # algo = bc_config.create()
+        # algo = BC(
+        #     learning_rate=cfg.model.learning_rate,
+        #     batch_size=cfg.model.batch_size,
+        #     encoder_factory=VectorEncoderFactory(cfg.model.encoder_dims),
+        #     use_gpu=torch.cuda.is_available()
+        # )
+        bc_config = BCConfig(**cfg.bc)
+        algo = bc_config.create()
 
         # For BC with weight decay
         if hasattr(cfg.model, "use_weight_decay") and cfg.model.use_weight_decay:
@@ -654,28 +654,28 @@ def main(cfg: DictConfig):
 
     # Train the model
     # TODO: This doesn't work because of version mismatch I think (using d3rlpy 2.8.1)
-    training_metrics = algo.fit(
-        dataset,
-        n_epochs=n_epochs,
-        eval_episodes=None,  # Don't use the built-in eval which expects episodes format
-        save_interval=10,
-        scorers=scorers,
-        experiment_name=experiment_name,
-        with_timestamp=True,
-        logdir=d3rlpy_logdir,
-        verbose=True,
-        callback=composite_callback  # Use the composite callback instead of a list
-    )
     # training_metrics = algo.fit(
     #     dataset,
-    #     n_steps=n_epochs * cfg.training.n_steps_per_epoch,
-    #     n_steps_per_epoch=cfg.training.n_steps_per_epoch,
+    #     n_epochs=n_epochs,
+    #     eval_episodes=None,  # Don't use the built-in eval which expects episodes format
     #     save_interval=10,
-    #     evaluators=scorers,
+    #     scorers=scorers,
     #     experiment_name=experiment_name,
     #     with_timestamp=True,
-    #     callback=composite_callback,  # Use the composite callback instead of a list
+    #     logdir=d3rlpy_logdir,
+    #     verbose=True,
+    #     callback=composite_callback  # Use the composite callback instead of a list
     # )
+    training_metrics = algo.fit(
+        dataset,
+        n_steps=n_epochs * cfg.training.n_steps_per_epoch,
+        n_steps_per_epoch=cfg.training.n_steps_per_epoch,
+        save_interval=10,
+        evaluators=scorers,
+        experiment_name=experiment_name,
+        with_timestamp=True,
+        callback=composite_callback,  # Use the composite callback instead of a list
+    )
 
     # Print the training metrics summary
     print("\nTraining metrics summary:")

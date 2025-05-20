@@ -500,41 +500,44 @@ def active_preference_learning(cfg, dataset_name=None):
     ax2.spines['top'].set_visible(False)
     ax2.spines['right'].set_visible(False)
     
-    # Plot augmented accuracy
-    ax3 = axs[2]
-    ax3.plot(metrics["num_labeled"], augmented_accuracy, marker='o', markersize=dot_size, color=line_color)
-    ax3.set_ylabel("Augmented Accuracy", fontsize=16)
-    ax3.set_title("Augmented Accuracy vs Labeled Pairs")
-    ax3.grid(True, alpha=0.3)
-    ax3.spines['top'].set_visible(False)
-    ax3.spines['right'].set_visible(False)
-    
+    # Plot augmented accuracy if available
+    if "augmented_accuracy" in metrics:
+        ax3 = axs[2]
+        ax3.plot(metrics["num_labeled"], metrics["augmented_accuracy"], marker='o', markersize=dot_size, color=line_color)
+        ax3.set_ylabel("Augmented Accuracy", fontsize=16)
+        ax3.set_title("Augmented Accuracy vs Labeled Pairs")
+        ax3.grid(True, alpha=0.3)
+    # Remove top and right spines for all axes
+    for ax in axs:
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+
     # Ensure x-axis has only integer ticks
     from matplotlib.ticker import MaxNLocator
     for ax in axs:
         ax.xaxis.set_major_locator(MaxNLocator(integer=True))
-    
+
     # Make sure there's space for the common x-label
     plt.subplots_adjust(bottom=0.2)
-    
+
     # Add a common x-axis label for the entire figure
     fig.supxlabel("Number of Labeled Pairs", fontsize=16, y=0.05)
-    
+
     # Save plot in the model directory
     learning_curve_path = os.path.join(model_dir, "active_learning_metrics.png")
     plt.savefig(learning_curve_path, dpi=300, bbox_inches='tight')
-    
+
     if wandb_run:
         wandb_run.log({"results": wandb.Image(learning_curve_path)})
-    
+
     # Save final model in model directory
     model_path = os.path.join(model_dir, "final_model.pt")
     torch.save(ensemble.models[0].state_dict(), model_path)
-    
+
     config_path = os.path.join(model_dir, "config.yaml")
     with open(config_path, "w") as f:
         f.write(OmegaConf.to_yaml(cfg))
-    
+
     print(f"\nActive learning completed. Final model saved to {model_path}")
     
 @hydra.main(config_path="config", config_name="reward_model_active", version_base=None)
