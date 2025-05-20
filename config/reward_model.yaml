@@ -2,6 +2,9 @@ defaults:
   - common
   - _self_ 
 
+# Number of models to train with different seeds
+num_seeds: 3
+
 data:
   data_path: "/scr/shared/clam/datasets/metaworld/assembly-v2/buffer_assembly-v2.pt"
   segment_length: 32
