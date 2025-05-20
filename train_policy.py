@@ -221,26 +221,13 @@ def main(cfg: DictConfig):
         if cfg.wandb.use_wandb and epoch == 1:
             wandb.run.config.update(cfg_dict)
 
-        if env is not None:
+        # save model
+        if epoch % cfg.training.save_interval == 0:
+            algo.save_model(os.path.join(cfg.output.output_dir, f"model_{epoch}.pt"))
+
+        if env is not None and epoch % cfg.training.eval_interval == 0:
             eval_model(env=env, algo=algo, cfg=cfg, epoch=epoch)
 
-    # Get the model directory name from config if available, or fall back to default
-    if hasattr(cfg.output, "model_dir_name"):
-        model_dir_name = cfg.output.model_dir_name
-        # Add zero reward indicator if using that mode
-        if cfg.data.get("use_zero_rewards", False):
-            model_dir_name += "_zero_rewards"
-
-        # Create subdirectory based on the name template
-        model_dir = os.path.join(cfg.output.output_dir, model_dir_name)
-        os.makedirs(model_dir, exist_ok=True)
-        model_path = os.path.join(model_dir, f"{algorithm_name.lower()}.pt")
-    else:
-        # Fall back to the original naming scheme
-        zero_suffix = "_zero_rewards" if cfg.data.get("use_zero_rewards", False) else ""
-        model_path = f"{cfg.output.output_dir}/{algorithm_name.lower()}_{Path(cfg.data.data_path).stem}{zero_suffix}.pt"
-
-    print(f"Model saved to {model_path}")
     print("\nTraining complete!")
 
 if __name__ == "__main__":
