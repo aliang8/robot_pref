@@ -28,6 +28,6 @@ python train_reward_model_active.py \
 python3 train_policy.py --config-name=iql_robomimic \
     data.env_name=can \
     data.data_path="/scr2/shared/pref/datasets/robomimic/can/mg_image_dense.pt" \
-    data.reward_model_path=/scr/matthewh6/robot_pref/results/active_reward_model/ \
+    data.reward_model_path="/scr/matthewh6/robot_pref/results/active_reward_model/can_mg_image_dense_balanced_active_disagreement_max100_1_augFalse_k5/checkpoints/checkpoint_iter_100.pt" \
     random_seed=42
 

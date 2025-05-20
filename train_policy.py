@@ -1,45 +1,34 @@
+import glob
 import os
 import time
-import json
-import torch
-import numpy as np
 from pathlib import Path
-import random
-from tqdm import tqdm
-import pickle
-import metaworld
-import d3rlpy
-from d3rlpy.algos import IQL, BC, IQLConfig, BCConfig
-from d3rlpy.datasets import MDPDataset
 
 # from d3rlpy.metrics.scorer import evaluate_on_environment
-from d3rlpy.models.encoders import VectorEncoderFactory
-from pathlib import Path
-import time
 import hydra
-from omegaconf import DictConfig, OmegaConf
-import wandb
 import matplotlib.pyplot as plt
-import glob
-from sklearn.preprocessing import StandardScaler
+import numpy as np
+import torch
+from d3rlpy.algos import BCConfig, IQLConfig
 
 # Import d3rlpy components
 from d3rlpy.dataset import MDPDataset
-from d3rlpy.algos import IQL, BC
+from d3rlpy.datasets import MDPDataset
+from omegaconf import DictConfig, OmegaConf
+from tqdm import tqdm
+
+import wandb
+from models import RewardModel
+from utils.callbacks import CompositeCallback, WandbCallback
 
 # from d3rlpy.metrics.scorer import evaluate_on_environment
-from d3rlpy.models.encoders import VectorEncoderFactory
-
 # Import utility functions
-from utils.data import load_tensordict
+from utils.data import AttrDict, load_tensordict
 from utils.env import MetaWorldEnvCreator, RobomimicEnvCreator
-from utils.callbacks import WandbCallback, CompositeCallback
-from utils.wandb import log_to_wandb
-from utils.eval import evaluate_policy_manual, custom_evaluate_on_environment, RANDOM_SEED
-from utils.data import AttrDict
-from utils.viz import create_video_grid
+from utils.eval import custom_evaluate_on_environment, evaluate_policy_manual
 from utils.seed import set_seed
-from models import RewardModel
+from utils.viz import create_video_grid
+from utils.wandb import log_to_wandb
+
 
 def is_valid_video_file(file_path):
     """Simple check if a video file exists and is valid."""
@@ -598,7 +587,7 @@ def main(cfg: DictConfig):
 
         # Log metrics to wandb if enabled
         if wandb_run:
-            log_to_wandb(eval_metrics_with_best, prefix="eval", epoch=epoch, wandb_run=wandb_run)
+            log_to_wandb(eval_metrics_with_best, prefix="eval", epoch=epoch)
 
             # Log video grid if videos were recorded
             if video_recording and video_path and wandb_run:
@@ -632,7 +621,7 @@ def main(cfg: DictConfig):
                                     fps=cfg.evaluation.video_fps,
                                     format="mp4",
                                 )
-                                log_to_wandb({"video_grid": video_obj}, prefix="eval", wandb_run=wandb_run)
+                                log_to_wandb({"video_grid": video_obj}, prefix="eval")
                         except Exception as e:
                             print(f"Error creating video grid: {e}")
                 except Exception as e:
@@ -710,7 +699,7 @@ def main(cfg: DictConfig):
         # Log training metrics if available
         if training_metrics:
             try:
-                log_to_wandb(training_metrics, prefix="train_final", wandb_run=wandb_run)
+                log_to_wandb(training_metrics, prefix="train_final")
             except:
                 print("Warning: Could not log algorithm's training metrics to wandb")
 
@@ -739,7 +728,7 @@ def main(cfg: DictConfig):
                     summary_metrics[f"best_{k}"] = v
 
         # Log the combined summary
-        log_to_wandb(summary_metrics, prefix="summary", wandb_run=wandb_run)
+        log_to_wandb(summary_metrics, prefix="summary")
         # Also log a final plot of training losses if available
         if wandb_run and wandb_callback.training_losses:
             try:
@@ -756,7 +745,7 @@ def main(cfg: DictConfig):
                 plt.tight_layout()
 
                 # Log to wandb
-                log_to_wandb({"media/plots/training_losses": wandb.Image(plt)}, wandb_run=wandb_run)
+                log_to_wandb({"media/plots/training_losses": wandb.Image(plt)})
                 plt.close()
             except Exception as e:
                 print(f"Warning: Could not create training loss plot: {e}")
@@ -836,7 +825,7 @@ def main(cfg: DictConfig):
 
         # Log final results to wandb
         if wandb_run:
-            log_to_wandb(evaluation_metrics, prefix="final_eval", wandb_run=wandb_run)
+            log_to_wandb(evaluation_metrics, prefix="final_eval")
 
             # Log videos if available
             if video_recording and video_path and wandb_run:
