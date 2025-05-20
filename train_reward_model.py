@@ -183,7 +183,7 @@ def main(cfg: DictConfig):
     print(f"Model saved to: {model_path}")
 
     # Run reward analysis
-    episodes = process_data_trajectories(cfg.data.data_path)    
+    episodes = process_data_trajectories(data, device)    
     reward_max = data_cpu["reward"].max().item()
     reward_min = data_cpu["reward"].min().item()
     analyze_rewards(
