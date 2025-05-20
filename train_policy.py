@@ -1,5 +1,4 @@
 import os
-import time
 from pathlib import Path
 
 import hydra
@@ -11,12 +10,10 @@ from omegaconf import DictConfig, OmegaConf
 import wandb
 from models import RewardModel
 from utils.data import AttrDict, load_dataset, load_tensordict
-from utils.env import MetaWorldEnvCreator, RobomimicEnvCreator
-from utils.eval import eval_model
+from utils.eval import create_env, eval_model
 from utils.seed import set_seed
 
 
-# Add a helper function to print model architecture information
 def print_model_architecture(algo):
     """Print the architecture details of a d3rlpy algorithm.
 
@@ -24,6 +21,17 @@ def print_model_architecture(algo):
         algo: A d3rlpy algorithm instance (IQL, BC, etc.)
     """
     print("\nModel Architecture Details:")
+    print("=" * 50)
+    print("Policy Network:")
+    print(algo._impl._modules.policy)
+
+    print("\nQ Functions:")
+    for i, q_func in enumerate(algo._impl._modules.q_funcs):
+        print(f"Q-Function {i}:")
+        print(q_func)
+
+    print("\nValue Function:")
+    print(algo._impl._modules.value_func)
     print("=" * 50)
 
 
@@ -38,13 +46,10 @@ def main(cfg: DictConfig):
     cfg = AttrDict.from_nested_dict(cfg_dict)
 
     if cfg.debug:
-        cfg.training.n_epochs = 10
-        cfg.training.n_steps_per_epoch = 100
+        cfg.training.n_epochs = 5
+        cfg.training.n_steps_per_epoch = 10
 
-    # Get algorithm name
     algorithm_name = cfg.algorithm
-
-    # Get the dataset name and update templates
     dataset_name = Path(cfg.data.data_path).stem
 
     # Replace dataset name placeholder in template strings
@@ -62,7 +67,7 @@ def main(cfg: DictConfig):
     print(OmegaConf.to_yaml(OmegaConf.create(cfg_dict)))
 
     # Set random seed for reproducibility
-    random_seed = cfg.get("random_seed", 42)
+    random_seed = cfg.random_seed
     set_seed(random_seed)
     print(f"Global random seed set to {random_seed}")
 
@@ -75,9 +80,6 @@ def main(cfg: DictConfig):
 
     # Get experiment name based on data path
     experiment_name = f"{algorithm_name.upper()}_{dataset_name}"
-
-    # Set up d3rlpy log directory
-    d3rlpy_logdir = f"{cfg.output.output_dir}/logs"
 
     # Load data
     print(f"Loading data from {cfg.data.data_path}")
@@ -187,85 +189,40 @@ def main(cfg: DictConfig):
 
     else:
         raise ValueError(f"Unsupported algorithm: {algorithm_name}")
-    
-    # Initialize WanDBAdapterFactory for logging
-    if cfg.wandb.use_wandb:
-        # Set up a run name if not specified
-        run_name = cfg.wandb.name
-        if run_name is None:
-            run_name = f"{algorithm_name.upper()}_{dataset_name}_{time.strftime('%Y%m%d_%H%M%S')}"
-
-        wandb_adapter_factory = WanDBAdapterFactory(project=cfg.wandb.project)
-        print("WanDBAdapterFactory initialized")
-    else:
-        wandb_adapter_factory = None
 
     # Print model architecture details
     print_model_architecture(algo)
 
-    # Get number of training epochs
-    n_epochs = cfg.training.n_epochs
-    
-    # Train the model
-    print(f"Training {algorithm_name.upper()} for {n_epochs} epochs...")
+    # Set up the environment
+    env = create_env(cfg)
 
-    # Create environment for evaluation
-    env = None
-    if not cfg.evaluation.skip_env_creation:
-        # Use the environment name specified in the config
-        if hasattr(cfg.data, "env_name") and cfg.data.env_name:
-            env_name = cfg.data.env_name
-            print(f"Creating environment: {env_name}")
-        else:
-            # Fallback to a default environment name if not specified
-            env_name = "assembly-v2-goal-observable"
-            print(f"No environment name specified in config. Using default: {env_name}")
-
-        if "mw" in cfg.data.data_path or "metaworld" in cfg.data.data_path:
-            env_creator = MetaWorldEnvCreator(env_name)
-        elif "robomimic" in cfg.data.data_path:
-            env_creator = RobomimicEnvCreator(env_name)
-        else:
-            raise ValueError(
-                f"No environment creator found for dataset: {cfg.data.data_path}"
-            )
-
-        # Create one environment to verify it works
-        try:
-            test_env = env_creator()
-
-            # Print environment information
-            print(
-                f"Successfully created environment with observation space: {test_env.observation_space.shape}, action space: {test_env.action_space.shape}"
-            )
-
-            # Use the environment creator for evaluation
-            env = env_creator
-        except Exception as e:
-            print(f"Error creating environment: {e}")
-            print("Evaluation will be skipped.")
-            env = None
-
-    # Training loop
-    for epoch, _ in algo.fitter(
+    # Set up the fitter for training
+    print("Setting up the fitter for training...")
+    fitter_kwargs = dict(
         dataset=dataset,
-        n_steps=n_epochs * cfg.training.n_steps_per_epoch,
+        n_steps=cfg.training.n_epochs * cfg.training.n_steps_per_epoch,
         n_steps_per_epoch=cfg.training.n_steps_per_epoch,
         experiment_name=experiment_name,
         with_timestamp=True,
-        logger_adapter=wandb_adapter_factory,
         show_progress=True,
         save_interval=cfg.training.save_interval,
-    ):
-        # if first epoch, log cfgs
-        if epoch == 0:
+    )
+
+    # Initialize WanDBAdapterFactory for logging
+    if cfg.wandb.use_wandb:
+        print("Initializing WanDBAdapterFactory for logging...")
+        wandb_adapter_factory = WanDBAdapterFactory(project=cfg.wandb.project)
+        fitter_kwargs["logger_adapter"] = wandb_adapter_factory
+
+    # Training loop
+    print(f"Training {algorithm_name.upper()} for {cfg.training.n_epochs} epochs...")
+    for epoch, _ in algo.fitter(**fitter_kwargs):
+        # For first epoch update configs
+        if cfg.wandb.use_wandb and epoch == 1:
             wandb.run.config.update(cfg_dict)
 
         if env is not None:
             eval_model(env=env, algo=algo, cfg=cfg, epoch=epoch)
-        
-    # Print the training metrics summary
-    print("\nTraining metrics summary:")
 
     # Get the model directory name from config if available, or fall back to default
     if hasattr(cfg.output, "model_dir_name"):
@@ -285,7 +242,6 @@ def main(cfg: DictConfig):
 
     print(f"Model saved to {model_path}")
     print("\nTraining complete!")
-
 
 if __name__ == "__main__":
     main()

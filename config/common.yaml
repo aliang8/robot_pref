@@ -1,13 +1,13 @@
 # Common settings shared across different algorithms
 
-debug: false
+debug: False
 
 # Random seed for reproducibility
 random_seed: 42
 
 # Data parameters
 data:
-  env_name: "assembly-v2-goal-observable"  # The exact MetaWorld environment name to use
+  env_name: null
 
 # Training parameters
 training:
@@ -16,9 +16,9 @@ training:
 
 # Evaluation settings
 evaluation:
-  skip_env_creation: false
-  record_video: true
-  parallel_eval: false
+  skip_env_creation: False
+  record_video: True
+  parallel_eval: False
   eval_workers: null  # null will use min(n_episodes, cpu_count)
   video_fps: 30
 
@@ -28,7 +28,7 @@ output:
 
 # Wandb configuration
 wandb:
-  use_wandb: false
+  use_wandb: False
   project: robot_pref
   entity: clvr
   name: null  # Will be auto-generated if null 

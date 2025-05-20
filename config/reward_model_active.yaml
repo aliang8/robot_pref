@@ -8,7 +8,7 @@ defaults:
 
 # Override active learning parameters if needed
 active_learning:
-  enabled: true
+  enabled: True
   retrain_interval: 1  # Retrain every iteration
 
 # Override data parameters
@@ -21,14 +21,14 @@ data:
 
 # DTW augmentation parameters
 dtw_augmentation:
-  enabled: false              # Set to true to enable DTW augmentation
+  enabled: False              # Set to True to enable DTW augmentation
   k_augment: 5                # Number of similar segments to find for each part of a pair
   max_dtw_segments: 5000      # Max segments for computing DTW matrix (null or remove for all).
   
 # Hardware settings
 hardware:
   gpu: 0
-  use_cpu: false
+  use_cpu: False
 
 # Output parameters
 output:
@@ -41,7 +41,7 @@ training:
   reward_analysis_every: 5
 
 wandb:
-  use_wandb: false
+  use_wandb: False
   project: "robot_pref"
   entity: "clvr"
   name: null  # Will be auto-generated

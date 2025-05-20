@@ -40,8 +40,8 @@ python eef_segment_matching.py matching.top_k=10
 python eef_segment_matching.py matching.query_indices=[5,10,15]  # Process multiple specific query segments
 
 # Visualization options
-python eef_segment_matching.py visualization.create_videos=false
-python eef_segment_matching.py visualization.use_shared_ranges=true
+python eef_segment_matching.py visualization.create_videos=False
+python eef_segment_matching.py visualization.use_shared_ranges=True
 
 # Change random seed and output directory
 python eef_segment_matching.py random_seed=123 output.output_dir="./segment_matching_results"
@@ -60,10 +60,10 @@ python collect_cluster_preferences.py data.data_path="/path/to/dataset.pt" outpu
 python collect_cluster_preferences.py preferences.n_representatives=5 preferences.max_comparisons=20
 
 # Skip video generation for faster collection
-python collect_cluster_preferences.py preferences.skip_videos=true
+python collect_cluster_preferences.py preferences.skip_videos=True
 
 # Use automatic preferences based on ground truth rewards (no user input required)
-python collect_cluster_preferences.py preferences.use_automatic_preferences=true
+python collect_cluster_preferences.py preferences.use_automatic_preferences=True
 ```
 
 ## Collect Sequential Preferences with Similarity-Based Augmentation
@@ -108,7 +108,7 @@ python train_reward_model.py --multirun
 python train_reward_model_sampling.py active_learning.uncertainty_method="disagreement" active_learning.num_models=5
 
 # Enable fine-tuning between active learning iterations
-python train_reward_model_sampling.py active_learning.fine_tune=true active_learning.fine_tune_lr=5e-5
+python train_reward_model_sampling.py active_learning.fine_tune=True active_learning.fine_tune_lr=5e-5
 ```
 
 ## Train Policy
@@ -120,7 +120,7 @@ python train_reward_model_sampling.py active_learning.fine_tune=true active_lear
 python train_policy.py --config-name=iql data.data_path="/path/to/dataset.pt" data.reward_model_path="reward_model/state_action_reward_model.pt"
 
 # With video recording
-python train_policy.py --config-name=iql data.data_path="/path/to/dataset.pt" evaluation.record_video=true
+python train_policy.py --config-name=iql data.data_path="/path/to/dataset.pt" evaluation.record_video=True
 
 # With custom parameters
 python train_policy.py --config-name=iql data.data_path="/path/to/dataset.pt" training.n_epochs=200 model.actor_learning_rate=3e-4
@@ -133,6 +133,6 @@ python train_policy.py --config-name=iql data.data_path="/path/to/dataset.pt" tr
 python train_policy.py --config-name=bc data.data_path="/path/to/dataset.pt"
 
 # With custom parameters
-python train_policy.py --config-name=bc data.data_path="/path/to/dataset.pt" model.learning_rate=1e-4 training.n_epochs=200 evaluation.record_video=true
+python train_policy.py --config-name=bc data.data_path="/path/to/dataset.pt" model.learning_rate=1e-4 training.n_epochs=200 evaluation.record_video=True
 
 /scr/aliang80/robot_pref/labeled_datasets/buffer_assembly-v2_balanced.pt

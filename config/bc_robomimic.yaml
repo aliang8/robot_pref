@@ -4,7 +4,7 @@ algorithm: bc
 # Include common settings
 defaults:
   - common
-  - _self_  # Allow this config to override common settings
+  - _self_
 
 # Data parameters
 data:
@@ -17,9 +17,8 @@ data:
 # Model architecture
 model:
   hidden_dims: [256, 256]
-  use_weight_decay: false
+  use_weight_decay: False
   weight_decay: 0.0
-  encoder_dims: [256, 256, 256]
 
 bc:
   learning_rate: 3e-4
@@ -36,8 +35,5 @@ training:
 # Output parameters
 output:
   output_dir: "results/bc_model"
-
-# Wandb configuration specific to BC
-wandb:
-  tags: ["bc", "behavioral_cloning"]
-  notes: "BC policy training directly from demonstrations" 
+  model_dir_name: "DATASET_NAME_bc_lr${model.learning_rate}_epochs${training.n_epochs}"
+  artifact_name: "bc_${data.env_name}_DATASET_NAME"

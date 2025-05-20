@@ -6,8 +6,8 @@ import pickle
 from pathlib import Path
 
 import numpy as np
-from tqdm import tqdm
 import torch
+from tqdm import tqdm
 
 import utils.dtw as dtw
 from utils.data import load_tensordict, segment_episodes
@@ -82,12 +82,12 @@ def main():
     )
     parser.add_argument(
         "--use_relative_eef",
-        action="store_true",
+        action="store_True",
         help="Use relative EEF positions instead of absolute",
     )
     parser.add_argument(
         "--overwrite",
-        action="store_true",
+        action="store_True",
         help="Overwrite existing DTW matrix file if it exists",
     )
     args = parser.parse_args()

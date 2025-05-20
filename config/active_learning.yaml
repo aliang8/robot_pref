@@ -1,7 +1,7 @@
 # Common active learning parameters for preference-based learning
 active_learning:
   # Whether to use active learning
-  enabled: true
+  enabled: True
   # Uncertainty estimation method: "entropy", "disagreement", or "random"
   uncertainty_method: "entropy"
   # Number of models in the ensemble (for disagreement method)
@@ -9,7 +9,7 @@ active_learning:
   # Number of pairs to select in each iteration
   total_queries_per_iteration: 1
   # Whether to fine-tune the model from the previous iteration or train from scratch
-  fine_tune: false
+  fine_tune: False
   # If fine-tuning, the learning rate to use
   fine_tune_lr: 1e-4
   # How often to retrain the model (in number of preferences)
@@ -27,4 +27,4 @@ training:
   num_epochs: 50
   batch_size: 256
   num_workers: 4
-  pin_memory: true
+  pin_memory: True

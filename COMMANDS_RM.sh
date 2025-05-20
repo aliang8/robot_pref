@@ -22,7 +22,7 @@ python train_reward_model_active.py \
     active_learning.uncertainty_method=random \
     data.segment_length=64 \
     active_learning.total_queries=50 \
-    dtw_augmentation.enabled=true
+    dtw_augmentation.enabled=True
 
 # train policy using learned reward model
 python3 train_policy.py --config-name=iql_robomimic \
