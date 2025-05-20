@@ -232,6 +232,7 @@ def active_preference_learning(cfg, dataset_name=None):
             checkpoint_path = model_dir / "checkpoints" / f"checkpoint_iter_{iteration}.pt"
             torch.save(ensemble.models[0].state_dict(), checkpoint_path)
             print(f"Saved checkpoint at iteration {iteration}")
+            print(f"Model saved to: {checkpoint_path}")
 
         batch_size = min(cfg.active_learning.total_queries_per_iteration, total_queries - num_queries)
         if batch_size <= 0 or len(unlabeled_pairs) == 0:
@@ -257,7 +258,6 @@ def active_preference_learning(cfg, dataset_name=None):
     with open(config_path, "w") as f:
         f.write(OmegaConf.to_yaml(cfg))
 
-    print(f"Model saved to: {checkpoint_path}")
     print("Active learning completed.")
 
 @hydra.main(config_path="config", config_name="reward_model_active", version_base=None)

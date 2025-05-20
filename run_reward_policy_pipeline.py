@@ -42,7 +42,7 @@ REWARD_MODEL_TEMPLATE_ACTIVE = [
 # Grid search parameters for active reward model
 ACTIVE_REWARD_MODEL_GRID = {
     "active_learning.uncertainty_method": ["entropy"],  
-    "active_learning.total_queries": [5],   
+    "active_learning.total_queries": [10],   
     "dtw_augmentation.enabled": [True, False]
 }
 
