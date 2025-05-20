@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import numpy as np
 
+
 class RewardModel(nn.Module):
     """MLP-based reward model that takes state and action as input."""
 

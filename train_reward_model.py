@@ -14,7 +14,12 @@ import itertools
 # Import shared models and utilities
 from models.reward_models import RewardModel
 
-from utils.data import load_tensordict, segment_episodes, get_gt_preferences, process_data_trajectories
+from utils.data import (
+    load_tensordict,
+    segment_episodes,
+    get_gt_preferences,
+    process_data_trajectories,
+)
 from utils.dataset import (
     PreferenceDataset,
     create_data_loaders,
@@ -23,6 +28,7 @@ from utils.training import train_model, evaluate_model_on_test_set
 from utils.seed import set_seed
 from utils.wandb import log_to_wandb
 from utils.analyze_rewards import analyze_rewards
+
 
 @hydra.main(config_path="config", config_name="reward_model", version_base=None)
 def main(cfg: DictConfig):
@@ -81,7 +87,7 @@ def main(cfg: DictConfig):
 
     effective_num_workers = cfg.training.num_workers
     effective_pin_memory = cfg.training.pin_memory
-    
+
     print(f"Loading data from file: {cfg.data.data_path}")
     data = load_tensordict(cfg.data.data_path)
 
@@ -102,7 +108,9 @@ def main(cfg: DictConfig):
     # Find all possible segment pairs (num_segments choose 2) and sample data.num_pairs from them
     all_segment_pairs = list(itertools.combinations(range(len(segment_indices)), 2))
     all_segment_pairs = random.sample(all_segment_pairs, cfg.data.num_pairs)
-    print(f"Sampled {len(all_segment_pairs)} pairs from {len(all_segment_pairs)} total pairs")
+    print(
+        f"Sampled {len(all_segment_pairs)} pairs from {len(all_segment_pairs)} total pairs"
+    )
 
     print("Computing preference labels")
     preferences = get_gt_preferences(data_cpu, segment_indices, all_segment_pairs)
@@ -122,14 +130,14 @@ def main(cfg: DictConfig):
     # Create data loaders
     dataloaders = create_data_loaders(
         preference_dataset,
-        train_ratio=0.8,  
-        val_ratio=0.1,  
+        train_ratio=0.8,
+        val_ratio=0.1,
         batch_size=cfg.training.batch_size,
         num_workers=effective_num_workers,
         pin_memory=effective_pin_memory,
         seed=random_seed,
         normalize_obs=cfg.data.normalize_obs,
-        norm_method=cfg.data.norm_method
+        norm_method=cfg.data.norm_method,
     )
 
     train_loader = dataloaders["train"]
@@ -144,7 +152,9 @@ def main(cfg: DictConfig):
     # Start timing the training
     start_time = time.time()
     dataset_name = Path(cfg.data.data_path).stem
-    cfg.output.model_dir_name = cfg.output.model_dir_name.replace("DATASET_NAME", dataset_name)
+    cfg.output.model_dir_name = cfg.output.model_dir_name.replace(
+        "DATASET_NAME", dataset_name
+    )
     model_dir_name = os.path.join(cfg.output.output_dir, cfg.output.model_dir_name)
     os.makedirs(model_dir_name, exist_ok=True)
     model_path = os.path.join(model_dir_name, "model.pt")
@@ -183,7 +193,7 @@ def main(cfg: DictConfig):
     print(f"Model saved to: {model_path}")
 
     # Run reward analysis
-    episodes = process_data_trajectories(data, device)    
+    episodes = process_data_trajectories(data, device)
     reward_max = data_cpu["reward"].max().item()
     reward_min = data_cpu["reward"].min().item()
     analyze_rewards(
@@ -192,9 +202,9 @@ def main(cfg: DictConfig):
         output_file=os.path.join(model_dir_name, "reward_grid.png"),
         wandb_run=wandb_run,
         reward_max=reward_max,
-        reward_min=reward_min
+        reward_min=reward_min,
     )
-    
+
     if wandb_run is not None:
         wandb.finish()
 

@@ -23,7 +23,7 @@ class WandbCallback:
         metrics = {"epoch": epoch, "total_step": total_step}
 
         # Get metrics from logger if available
-        try: # TODO: this doesn't work with d3rlpy 2.8
+        try:  # TODO: this doesn't work with d3rlpy 2.8
             logger = algo._active_logger
             if hasattr(logger, "_metrics_buffer"):
                 for name, buffer in logger._metrics_buffer.items():
@@ -78,6 +78,7 @@ class WandbCallback:
                 summary[f"mean_{loss_name}"] = np.mean(values)
 
         return summary
+
 
 class CompositeCallback:
     """A callback that combines multiple callbacks into one."""

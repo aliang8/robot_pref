@@ -76,6 +76,7 @@ def extract_episode_returns(data):
 
     return episode_data
 
+
 def plot_returns_histogram(returns, output_path, bins=50, title=None):
     """Plot a histogram of episode returns."""
     plt.figure(figsize=(10, 6))
@@ -262,7 +263,9 @@ def create_balanced_dataset(data, episode_data, selected_indices, output_path):
                 print(
                     f"  Warning: {key} has {nan_count}/{selected_tensor.numel()} NaN values. Replacing with zeros."
                 )
-                import ipdb; ipdb.set_trace()
+                import ipdb
+
+                ipdb.set_trace()
                 selected_tensor = torch.nan_to_num(selected_tensor, nan=0.0)
 
             new_data[key] = selected_tensor

@@ -7,7 +7,7 @@ from pathlib import Path
 
 import numpy as np
 from tqdm import tqdm
-import torch 
+import torch
 
 import utils.dtw as dtw
 from utils.data import load_tensordict, segment_episodes
@@ -37,8 +37,8 @@ def compute_dtw_distance_matrix(segments, use_relative_eef: bool):
         for i in range(n_segments):
             for j in range(i + 1, n_segments):
                 # EE positions
-                query = segments[i]["obs"].numpy()[:, :3] 
-                reference = segments[j]["obs"].numpy()[:, :3] 
+                query = segments[i]["obs"].numpy()[:, :3]
+                reference = segments[j]["obs"].numpy()[:, :3]
 
                 # Relative
                 if use_relative_eef:
@@ -54,14 +54,20 @@ def compute_dtw_distance_matrix(segments, use_relative_eef: bool):
 
     if count > 0:
         avg_dist = sum_dist / count
-        print(f"Distance statistics - Min: {min_dist:.2f}, Max: {max_dist:.2f}, Avg: {avg_dist:.2f}")
+        print(
+            f"Distance statistics - Min: {min_dist:.2f}, Max: {max_dist:.2f}, Avg: {avg_dist:.2f}"
+        )
     if non_finite_count > 0:
-        print(f"WARNING: {non_finite_count} distances used fallback due to non-finite DTW values")
+        print(
+            f"WARNING: {non_finite_count} distances used fallback due to non-finite DTW values"
+        )
     return distance_matrix
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Compute DTW distance matrix between trajectory segments")
+    parser = argparse.ArgumentParser(
+        description="Compute DTW distance matrix between trajectory segments"
+    )
     parser.add_argument(
         "--data_path",
         type=str,
@@ -89,11 +95,13 @@ def main():
     data_path = args.data_path
     segment_length = args.segment_length
     overwrite = args.overwrite
-    use_relative_eef = args.use_relative_eef        
+    use_relative_eef = args.use_relative_eef
 
     dtw_matrix_file = Path(data_path).parent / f"dtw_matrix_{segment_length}.pkl"
 
-    print(f"Computing DTW matrix for {data_path} with segment length {segment_length} and saving to {dtw_matrix_file}")
+    print(
+        f"Computing DTW matrix for {data_path} with segment length {segment_length} and saving to {dtw_matrix_file}"
+    )
 
     if os.path.exists(dtw_matrix_file) and not overwrite:
         print(f"DTW matrix file already exists: {dtw_matrix_file}")
@@ -109,7 +117,9 @@ def main():
             print(f"Overwriting existing DTW matrix file: {dtw_matrix_file}")
 
         data = load_tensordict(data_path)
-        data = {k: v.cpu() if isinstance(v, torch.Tensor) else v for k, v in data.items()}
+        data = {
+            k: v.cpu() if isinstance(v, torch.Tensor) else v for k, v in data.items()
+        }
         segments, segment_indices = segment_episodes(data, segment_length)
 
         dtw_matrix = compute_dtw_distance_matrix(segments, use_relative_eef)

@@ -10,8 +10,9 @@ from utils.loss import bradley_terry_loss
 
 sns.set_style("white")
 sns.set_style("ticks")
-sns.set_context('talk')
-plt.rc('text', usetex=True)  # camera-ready formatting + latex in plots
+sns.set_context("talk")
+plt.rc("text", usetex=True)  # camera-ready formatting + latex in plots
+
 
 def evaluate_model_on_test_set(model, test_loader, device):
     """Evaluate model performance on the test set.
@@ -30,10 +31,10 @@ def evaluate_model_on_test_set(model, test_loader, device):
     test_acc = 0
     test_total = 0
     logpdf_values = []
-    
+
     # Check if model is an ensemble
-    is_ensemble = hasattr(model, 'num_models') and model.num_models > 1
-    
+    is_ensemble = hasattr(model, "num_models") and model.num_models > 1
+
     with torch.no_grad():
         for obs1, actions1, obs2, actions2, pref in tqdm(test_loader, desc="Testing"):
             # Move to device
@@ -44,42 +45,46 @@ def evaluate_model_on_test_set(model, test_loader, device):
             # Get reward predictions
             reward1 = model(obs1, actions1)
             reward2 = model(obs2, actions2)
-            
+
             # Handle ensemble and non-ensemble models consistently with training
             if is_ensemble:
-                # [B, N, T] -> [B, N] for ensemble 
+                # [B, N, T] -> [B, N] for ensemble
                 return1 = reward1.sum(dim=-1)  # Sum over time dimension
                 return2 = reward2.sum(dim=-1)
                 # Replicate preferences for ensemble models
                 ensemble_pref = pref.unsqueeze(0).repeat(model.num_models, 1)
-                
-                import ipdb; ipdb.set_trace()
+
+                import ipdb
+
+                ipdb.set_trace()
             else:
                 # Standard non-ensemble model
                 return1 = reward1.sum(dim=1)  # Sum over time dimension
                 return2 = reward2.sum(dim=1)
-                
+
             # Compute standard loss
             loss = bradley_terry_loss(return1, return2, pref)
             test_loss += loss.item()
-            
+
             # Get predictions
-            pred_pref = torch.where(return1 > return2, 
-                                    torch.ones_like(pref), 
-                                    torch.ones_like(pref) * 2)
-            
+            pred_pref = torch.where(
+                return1 > return2, torch.ones_like(pref), torch.ones_like(pref) * 2
+            )
+
             # Compute logpdf
             logp = -loss
-            
+
             # Compute accuracy (same for both cases)
             correct = (pred_pref == pref).sum().item()
             test_acc += correct
             test_total += pref.size(0)
-            
+
             # Save logpdf values
             logpdf_values.append(logp.mean().item())
-    
-    avg_test_loss = test_loss / len(test_loader) if len(test_loader) > 0 else float('nan')
+
+    avg_test_loss = (
+        test_loss / len(test_loader) if len(test_loader) > 0 else float("nan")
+    )
     test_accuracy = test_acc / test_total if test_total > 0 else 0
     avg_logpdf = np.mean(logpdf_values) if logpdf_values else float("nan")
 
@@ -158,11 +163,15 @@ def train_model(
             dynamic_ncols=True,
         )
 
-        for _, (obs1, actions1, obs2, actions2, pref) in enumerate(
-            progress_bar
-        ):
+        for _, (obs1, actions1, obs2, actions2, pref) in enumerate(progress_bar):
             # Move data to device
-            obs1, actions1, obs2, actions2, pref = obs1.to(device), actions1.to(device), obs2.to(device), actions2.to(device), pref.to(device)
+            obs1, actions1, obs2, actions2, pref = (
+                obs1.to(device),
+                actions1.to(device),
+                obs2.to(device),
+                actions2.to(device),
+                pref.to(device),
+            )
             optimizer.zero_grad(set_to_none=True)
 
             # Compute rewards directly using the forward method
@@ -181,7 +190,7 @@ def train_model(
             # Bradley-Terry loss already applies mean over batch dimension
             # For ensemble models, we get one loss per model
             loss = bradley_terry_loss(return1, return2, pref)
-            
+
             # For ensemble, take mean across models
             batch_loss = loss.mean() if loss.dim() > 0 else loss
             batch_loss.backward()
@@ -199,7 +208,7 @@ def train_model(
 
         avg_train_loss = train_loss / len(train_loader)
         train_losses.append(avg_train_loss)
-        
+
         model.eval()
         val_loss = 0
 
@@ -215,7 +224,13 @@ def train_model(
                 for batch_idx, (obs1, actions1, obs2, actions2, pref) in enumerate(
                     val_progress
                 ):
-                    obs1, actions1, obs2, actions2, pref = obs1.to(device), actions1.to(device), obs2.to(device), actions2.to(device), pref.to(device)
+                    obs1, actions1, obs2, actions2, pref = (
+                        obs1.to(device),
+                        actions1.to(device),
+                        obs2.to(device),
+                        actions2.to(device),
+                        pref.to(device),
+                    )
 
                     # Compute rewards directly
                     reward1 = model(obs1, actions1)
@@ -232,10 +247,12 @@ def train_model(
 
                     # Bradley-Terry loss already applies mean over batch dimension
                     batch_loss = bradley_terry_loss(return1, return2, pref)
-                    
+
                     # For ensemble, take mean across models
-                    batch_loss = batch_loss.mean() if batch_loss.dim() > 0 else batch_loss
-                    
+                    batch_loss = (
+                        batch_loss.mean() if batch_loss.dim() > 0 else batch_loss
+                    )
+
                     val_loss += batch_loss.item()
                     val_progress.set_postfix({"loss": f"{batch_loss.item():.4f}"})
 
@@ -263,11 +280,11 @@ def train_model(
         plt.legend()
         plt.tight_layout()
         # remove top and right spines
-        plt.gca().spines['top'].set_visible(False)
-        plt.gca().spines['right'].set_visible(False)
+        plt.gca().spines["top"].set_visible(False)
+        plt.gca().spines["right"].set_visible(False)
 
         # remove border legend
-        plt.legend(frameon=False, loc='upper right', handlelength=1, fontsize=12)
+        plt.legend(frameon=False, loc="upper right", handlelength=1, fontsize=12)
 
         # Use the provided output path or default
         plot_path = output_path if output_path else "reward_model_training.png"
