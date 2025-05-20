@@ -299,8 +299,6 @@ def plot_reward_model_comparisons(df, output_dir="reward_model_plots"):
             "key"
         ] = "GT"
 
-        unique_rm_names = filtered_df["key"].unique().tolist()
-
          # Set up figure and colors
         plt.figure(figsize=(8, 6))        
     
@@ -318,6 +316,7 @@ def plot_reward_model_comparisons(df, output_dir="reward_model_plots"):
         }
         
         stats = pd.DataFrame(stats_dict).reset_index()
+        stats = stats.sort_values("mean", ascending=True)
 
         # drop the reward_model/state_action_reward_model.pt
         stats = stats[stats["key"] != "reward_model/state_action_reward_model.pt"]
