@@ -5,7 +5,6 @@ import cv2
 import os
 import numpy as np
 
-
 def create_video_grid(video_files, output_path, max_videos=6, fps=30, title=None):
     """Create a grid of videos from individual mp4 files.
 
@@ -77,18 +76,24 @@ def create_video_grid(video_files, output_path, max_videos=6, fps=30, title=None
         bottom=0.01,  # Minimal bottom margin
     )
 
-    # Create axes for each video
+    # Create axes for each video, but only fill as many as there are videos
     axes = []
     for i in range(n_videos):
         row = i // grid_dims[1]
         col = i % grid_dims[1]
         ax = fig.add_subplot(grid[row, col])
-        # Remove titles for a cleaner grid
         ax.set_xticks([])
         ax.set_yticks([])
-        # Remove border around each cell
         ax.set_frame_on(False)
         axes.append(ax)
+
+    # Fill any remaining grid cells with empty axes (so we don't get "grids in grids")
+    total_cells = grid_dims[0] * grid_dims[1]
+    for i in range(n_videos, total_cells):
+        row = i // grid_dims[1]
+        col = i % grid_dims[1]
+        ax = fig.add_subplot(grid[row, col])
+        ax.axis('off')
 
     # Load first frames and create image objects
     images = []
@@ -109,16 +114,10 @@ def create_video_grid(video_files, output_path, max_videos=6, fps=30, title=None
                 ret, frame = vc.read()
                 if not ret:
                     break
-                # Keep updating the last_frame with the latest valid frame
                 last_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-
-            # Store the last frame for padding shorter videos
             last_frames.append(last_frame)
-
-            # Reset video capture to start
             vc.set(cv2.CAP_PROP_POS_FRAMES, 0)
         else:
-            # If we couldn't read a frame, create black frame
             black_frame = np.zeros((cell_height, cell_width, 3), dtype=np.uint8)
             img = axes[i].imshow(black_frame)
             images.append(img)
@@ -128,28 +127,25 @@ def create_video_grid(video_files, output_path, max_videos=6, fps=30, title=None
     def update(frame_idx):
         for i, vc in enumerate(video_captures):
             if frame_idx < frame_counts[i]:
-                # If current frame exists in this video, show it
                 ret, frame = vc.read()
                 if ret:
-                    # Convert BGR to RGB
                     frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                     images[i].set_array(frame_rgb)
             else:
-                # If we've gone past this video's frame count, pad with last frame
                 images[i].set_array(last_frames[i])
-
         return images
 
-    # Create the animation
+    # Reset all video captures to the first frame before animation
+    for vc in video_captures:
+        vc.set(cv2.CAP_PROP_POS_FRAMES, 0)
+
     anim = animation.FuncAnimation(
         fig, update, frames=max_frames, blit=True, interval=1000 / fps
     )
 
-    # Save the animation
     writer = animation.FFMpegWriter(fps=fps, metadata=dict(artist="d3rlpy"))
     anim.save(output_path, writer=writer)
 
-    # Close figure and video captures
     plt.close(fig)
     for vc in video_captures:
         vc.release()

@@ -7,7 +7,7 @@ active_learning:
   # Number of models in the ensemble (for disagreement method)
   num_models: 5
   # Number of pairs to select in each iteration
-  num_queries_per_iteration: 1
+  total_queries_per_iteration: 1
   # Whether to fine-tune the model from the previous iteration or train from scratch
   fine_tune: false
   # If fine-tuning, the learning rate to use
@@ -15,7 +15,7 @@ active_learning:
   # How often to retrain the model (in number of preferences)
   retrain_interval: 1
   # Maximum number of queries (labels) to collect
-  max_queries: 50
+  total_queries: 50
 
 # Model parameters for reward model
 model:

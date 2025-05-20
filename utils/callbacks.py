@@ -1,7 +1,6 @@
 import numpy as np
-import wandb
+
 from utils.wandb import log_to_wandb
-import os
 
 
 class WandbCallback:

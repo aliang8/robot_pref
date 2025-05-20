@@ -1,11 +1,11 @@
 import matplotlib.pyplot as plt
 import numpy as np
+import seaborn as sns
 import torch
 from torch import optim
 from tqdm import tqdm
-import wandb
-import seaborn as sns
 
+import wandb
 from utils.loss import bradley_terry_loss
 
 sns.set_style("white")
@@ -158,7 +158,7 @@ def train_model(
             dynamic_ncols=True,
         )
 
-        for batch_idx, (obs1, actions1, obs2, actions2, pref) in enumerate(
+        for _, (obs1, actions1, obs2, actions2, pref) in enumerate(
             progress_bar
         ):
             # Move data to device
