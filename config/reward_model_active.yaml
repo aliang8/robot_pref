@@ -8,7 +8,7 @@ defaults:
 
 # Override active learning parameters if needed
 active_learning:
-  enabled: True
+  enabled: true
   retrain_interval: 1  # Retrain every iteration
 
 # Override data parameters
@@ -16,19 +16,20 @@ data:
   data_path: "/scr/shared/clam/datasets/metaworld/assembly-v2/buffer_assembly-v2.pt"
   segment_length: 32
   num_segments: 10000
-  num_pairs: 50000
+  num_pairs: 5000
+  subsamples: 50000
   num_test_pairs: 500
 
 # DTW augmentation parameters
 dtw_augmentation:
-  enabled: False              # Set to True to enable DTW augmentation
+  enabled: false              # Set to true to enable DTW augmentation
   k_augment: 5                # Number of similar segments to find for each part of a pair
   max_dtw_segments: 5000      # Max segments for computing DTW matrix (null or remove for all).
   
 # Hardware settings
 hardware:
   gpu: 0
-  use_cpu: False
+  use_cpu: false
 
 # Output parameters
 output:
@@ -39,13 +40,3 @@ output:
 training:
   save_model_every: 5
   reward_analysis_every: 5
-
-wandb:
-  use_wandb: False
-  project: "robot_pref"
-  entity: "clvr"
-  name: null  # Will be auto-generated
-  tags: ["reward_model", "preference_learning", "active_learning"]
-  notes: "Active preference learning with uncertainty sampling"
-
-

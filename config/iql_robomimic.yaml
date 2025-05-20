@@ -37,7 +37,7 @@ iql:
 # Training parameters specific to IQL
 training:
   n_epochs: 100
-  n_steps_per_epoch: 1000
+  n_steps_per_epoch: 100
   eval_interval: 10
   eval_episodes: 10
   save_interval: 10
@@ -51,4 +51,3 @@ evaluation:
 output:
   output_dir: "results/iql"
   model_dir_name: "DATASET_NAME_iql_temp${iql.weight_temp}_exp${iql.expectile}_gt${data.use_ground_truth}"
-  artifact_name: "iql_${data.env_name}_DATASET_NAME_temp${iql.weight_temp}_exp${iql.expectile}"

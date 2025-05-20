@@ -4,11 +4,10 @@ import os
 import re
 from pathlib import Path
 
+import hydra
 import matplotlib.pyplot as plt
-import numpy as np
 import pandas as pd
 import seaborn as sns
-import hydra
 from omegaconf import DictConfig, OmegaConf
 
 import wandb
@@ -26,8 +25,9 @@ def create_display_name(path):
     try:
         # Extract parent directory which contains config info
         path_obj = Path(path)
-        parent_dir = path_obj.parent.name
-
+        # In case we are using intermittent saved checkpoints
+        parent_dir = path_obj.parent.name if "checkpoints" not in path_obj.parent.name else path_obj.parent.parent.name
+        import ipdb; ipdb.set_trace()
         # Extract key components from the path
         components = {}
 
@@ -235,7 +235,7 @@ def save_run_df(run_data, output_dir="run_data"):
         f"Total runs: {total_runs}, Runs with valid metrics: {valid_metrics_count} ({valid_metrics_count / total_runs:.1%})"
     )
     df.to_csv(os.path.join(output_dir, "run_data.csv"), index=False)
-    print(f"Saved run data to run_data.csv")
+    print("Saved run data to run_data.csv")
     return df
 
 
