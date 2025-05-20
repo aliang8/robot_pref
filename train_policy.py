@@ -185,7 +185,6 @@ def load_dataset(
                 # Compute rewards, need the per step reward not the summed reward
                 batch_rewards = reward_model(batch_obs, batch_actions).cpu().numpy()
                 all_rewards.append(batch_rewards)
-
         # Combine all rewards
         if len(all_rewards) == 1:
             rewards_np = all_rewards[0]
@@ -194,6 +193,8 @@ def load_dataset(
     else:
         # BC or IQL with ground truth - use the extracted rewards
         rewards_np = valid_rewards
+
+    print(f"Rewards max: {np.max(rewards_np)}, min: {np.min(rewards_np)}, mean: {np.mean(rewards_np)}")
 
     # Apply zero rewards if requested (sanity check)
     if use_zero_rewards:
@@ -439,7 +440,7 @@ def main(cfg: DictConfig):
             env_name = "assembly-v2-goal-observable"
             print(f"No environment name specified in config. Using default: {env_name}")
 
-        if "metaworld" in cfg.data.data_path:
+        if "mw" in cfg.data.data_path or "metaworld" in cfg.data.data_path:
             env_creator = MetaWorldEnvCreator(env_name)
         elif "robomimic" in cfg.data.data_path:
             env_creator = RobomimicEnvCreator(env_name)

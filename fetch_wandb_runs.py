@@ -12,8 +12,13 @@ import seaborn as sns
 
 import wandb
 
+sns.set_style("white")
+sns.set_style("ticks")
+sns.set_context('talk')
+plt.rc('text', usetex=True)  # camera-ready formatting + latex in plots
 
-def fetch_wandb_runs(project="robot_pref", entity="clvr", filters=None, max_runs=None):
+
+def fetch_wandb_runs(project="robot_pref", entity="clvr", filters=None, max_runs=None, after_date=None):
     """Fetch runs from wandb.
 
     Args:
@@ -21,6 +26,7 @@ def fetch_wandb_runs(project="robot_pref", entity="clvr", filters=None, max_runs
         entity: Name of the wandb entity
         filters: Dictionary of filters to apply to the runs
         max_runs: Maximum number of runs to fetch
+        after_date: Only include runs created after this date (format: YYYY-MM-DD)
 
     Returns:
         List of run data dictionaries
@@ -34,6 +40,15 @@ def fetch_wandb_runs(project="robot_pref", entity="clvr", filters=None, max_runs
     user_filter = filters.get("user") if filters else None
     if user_filter:
         print(f"Will filter for user: {user_filter}")
+    
+    # Parse date filter if provided
+    date_filter = None
+    if after_date:
+        try:
+            date_filter = pd.to_datetime(after_date)
+            print(f"Will filter for runs created after: {after_date}")
+        except:
+            print(f"Warning: Invalid date format '{after_date}'. Expected format: YYYY-MM-DD")
 
     # Fetch all runs
     print(f"Fetching all runs from {entity}/{project}...")
@@ -50,6 +65,15 @@ def fetch_wandb_runs(project="robot_pref", entity="clvr", filters=None, max_runs
         if user_filter:
             # Try to get user info
             if hasattr(run, "user") and run.user.username != user_filter:
+                include_run = False
+        
+        # Apply date filter if specified
+        if date_filter and include_run:
+            # Convert run_date to naive datetime by removing timezone info to match date_filter
+            run_date = pd.to_datetime(run.created_at)
+            if run_date.tzinfo is not None:
+                run_date = run_date.replace(tzinfo=None)
+            if run_date < date_filter:
                 include_run = False
 
         if include_run:
@@ -155,6 +179,7 @@ def create_run_dataframe(run_data):
             if "data" in config and "reward_model_path" in config["data"]:
                 row["reward_model"] = config["data"].get("reward_model_path", "none")
                 row["use_ground_truth"] = config["data"].get("use_ground_truth", False)
+                row["use_zero_rewards"] = config["data"].get("use_zero_rewards", False)
                 row["scale_rewards"] = config["data"].get("scale_rewards", False)
 
             # Training parameters
@@ -221,6 +246,7 @@ def save_summary_csv(df, output_path="iql_runs_summary.csv"):
         "algorithm",
         "reward_model",
         "use_ground_truth",
+        "use_zero_rewards",
         "scale_rewards",
         "n_epochs",
         "actor_lr",
@@ -745,12 +771,36 @@ def plot_reward_model_comparisons(df, output_dir="reward_model_plots"):
                     fig_height = 8  # Increased height to accommodate x-labels
                     plt.figure(figsize=(fig_width, fig_height))
 
+                    # Create color palette that highlights special cases
+                    num_models = len(stats)
+                    palette = []
+
+                    # Count how many regular models we have (not special cases)
+                    regular_models_count = sum(1 for row in stats.itertuples() 
+                                             if row.reward_model_name != "GROUND_TRUTH" and row.reward_model_name != "ZERO_REWARDS")
+
+                    # Get a viridis colormap for regular models
+                    if regular_models_count > 0:
+                        viridis_colors = plt.cm.viridis(np.linspace(0, 1, regular_models_count))
+                        viridis_idx = 0
+
+                    # Assign colors to each model
+                    for i, row in enumerate(stats.itertuples()):
+                        if row.reward_model_name == "GROUND_TRUTH":
+                            palette.append("green")  # Green for ground truth
+                        elif row.reward_model_name == "ZERO_REWARDS":
+                            palette.append("red")    # Red for zero rewards
+                        else:
+                            # Use viridis color for regular reward models
+                            palette.append(viridis_colors[viridis_idx])
+                            viridis_idx += 1
+
                     # Create bar plot with error bars
                     ax = sns.barplot(
                         x="reward_model_name",
                         y="mean",
                         data=stats,
-                        palette="viridis",
+                        palette=palette,
                         alpha=0.8,
                     )
 
@@ -933,6 +983,14 @@ def create_reward_model_summary_csv(df, output_dir="reward_model_plots"):
         # Create a pivoted version for easier reading
         if "Success Rate" in summary_df.columns:
             try:
+                # Check for duplicate combinations before pivoting
+                has_duplicates = summary_df.duplicated(subset=["Dataset", "Algorithm", "Reward Model"]).any()
+                if has_duplicates:
+                    print("Warning: Found duplicate Dataset/Algorithm/Reward Model combinations. Aggregating duplicates.")
+                    # Aggregate duplicates by keeping the first occurrence
+                    summary_df = summary_df.drop_duplicates(subset=["Dataset", "Algorithm", "Reward Model"])
+                    
+                # Create pivot table
                 pivot_df = summary_df.pivot(
                     index=["Dataset", "Algorithm"],
                     columns="Reward Model",
@@ -945,7 +1003,269 @@ def create_reward_model_summary_csv(df, output_dir="reward_model_plots"):
                 print(f"Saved pivoted reward model comparison CSV to {pivot_path}")
             except Exception as e:
                 print(f"Could not create pivoted CSV: {e}")
+                # Alternative approach if pivot fails - create a pivot table instead
+                try:
+                    print("Trying alternative pivot_table approach...")
+                    pivot_df = pd.pivot_table(
+                        summary_df,
+                        index=["Dataset", "Algorithm"],
+                        columns="Reward Model",
+                        values="Success Rate",
+                        aggfunc="first"  # Take the first value in case of duplicates
+                    )
+                    pivot_path = os.path.join(
+                        output_dir, "reward_model_comparison_pivot.csv"
+                    )
+                    pivot_df.to_csv(pivot_path)
+                    print(f"Saved pivoted reward model comparison CSV to {pivot_path} (using pivot_table)")
+                except Exception as e2:
+                    print(f"Both pivot methods failed: {e2}")
 
+    return output_dir
+
+
+def plot_reward_model_path_comparisons(df, output_dir="reward_model_path_plots"):
+    """Create plots comparing algorithm performance across datasets with full reward model paths.
+
+    Args:
+        df: DataFrame with run information
+        output_dir: Directory to save plots
+
+    Returns:
+        Path to output directory
+    """
+    os.makedirs(output_dir, exist_ok=True)
+
+    # Filter out rows with missing data
+    df_filtered = df.dropna(subset=["top3_avg_eval_success_rate"])
+    
+    # Check if we have the necessary columns
+    if "reward_model" not in df_filtered.columns:
+        print("No 'reward_model' column found. Cannot generate reward model path plots.")
+        return output_dir
+
+    if len(df_filtered) == 0:
+        print("No runs with valid reward model paths found. Cannot generate plots.")
+        return output_dir
+
+    print(f"Using {len(df_filtered)} runs with reward models for comparison plots")
+
+    # Get unique datasets and algorithms
+    datasets = df_filtered["dataset"].unique()
+    algorithms = df_filtered["algorithm"].unique()
+
+    # For each dataset and algorithm, create a plot comparing reward models
+    for dataset in datasets:
+        for algorithm in algorithms:
+            # Filter data for this dataset and algorithm
+            df_subset = df_filtered[(df_filtered["dataset"] == dataset) & 
+                                   (df_filtered["algorithm"] == algorithm)]
+            
+            if len(df_subset) == 0:
+                continue
+            
+            # Create a new DataFrame to store all stats
+            all_stats = pd.DataFrame()
+            
+            # Process special cases first: zero rewards and ground truth
+            special_cases = []
+
+            # Check for zero rewards runs
+            if "use_zero_rewards" in df_subset.columns:
+                zero_reward_runs = df_subset[df_subset["use_zero_rewards"] == True]
+                if len(zero_reward_runs) > 0:
+                    zero_stats = pd.DataFrame({
+                        "mean": [zero_reward_runs["top3_avg_eval_success_rate"].mean()],
+                        "std": [zero_reward_runs["top3_avg_eval_success_rate"].std()],
+                        "count": [len(zero_reward_runs)]
+                    })
+                    
+                    # Add identifiers
+                    zero_stats["reward_model"] = "ZERO_REWARDS"
+                    zero_stats["display_path"] = "Zero Rewards"
+                    special_cases.append(zero_stats)
+            
+            # Check for ground truth runs
+            if "use_ground_truth" in df_subset.columns:
+                gt_runs = df_subset[df_subset["use_ground_truth"] == True]
+                if len(gt_runs) > 0:
+                    gt_stats = pd.DataFrame({
+                        "mean": [gt_runs["top3_avg_eval_success_rate"].mean()],
+                        "std": [gt_runs["top3_avg_eval_success_rate"].std()],
+                        "count": [len(gt_runs)]
+                    })
+                    
+                    # Add identifiers
+                    gt_stats["reward_model"] = "GROUND_TRUTH"
+                    gt_stats["display_path"] = "Ground Truth"
+                    special_cases.append(gt_stats)
+            
+            # Filter out special cases from regular reward model runs
+            regular_runs = df_subset
+            if "use_zero_rewards" in df_subset.columns:
+                regular_runs = regular_runs[~(regular_runs["use_zero_rewards"] == True)]
+            if "use_ground_truth" in df_subset.columns:
+                regular_runs = regular_runs[~(regular_runs["use_ground_truth"] == True)]
+            
+            # Only process regular runs with valid reward model paths
+            regular_runs = regular_runs[regular_runs["reward_model"].notna() & (regular_runs["reward_model"] != "none")]
+                
+            # Group by reward model path for regular runs
+            if len(regular_runs) > 0:
+                grouped = regular_runs.groupby("reward_model")
+                
+                stats = grouped["top3_avg_eval_success_rate"].agg([
+                    ("mean", np.mean),
+                    ("std", np.std),
+                    ("count", "count")
+                ]).reset_index()
+                
+                # Create a cleaner version of the path for display
+                def clean_path(path):
+                    if not isinstance(path, str):
+                        return "none"
+                    
+                    # Get parent directory name (contains most of the config info)
+                    parent_name = Path(path).parent.name
+                    
+                    # Extract dataset name and segment length using regex
+                    import re
+                    
+                    # Extract segment length (convert "seg32" to "S32")
+                    seg_match = re.search(r'seg(\d+)', parent_name)
+                    seg_part = f"SG{seg_match.group(1)}" if seg_match else ""
+                    
+                    # Extract other meaningful parts if needed
+                    epochs_match = re.search(r'epochs(\d+)', parent_name)
+                    epochs_part = f"E{epochs_match.group(1)}" if epochs_match else ""
+                    
+                    pairs_match = re.search(r'pairs(\d+)', parent_name)
+                    pairs_part = f"Q{pairs_match.group(1)}" if pairs_match else ""
+                    
+                    seed_match = re.search(r'seed(\d+)', parent_name)
+                    seed_part = f"S{seed_match.group(1)}" if seed_match else ""
+                    
+                    # If it's an active learning path
+                    if "active_" in parent_name:
+                        method_match = re.search(r'active_(\w+)_', parent_name)
+                        method_part = method_match.group(1) if method_match else "active"
+                        
+                        max_match = re.search(r'max(\d+)', parent_name)
+                        max_part = f"M{max_match.group(1)}" if max_match else ""
+                        
+                        aug_match = re.search(r'aug(True|False)', parent_name)
+                        aug_part = "Aug" if aug_match and aug_match.group(1) == "True" else ""
+                        
+                        clean_name = f"{method_part}-{seg_part}-{max_part}"
+                        if aug_part:
+                            clean_name += f"-{aug_part}"
+                        return clean_name
+                        
+                    # Basic model path
+                    else:
+                        return f"{seg_part}-{epochs_part}-{pairs_part}-{seed_part}"
+                    
+                stats["display_path"] = stats["reward_model"].apply(clean_path)
+                
+                # Sort by mean performance (descending)
+                stats = stats.sort_values("mean", ascending=False)
+                
+                # Combine with special cases
+                all_stats = pd.concat([stats] + special_cases)
+            else:
+                # Only special cases
+                all_stats = pd.concat(special_cases) if special_cases else pd.DataFrame()
+            
+            if len(all_stats) == 0:
+                continue
+                
+            # Sort by mean performance (descending)
+            all_stats = all_stats.sort_values("mean", ascending=False)
+                
+            # Set up figure size based on number of models
+            fig_width = max(14, len(all_stats) * 1.2)
+            plt.figure(figsize=(fig_width, 10))
+            
+            # Create color palette that highlights special cases
+            num_models = len(all_stats)
+            palette = []
+
+            # Count how many regular models we have (not special cases)
+            regular_models_count = sum(1 for row in all_stats.itertuples() 
+                                     if row.reward_model != "GROUND_TRUTH" and row.reward_model != "ZERO_REWARDS")
+
+            # Get a viridis colormap for regular models
+            if regular_models_count > 0:
+                viridis_colors = plt.cm.viridis(np.linspace(0, 1, regular_models_count))
+                viridis_idx = 0
+
+            # Assign colors to each model
+            for i, row in enumerate(all_stats.itertuples()):
+                if row.reward_model == "GROUND_TRUTH":
+                    palette.append("green")  # Green for ground truth
+                elif row.reward_model == "ZERO_REWARDS":
+                    palette.append("red")    # Red for zero rewards
+                else:
+                    # Use viridis color for regular reward models
+                    palette.append(viridis_colors[viridis_idx])
+                    viridis_idx += 1
+
+            # Create bar plot
+            ax = sns.barplot(
+                x="display_path", 
+                y="mean", 
+                data=all_stats,
+                palette=palette,
+                alpha=0.8,
+                width=0.6
+            )
+            
+            # Remove top and right spines
+            ax.spines['top'].set_visible(False)
+            ax.spines['right'].set_visible(False)
+            
+            # Add error bars
+            for i, row in enumerate(all_stats.itertuples()):
+                plt.errorbar(
+                    i, row.mean, yerr=row.std, 
+                    fmt="none", ecolor="black", capsize=5
+                )
+                
+            # Add data labels
+            for i, row in enumerate(all_stats.itertuples()):
+                plt.text(
+                    i, row.mean + 0.02, 
+                    f"{row.mean:.3f}±{row.std:.3f}\nn={row.count}",
+                    ha="center", va="bottom", fontsize=10
+                )
+                
+            # Add title and labels
+            plt.title(f"Policy Results: {algorithm} on {dataset}")
+            plt.ylabel("Success Rate")
+            plt.xlabel("Reward Model")
+            
+            # Rotate x-axis labels for readability
+            plt.xticks(rotation=45, ha="right")
+            plt.tight_layout(rect=[0, 0.1, 1, 0.95])
+            
+            # Adjust y-axis
+            max_value = all_stats["mean"].max() + all_stats["std"].max()
+            plt.ylim(0, min(1.0, max_value * 1.2))
+            
+            # Add grid lines
+            # plt.grid(axis="y", linestyle="--", alpha=0.7)
+            
+            # Save figure
+            safe_dataset = str(dataset).replace("/", "_")
+            safe_algorithm = str(algorithm).replace("/", "_")
+            output_path = os.path.join(
+                output_dir,
+                f"{safe_dataset}_{safe_algorithm}_reward_model_comparison.png"
+            )
+            plt.savefig(output_path, dpi=300, bbox_inches="tight")
+            print(f"Saved reward model path comparison plot to {output_path}")
+            plt.close()
+            
     return output_dir
 
 
@@ -978,6 +1298,12 @@ def parse_args():
         type=str,
         default="algorithm_plots",
         help="Directory to save algorithm comparison plots",
+    )
+    parser.add_argument(
+        "--after_date", 
+        type=str, 
+        default=None, 
+        help="Only include runs created after this date (format: YYYY-MM-DD)"
     )
 
     return parser.parse_args()
@@ -1012,6 +1338,7 @@ def main():
         entity=args.entity,
         filters=filters,
         max_runs=args.max_runs,
+        after_date=args.after_date,
     )
     if not run_data:
         print("No runs found matching the criteria.")
@@ -1063,6 +1390,12 @@ def main():
         reward_model_plot_dir = os.path.join(args.output_dir, "reward_model_plots")
         plot_reward_model_comparisons(df, reward_model_plot_dir)
         print(f"Reward model comparison plots saved to {reward_model_plot_dir}")
+        
+        # Generate reward model path comparison plots
+        print("\nGenerating reward model path comparison plots...")
+        reward_path_plot_dir = os.path.join(args.output_dir, "reward_model_path_plots")
+        plot_reward_model_path_comparisons(df, reward_path_plot_dir)
+        print(f"Reward model path comparison plots saved to {reward_path_plot_dir}")
 
     print(f"\nAnalysis complete. Data saved to {csv_path}")
 

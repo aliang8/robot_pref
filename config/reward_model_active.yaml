@@ -16,8 +16,7 @@ data:
   data_path: "/scr/shared/clam/datasets/metaworld/assembly-v2/buffer_assembly-v2.pt"
   segment_length: 32
   num_segments: 10000
-  num_pairs: 5000
-  subsamples: 50000
+  num_pairs: 50000
   num_test_pairs: 500
 
 # DTW augmentation parameters

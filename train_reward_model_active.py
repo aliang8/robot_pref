@@ -217,10 +217,10 @@ def active_preference_learning(cfg, dataset_name=None):
 
     num_segments = len(segment_start_end)
 
-    # Find all possible segment pairs (num_segments choose 2) and sample data.subsamples from them
+    # Find all possible segment pairs (num_segments choose 2) and sample data.num_pairs from them
     all_segment_pairs = list(itertools.combinations(range(num_segments), 2))
     total_pairs = len(all_segment_pairs)
-    all_segment_pairs = random.sample(all_segment_pairs, cfg.data.subsamples)
+    all_segment_pairs = random.sample(all_segment_pairs, cfg.data.num_pairs)
     print(f"Sampled {len(all_segment_pairs)} pairs from {total_pairs} total pairs")
 
     # Test set
@@ -567,13 +567,14 @@ def active_preference_learning(cfg, dataset_name=None):
     ax2.spines['right'].set_visible(False)
     
     # Plot augmented accuracy
-    ax3 = axs[2]
-    ax3.plot(metrics["num_labeled"], augmented_accuracy, marker='o', markersize=dot_size, color=line_color)
-    ax3.set_ylabel("Augmented Accuracy", fontsize=16)
-    ax3.set_title("Augmented Accuracy vs Labeled Pairs")
-    ax3.grid(True, alpha=0.3)
-    ax3.spines['top'].set_visible(False)
-    ax3.spines['right'].set_visible(False)
+    if len(augmented_accuracy) > 0:
+        ax3 = axs[2]
+        ax3.plot(metrics["num_labeled"], augmented_accuracy, marker='o', markersize=dot_size, color=line_color)
+        ax3.set_ylabel("Augmented Accuracy", fontsize=16)
+        ax3.set_title("Augmented Accuracy vs Labeled Pairs")
+        ax3.grid(True, alpha=0.3)
+        ax3.spines['top'].set_visible(False)
+        ax3.spines['right'].set_visible(False)
     
     # Ensure x-axis has only integer ticks
     from matplotlib.ticker import MaxNLocator

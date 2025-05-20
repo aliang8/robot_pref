@@ -145,6 +145,7 @@ def segment_episodes(data, segment_length):
     episode_lens = [len(np.where(data["episode"] == i)[0]) for i in np.unique(data["episode"])]
     assert len(set(episode_lens)) == 1, "All episodes should be the same length"
     episode_len = episode_lens[0]
+    print(f"Episode length: {episode_len}")
 
     # Calculate segments_per_trajectory based on the episode length
     segments_per_trajectory = episode_len // segment_length + 1
