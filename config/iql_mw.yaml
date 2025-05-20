@@ -38,7 +38,7 @@ iql:
 # Training parameters specific to IQL
 training:
   n_epochs: 100
-  n_steps_per_epoch: 100
+  n_steps_per_epoch: 200
   eval_interval: 10
   eval_episodes: 10
   save_interval: 10

@@ -4,7 +4,7 @@ from pathlib import Path
 import hydra
 import torch
 from d3rlpy.algos import BCConfig, IQLConfig
-from d3rlpy.logging import WanDBAdapterFactory
+from utils.wandb import WanDBAdapterFactory
 from omegaconf import DictConfig, OmegaConf
 
 import wandb
@@ -211,7 +211,7 @@ def main(cfg: DictConfig):
     # Initialize WanDBAdapterFactory for logging
     if cfg.wandb.use_wandb:
         print("Initializing WanDBAdapterFactory for logging...")
-        wandb_adapter_factory = WanDBAdapterFactory(project=cfg.wandb.project)
+        wandb_adapter_factory = WanDBAdapterFactory(cfg.wandb)
         fitter_kwargs["logger_adapter"] = wandb_adapter_factory
 
     # Training loop

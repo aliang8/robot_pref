@@ -14,7 +14,6 @@ import random
 import itertools
 from tqdm import tqdm
 
-# Import shared models and utilities
 from models.reward_models import RewardModel
 
 from utils.data import (
@@ -59,11 +58,9 @@ def main(cfg: DictConfig):
     # Base random seed
     base_seed = cfg.get("random_seed", 42)
     
-    # List to store test metrics for each seed
     all_test_metrics = []
     seed_metrics = []
     
-    # Start multi-seed training
     for seed_idx in tqdm(range(num_seeds)):
         # Calculate seed for this run
         current_seed = base_seed + seed_idx
@@ -162,7 +159,6 @@ def main(cfg: DictConfig):
         print(f"Reward model: {model}")
         print(f"Total parameters: {sum(p.numel() for p in model.parameters())}")
 
-        # Start timing the training
         start_time = time.time()
         dataset_name = Path(cfg.data.data_path).stem
         cfg.output.model_dir_name = cfg.output.model_dir_name.replace("DATASET_NAME", dataset_name)
@@ -173,7 +169,6 @@ def main(cfg: DictConfig):
 
         training_curve_path = os.path.join(model_dir, f"training_curve_{current_seed}.png")
 
-        # Train the model
         print("\nTraining reward model...")
         model, *_ = train_model(
             model,
@@ -186,7 +181,6 @@ def main(cfg: DictConfig):
             output_path=training_curve_path,
         )
 
-        # Calculate and print training time
         training_time = time.time() - start_time
         hours, remainder = divmod(training_time, 3600)
         minutes, seconds = divmod(remainder, 60)
@@ -195,12 +189,9 @@ def main(cfg: DictConfig):
 
         # Evaluate on test set
         test_metrics = evaluate_model_on_test_set(model, test_loader, device)
-        
-        # Add seed information to metrics
         test_metrics["seed"] = current_seed
         all_test_metrics.append(test_metrics)
         
-        # Log individual test results to wandb
         if wandb_run is not None:
             log_to_wandb(test_metrics, prefix="test")
 
@@ -208,7 +199,6 @@ def main(cfg: DictConfig):
         torch.save(model.state_dict(), model_path)
         print(f"Model saved to: {model_path}")
 
-        # Add key metrics to summary list
         seed_metrics.append({
             "seed": current_seed,
             "test_accuracy": test_metrics["test_accuracy"],
@@ -229,25 +219,20 @@ def main(cfg: DictConfig):
             reward_min=reward_min
         )
 
-    # After all seeds are done, calculate and log statistics
     if len(seed_metrics) > 0:
-        # Convert to DataFrame for easier analysis
         metrics_df = pd.DataFrame(seed_metrics)
         
-        # Calculate statistics
         accuracy_mean = metrics_df["test_accuracy"].mean()
         accuracy_std = metrics_df["test_accuracy"].std()
         log_prob_mean = metrics_df["test_log_prob"].mean()
         log_prob_std = metrics_df["test_log_prob"].std()
         
-        # Print summary
         print("\n" + "=" * 50)
         print(f"Summary Statistics Across {num_seeds} Seeds:")
         print(f"Test Accuracy: {accuracy_mean:.4f} ± {accuracy_std:.4f}")
         print(f"Test LogPDF: {log_prob_mean:.4f} ± {log_prob_std:.4f}")
         print("=" * 50)
         
-        # Write to text file
         with open(os.path.join(model_dir, f"summary.txt"), "w") as f:
             f.write(f"Summary Statistics Across {num_seeds} Seeds:\n")
             f.write(f"Test Accuracy: {accuracy_mean:.4f} ± {accuracy_std:.4f}\n")
