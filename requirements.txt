@@ -35,6 +35,12 @@ ipywidgets==8.0.7
 # For creating animations and videos
 ffmpeg-python==0.2.0
 
+# Configuration management
+hydra-core==1.3.2
+omegaconf==2.3.0
+colorlog==6.7.0
+wandb==0.15.4
+
 # Additional dependencies
 cython==3.0.0
 pyyaml==6.0.1

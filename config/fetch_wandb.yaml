@@ -1,0 +1,21 @@
+# @package _global_
+defaults:
+  - _self_
+
+# Wandb configuration
+wandb:
+  project: "robot_pref"
+  entity: "clvr"
+  user: "aliangdw"        # Filter for runs by this user
+  max_runs: null          # Maximum number of runs to fetch, null means all
+  after_date: 2025-05-18  # Only include runs created after this date (format: YYYY-MM-DD)
+  filter: null            # JSON string with additional filters
+
+# Output configuration
+output:
+  output_dir: "analysis"
+  plot: true        # Generate comparison plots
+  plot_dir: "algorithm_plots"
+
+# Other global settings
+seed: 42 
