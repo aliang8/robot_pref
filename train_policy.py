@@ -489,7 +489,7 @@ def main(cfg: DictConfig):
             env = None
 
     # Training loop
-    for epoch, metrics in algo.fitter(
+    for epoch, _ in algo.fitter(
         dataset=dataset,
         n_steps=n_epochs * cfg.training.n_steps_per_epoch,
         n_steps_per_epoch=cfg.training.n_steps_per_epoch,
