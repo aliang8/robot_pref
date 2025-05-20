@@ -9,7 +9,7 @@ data:
   num_pairs: 50000
 
   preferences_data_path: null
-  normalize_obs: false
+  normalize_obs: False
   norm_method: "standard"
   
 model:
@@ -20,11 +20,11 @@ training:
   batch_size: 256
   num_epochs: 100
   num_workers: 4
-  pin_memory: true
+  pin_memory: True
 
 hardware:
   gpu: 0
-  use_cpu: false
+  use_cpu: False
 
 output:
   output_dir: results/reward_model

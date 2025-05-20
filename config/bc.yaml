@@ -16,7 +16,6 @@ model:
   hidden_dims: [256, 256]
   learning_rate: 3e-4
   batch_size: 256
-  encoder_dims: [256, 256, 256]
 
 # Training parameters specific to BC
 training:
@@ -27,8 +26,3 @@ output:
   output_dir: "results/bc_model"
   model_dir_name: "DATASET_NAME_bc_lr${model.learning_rate}_epochs${training.n_epochs}"
   artifact_name: "bc_${data.env_name}_DATASET_NAME"
-
-# Wandb configuration specific to BC
-wandb:
-  tags: ["bc", "imitation_learning"]
-  notes: "BC policy training with behavioral cloning"

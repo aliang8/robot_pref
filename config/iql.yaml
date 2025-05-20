@@ -12,11 +12,11 @@ data:
   reward_model_path: "reward_model/state_action_reward_model.pt"
   max_segments: 1000
   reward_batch_size: 32
-  use_ground_truth: false  # Set to true to use ground truth rewards instead of reward model
-  scale_rewards: false     # Set to true to scale rewards to min/max range
+  use_ground_truth: False  # Set to True to use ground truth rewards instead of reward model
+  scale_rewards: False     # Set to True to scale rewards to min/max range
   reward_min: -1.0         # Minimum value for scaled rewards
   reward_max: 1.0          # Maximum value for scaled rewards
-  use_zero_rewards: false  # Sanity check mode: use zero rewards for all transitions
+  use_zero_rewards: False  # Sanity check mode: use zero rewards for all transitions
   env_name: "assembly-v2-goal-observable"  # Exact name of the MetaWorld environment
 
 # Model architecture
@@ -40,8 +40,3 @@ training:
 output:
   output_dir: "results/iql_model"
   model_dir_name: "DATASET_NAME_iql_temp${model.weight_temp}_exp${model.expectile}_gt${data.use_ground_truth}"
-
-# Wandb configuration specific to IQL
-wandb:
-  tags: ["iql", "preference_learning"]
-  notes: "IQL policy training with learned reward function"

@@ -9,9 +9,8 @@ import imageio
 import numpy as np
 from tqdm import tqdm
 
-# from d3rlpy.metrics.scorer import evaluate_on_environment
-# Import d3rlpy components
 import wandb
+from utils.env import MetaWorldEnvCreator, RobomimicEnvCreator
 
 # Import utility functions
 from utils.viz import create_video_grid
@@ -946,3 +945,46 @@ def eval_model(env, algo, cfg, epoch):
                     )
 
     print("Evaluation complete.")
+
+def create_env(cfg):
+    """
+    Create the environment for evaluation based on the configuration.
+    This function handles different dataset types and environment creators.
+    """
+    env = None
+    if not cfg.evaluation.skip_env_creation:
+        # Use the environment name specified in the config
+        if hasattr(cfg.data, "env_name") and cfg.data.env_name:
+            env_name = cfg.data.env_name
+            print(f"Creating environment: {env_name}")
+        else:
+            # Fallback to a default environment name if not specified
+            env_name = "assembly-v2-goal-observable"
+            print(f"No environment name specified in config. Using default: {env_name}")
+
+        if "mw" in cfg.data.data_path or "metaworld" in cfg.data.data_path:
+            env_creator = MetaWorldEnvCreator(env_name)
+        elif "robomimic" in cfg.data.data_path:
+            env_creator = RobomimicEnvCreator(env_name)
+        else:
+            raise ValueError(
+                f"No environment creator found for dataset: {cfg.data.data_path}"
+            )
+
+        # Create one environment to verify it works
+        try:
+            test_env = env_creator()
+
+            # Print environment information
+            print(
+                f"Successfully created environment with observation space: {test_env.observation_space.shape}, action space: {test_env.action_space.shape}"
+            )
+
+            # Use the environment creator for evaluation
+            env = env_creator
+        except Exception as e:
+            print(f"Error creating environment: {e}")
+            print("Evaluation will be skipped.")
+            env = None
+
+    return env

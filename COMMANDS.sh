@@ -21,14 +21,14 @@ python train_reward_model.py \
 python train_reward_model_active.py \
     data.data_path=/scr/shared/clam/datasets/metaworld/assembly-v2/buffer_assembly-v2_clean.pt \
     active_learning.uncertainty_method=disagreement \
-    dtw_augmentation.enabled=true \
+    dtw_augmentation.enabled=True \
     --multirun
 
 # BC
 python train_policy.py \
     --config-name=bc \
     data.data_path=/scr/shared/clam/datasets/metaworld/assembly-v2/buffer_assembly-v2_clean.pt \
-    wandb.use_wandb=true \
+    wandb.use_wandb=True \
     random_seed=521,522,523 \
     hydra/launcher=slurm \
     --multirun
@@ -38,7 +38,7 @@ python train_policy.py \
     --config-name=iql \
     data.data_path=/scr/shared/clam/datasets/metaworld/assembly-v2/buffer_assembly-v2_clean.pt \
     data.reward_model_path=/scr/shared/clam/robot_pref/results/reward_model/state_action_reward_model.pt \
-    wandb.use_wandb=true \
+    wandb.use_wandb=True \
     model.weight_temp=1.0 \
     random_seed=521,522,523 \
     --multirun
@@ -72,7 +72,7 @@ python train_reward_model_active.py \
 python train_reward_model_active.py \
     data.data_path=/scr/aliang80/robot_pref/dataset_mw/buffer_assembly-v2_balanced.pt \
     active_learning.uncertainty_method=disagreement \
-    dtw_augmentation.enabled=true \
+    dtw_augmentation.enabled=True \
     training.num_epochs=100
     --multirun
 
@@ -80,9 +80,9 @@ python train_reward_model_active.py \
 python train_policy.py \
     --config-name=iql \
     data.data_path=/scr/aliang80/robot_pref/dataset_mw/buffer_assembly-v2_balanced.pt \
-    wandb.use_wandb=true \
-    data.use_ground_truth=true \
-    data.scale_rewards=true \
+    wandb.use_wandb=True \
+    data.use_ground_truth=True \
+    data.scale_rewards=True \
     random_seed=521,522,523 \
     hydra/launcher=slurm \
     --multirun
@@ -92,7 +92,7 @@ python train_policy.py \
 python train_policy.py \
     --config-name=bc \
     data.data_path=/scr/aliang80/robot_pref/dataset_mw/buffer_assembly-v2_balanced.pt \
-    wandb.use_wandb=true \
+    wandb.use_wandb=True \
     random_seed=521,522,523 \
     hydra/launcher=slurm \
     --multirun
@@ -102,7 +102,7 @@ python train_policy.py \
 python train_policy.py \
     --config-name=iql \
     data.data_path=/scr/aliang80/robot_pref/dataset_mw/buffer_assembly-v2_balanced.pt \
-    wandb.use_wandb=true \
+    wandb.use_wandb=True \
     random_seed=521,522,523 \
     data.reward_model_path=/scr/aliang80/robot_pref/results/active_reward_model/
 
@@ -111,6 +111,6 @@ python train_reward_model_active.py \
     data.data_path=/scr/aliang80/robot_pref/dataset_mw/buffer_assembly-v2_balanced.pt \
     active_learning.uncertainty_method=entropy,disagreement \
     active_learning.total_queries=300 \
-    dtw_augmentation.enabled=true \
+    dtw_augmentation.enabled=True \
     hydra/launcher=slurm \
     --multirun
