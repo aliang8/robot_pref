@@ -1,0 +1,63 @@
+# Complete IQL configuration file
+algorithm: iql
+
+# Include common settings
+defaults:
+  - common
+  - _self_  # Allow this config to override common settings
+
+# Data parameters
+data:
+  data_path: "/scr/aliang80/robot_pref/dataset_mw/buffer_assembly-v2_balanced.pt"
+  reward_model_path: "/scr/matthewh6/robot_pref/reward_model/state_action_reward_model.pt"
+  max_segments: 0
+  reward_batch_size: 32
+  use_ground_truth: false  # Set to true to use ground truth rewards instead of reward model
+  scale_rewards: false     # Set to true to scale rewards to min/max range
+  reward_min: -1.0         # Minimum value for scaled rewards
+  reward_max: 1.0          # Maximum value for scaled rewards
+  use_zero_rewards: false  # Sanity check mode: use zero rewards for all transitions
+  env_name: "assembly-v2-goal-observable"  # Exact name of the MetaWorld environment
+
+# Model architecture
+model:
+  hidden_dims: [256, 256]
+  encoder_dims: [256, 256, 256]
+
+# IQL configuration
+iql:
+  actor_learning_rate: 1e-4
+  critic_learning_rate: 1e-4
+  batch_size: 256
+  gamma: 0.99
+  tau: 0.005
+  n_critics: 2
+  expectile: 0.7
+  weight_temp: 1.0
+
+# Training parameters specific to IQL
+training:
+  n_epochs: 100
+  n_steps_per_epoch: 200
+  eval_interval: 10
+  eval_episodes: 10
+  save_interval: 10
+
+# Evaluation settings
+evaluation:
+  record_video: true
+  parallel_eval: false
+
+# Output parameters
+output:
+  output_dir: "results/iql_model"
+  model_dir_name: "DATASET_NAME_iql_temp${iql.weight_temp}_exp${iql.expectile}_gt${data.use_ground_truth}"
+
+# Wandb configuration specific to IQL
+wandb:
+  use_wandb: false
+  project: robot_pref
+  entity: clvr
+  name: null  # Will be auto-generated if null
+  tags: ["iql", "preference_learning"]
+  notes: "IQL policy training with learned reward function"

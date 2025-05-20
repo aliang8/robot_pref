@@ -4,7 +4,6 @@ from pathlib import Path
 import hydra
 import torch
 from d3rlpy.algos import BCConfig, IQLConfig
-from d3rlpy.logging import WanDBAdapterFactory
 from omegaconf import DictConfig, OmegaConf
 
 import wandb
@@ -12,6 +11,7 @@ from models import RewardModel
 from utils.data import AttrDict, load_dataset, load_tensordict
 from utils.eval import create_env, eval_model
 from utils.seed import set_seed
+from utils.wandb import WanDBAdapterFactory
 
 
 def print_model_architecture(algo):
@@ -211,7 +211,7 @@ def main(cfg: DictConfig):
     # Initialize WanDBAdapterFactory for logging
     if cfg.wandb.use_wandb:
         print("Initializing WanDBAdapterFactory for logging...")
-        wandb_adapter_factory = WanDBAdapterFactory(project=cfg.wandb.project)
+        wandb_adapter_factory = WanDBAdapterFactory(cfg.wandb)
         fitter_kwargs["logger_adapter"] = wandb_adapter_factory
 
     # Training loop
@@ -221,28 +221,13 @@ def main(cfg: DictConfig):
         if cfg.wandb.use_wandb and epoch == 1:
             wandb.run.config.update(cfg_dict)
 
+        # save model
+        if epoch % cfg.training.save_interval == 0:
+            algo.save_model(os.path.join(cfg.output.output_dir, f"model_{epoch}.pt"))
+
         if env is not None and epoch % cfg.training.eval_interval == 0:
-            # Evaluate the model every eval_interval epochs
-            print(f"Evaluating model at epoch {epoch}...")
             eval_model(env=env, algo=algo, cfg=cfg, epoch=epoch)
 
-    # Get the model directory name from config if available, or fall back to default
-    if hasattr(cfg.output, "model_dir_name"):
-        model_dir_name = cfg.output.model_dir_name
-        # Add zero reward indicator if using that mode
-        if cfg.data.get("use_zero_rewards", False):
-            model_dir_name += "_zero_rewards"
-
-        # Create subdirectory based on the name template
-        model_dir = os.path.join(cfg.output.output_dir, model_dir_name)
-        os.makedirs(model_dir, exist_ok=True)
-        model_path = os.path.join(model_dir, f"{algorithm_name.lower()}.pt")
-    else:
-        # Fall back to the original naming scheme
-        zero_suffix = "_zero_rewards" if cfg.data.get("use_zero_rewards", False) else ""
-        model_path = f"{cfg.output.output_dir}/{algorithm_name.lower()}_{Path(cfg.data.data_path).stem}{zero_suffix}.pt"
-
-    print(f"Model saved to {model_path}")
     print("\nTraining complete!")
 
 if __name__ == "__main__":
