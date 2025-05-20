@@ -32,17 +32,14 @@ REWARD_MODEL_GRID = {
 REWARD_MODEL_TEMPLATE_ACTIVE = [
     "python", "train_reward_model_active.py",
     "num_seeds=1",                        
-    f"data.data_path={DATASET}",
-    "active_learning.uncertainty_method=entropy",
-    "active_learning.max_queries=50",
-    "dtw_augmentation.enabled=true",
-    "training.num_epochs=100"
+    f"data.data_path={DATASET}"
 ]
 
 # Grid search parameters for active reward model
 ACTIVE_REWARD_MODEL_GRID = {
     "active_learning.uncertainty_method": ["entropy"],  
-    "active_learning.max_queries": ["50"],                     
+    "active_learning.max_queries": ["50"],   
+    "dtw_augmentation.enabled": [True, False]
 }
 
 # Policy training configuration
