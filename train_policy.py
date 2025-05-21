@@ -73,6 +73,8 @@ def main(cfg: DictConfig):
     if cfg.debug:
         cfg.training.n_epochs = 5
         cfg.training.n_steps_per_epoch = 10
+        cfg.training.eval_interval = 1
+
 
     algorithm_name = cfg.algorithm
     dataset_name = Path(cfg.data.data_path).stem

@@ -972,19 +972,19 @@ def create_env(cfg):
             )
 
         # Create one environment to verify it works
-        try:
-            test_env = env_creator()
+        # try:
+        test_env = env_creator()
 
-            # Print environment information
-            print(
-                f"Successfully created environment with observation space: {test_env.observation_space.shape}, action space: {test_env.action_space.shape}"
-            )
+        # Print environment information
+        print(
+            f"Successfully created environment with observation space: {test_env.observation_space.shape}, action space: {test_env.action_space.shape}"
+        )
 
-            # Use the environment creator for evaluation
-            env = env_creator
-        except Exception as e:
-            print(f"Error creating environment: {e}")
-            print("Evaluation will be skipped.")
-            env = None
+        # Use the environment creator for evaluation
+        env = env_creator
+        # except Exception as e:
+            # print(f"Error creating environment: {e}")
+            # print("Evaluation will be skipped.")
+            # env = None
 
     return env

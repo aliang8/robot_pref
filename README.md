@@ -4,8 +4,18 @@
 
 ```bash
 pip install wandb hydra-core d3rlpy
+pip install -r requirements.txt
 ```
-
+### Install robomimic
+```bash
+git clone git@github.com:ARISE-Initiative/robomimic.git
+cd robomimic
+pip install -e .
+```
+### Install metaworld
+```bash
+pip install git+https://github.com/Farama-Foundation/Metaworld.git@master#egg=metaworld
+```
 ## Dataset Filtering
 
 ```bash
