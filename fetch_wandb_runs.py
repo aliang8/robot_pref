@@ -241,8 +241,20 @@ def save_run_df(run_data, output_dir="run_data"):
     return df
 
 
+def extract_iter_from_path(path):
+    """Extracts the iteration number from a reward model path, if present. Returns None if not found."""
+    if not isinstance(path, str):
+        return None
+    # Try to find iter or iter_ followed by digits
+    match = re.search(r"iter[_]?(\d+)", path)
+    if match:
+        return int(match.group(1))
+    return None
+
+
 def plot_reward_model_comparisons(df, output_dir="reward_model_plots"):
     """Create plots comparing algorithm performance across datasets and reward models.
+    Plots are grouped by unique 'iter' key instances if present in reward model path.
 
     Args:
         df: DataFrame with run information
@@ -272,7 +284,10 @@ def plot_reward_model_comparisons(df, output_dir="reward_model_plots"):
         filtered_df = df_filtered[
             (df_filtered["data.data_path"] == dataset)
             & (df_filtered["algorithm"] == "iql")
-        ]
+        ].copy()
+
+        # Add 'iter' column based on reward model path
+        filtered_df["iter"] = filtered_df["data.reward_model_path"].apply(extract_iter_from_path)
 
         # Create a cleaner key from the model path
         filtered_df.loc[:, "key"] = filtered_df["data.reward_model_path"].apply(
@@ -286,8 +301,9 @@ def plot_reward_model_comparisons(df, output_dir="reward_model_plots"):
         bc_df = df_filtered[
             (df_filtered["data.data_path"] == dataset)
             & (df_filtered["algorithm"] == "bc")
-        ]
+        ].copy()
         bc_df.loc[:, "key"] = "BC"
+        bc_df["iter"] = None  # BC does not have an iter
 
         # Add BC to filtered_df
         filtered_df = pd.concat([filtered_df, bc_df])
@@ -308,76 +324,103 @@ def plot_reward_model_comparisons(df, output_dir="reward_model_plots"):
             "key",
         ] = "GT"
 
-        # Set up figure and colors
-        plt.figure(figsize=(8, 6))
+        # Find all unique iter values (including None for non-iter runs)
+        unique_iters = sorted(filtered_df["iter"].dropna().unique())
+        # If there are no iter values, just plot once (legacy behavior)
+        if not unique_iters:
+            unique_iters = [None]
 
-        # Calculate statistics for each reward model
-        metric_column = "top3_avg_eval_success_rate"
-        grouped = filtered_df.groupby(["key"])
+        for iter_value in unique_iters:
+            if iter_value is not None:
+                iter_mask = filtered_df["iter"] == iter_value
+                plot_df = filtered_df[iter_mask | filtered_df["iter"].isna()].copy()
+                iter_str = f"_iter{iter_value}"
+                print(f"Plotting for dataset {dataset} at iter={iter_value} with {len(plot_df)} runs")
+            else:
+                # Plot all runs with iter=None (e.g., BC, GT, Zero, or non-iter reward models)
+                plot_df = filtered_df[filtered_df["iter"].isna()].copy()
+                iter_str = ""
+                print(f"Plotting for dataset {dataset} with no iter (baseline/non-iter) with {len(plot_df)} runs")
 
-        stats_dict = {
-            "mean": grouped[metric_column].mean(),
-            "std": grouped[metric_column].std(),
-            "min": grouped[metric_column].min(),
-            "max": grouped[metric_column].max(),
-            "count": grouped[metric_column].count(),
-            "median": grouped[metric_column].median(),
-        }
+            if len(plot_df) == 0:
+                continue
 
-        stats = pd.DataFrame(stats_dict).reset_index()
-        stats = stats.sort_values("mean", ascending=True)
+            # Set up figure and colors
+            plt.figure(figsize=(8, 6))
 
-        # drop the reward_model/state_action_reward_model.pt
-        stats = stats[stats["key"] != "reward_model/state_action_reward_model.pt"]
+            # Calculate statistics for each reward model
+            metric_column = "top3_avg_eval_success_rate"
+            grouped = plot_df.groupby(["key"])
 
-        # Create the bar plot
-        ax = sns.barplot(
-            x="key",
-            y="mean",
-            data=stats,
-            palette="viridis",
-        )
+            stats_dict = {
+                "mean": grouped[metric_column].mean(),
+                "std": grouped[metric_column].std(),
+                "min": grouped[metric_column].min(),
+                "max": grouped[metric_column].max(),
+                "count": grouped[metric_column].count(),
+                "median": grouped[metric_column].median(),
+            }
 
-        # Remove top and right spines
-        ax.spines["top"].set_visible(False)
-        ax.spines["right"].set_visible(False)
+            stats = pd.DataFrame(stats_dict).reset_index()
+            stats = stats.sort_values("mean", ascending=True)
 
-        # Add error bars and data labels
-        for i, row in enumerate(stats.itertuples()):
-            plt.errorbar(
-                i, row.mean, yerr=row.std, fmt="none", ecolor="black", capsize=5
+            # drop the reward_model/state_action_reward_model.pt
+            stats = stats[stats["key"] != "reward_model/state_action_reward_model.pt"]
+
+            # Create the bar plot
+            ax = sns.barplot(
+                x="key",
+                y="mean",
+                data=stats,
+                palette="viridis",
             )
-            plt.text(
-                i,
-                row.mean + 0.02,
-                f"{row.mean:.3f}±{row.std:.3f}\nn={row.count}",
-                ha="center",
-                va="bottom",
-                fontsize=10,
+
+            # Remove top and right spines
+            ax.spines["top"].set_visible(False)
+            ax.spines["right"].set_visible(False)
+
+            # Add error bars and data labels
+            for i, row in enumerate(stats.itertuples()):
+                plt.errorbar(
+                    i, row.mean, yerr=row.std, fmt="none", ecolor="black", capsize=5
+                )
+                plt.text(
+                    i,
+                    row.mean + 0.02,
+                    f"{row.mean:.3f}±{row.std:.3f}\nn={row.count}",
+                    ha="center",
+                    va="bottom",
+                    fontsize=10,
+                )
+
+            # Add title and labels
+            dataset_name = Path(dataset).name
+            if iter_value is not None:
+                plt.title(
+                    f"Reward Model Comparison on {dataset_name} (iter={iter_value})",
+                    fontsize=18,
+                )
+            else:
+                plt.title(
+                    f"Reward Model Comparison on {dataset_name} (no iter)",
+                    fontsize=18,
+                )
+            plt.ylabel("Success Rate")
+            plt.xlabel("Reward Model")
+            plt.xticks(rotation=45, ha="right")
+
+            # Format and save the plot
+            plt.tight_layout(rect=[0, 0.05, 1, 0.95])
+            max_value = stats["mean"].max() + stats["std"].max()
+            plt.ylim(0, min(1.0, max_value * 1.2))
+
+            output_path = os.path.join(
+                output_dir,
+                f"{dataset_name}_rm_analysis{iter_str}.png",
             )
-
-        # Add title and labels
-        dataset_name = Path(dataset).name
-        plt.title(
-            f"Reward Model Comparison on {dataset_name}",
-            fontsize=18,
-        )
-        plt.ylabel("Success Rate")
-        plt.xlabel("Reward Model")
-        plt.xticks(rotation=45, ha="right")
-
-        # Format and save the plot
-        plt.tight_layout(rect=[0, 0.05, 1, 0.95])
-        max_value = stats["mean"].max() + stats["std"].max()
-        plt.ylim(0, min(1.0, max_value * 1.2))
-
-        output_path = os.path.join(
-            output_dir,
-            f"{dataset_name}_rm_analysis.png",
-        )
-        plt.savefig(output_path, dpi=300, bbox_inches="tight")
-        print(f"Saved reward model comparison plot to {output_path}")
-        plt.close()
+            plt.savefig(output_path, dpi=300, bbox_inches="tight")
+            print(f"Saved reward model comparison plot to {output_path}")
+            plt.close()
 
     return output_dir
 
