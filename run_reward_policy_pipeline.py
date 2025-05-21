@@ -29,7 +29,7 @@ REWARD_MODEL_TEMPLATE = [
 
 # Grid search parameters for regular reward model
 REWARD_MODEL_GRID = {
-    "data.num_pairs": [500, 1000],  
+    "data.num_pairs": [100, 500, 1000],  
 }
 
 # Reward model training configuration for active learning
@@ -41,8 +41,8 @@ REWARD_MODEL_TEMPLATE_ACTIVE = [
 
 # Grid search parameters for active reward model
 ACTIVE_REWARD_MODEL_GRID = {
-    "active_learning.uncertainty_method": ["entropy"],  
-    "active_learning.total_queries": [5],   
+    "active_learning.uncertainty_method": ["entropy", "disagreement"],  
+    "active_learning.total_queries": [100],   
     "dtw_augmentation.enabled": [True, False]
 }
 
@@ -57,13 +57,12 @@ POLICY_TEMPLATE = [
     "data.use_zero_rewards=false",        # Don't use zero rewards
 ]
 
-# Multirun configuration
 USE_MULTIRUN = True  # Set to True to use multirun
 RANDOM_SEEDS = "521,522,523"  # Comma-separated list of seeds to use
 LAUNCHER = "slurm"  # Launcher for multirun (usually "slurm" on clusters)
 
 # Current pipeline mode
-USE_ACTIVE_LEARNING = False 
+USE_ACTIVE_LEARNING = True 
 
 def generate_grid_combinations(grid_params):
     """Generate all combinations of grid parameters."""
@@ -178,7 +177,7 @@ def train_reward_model(template, grid_params=None):
         sys.exit(1)
     
     # Search for model paths in the output
-    model_saved_pattern = re.compile(r"Model saved to: (.+/model_\d+\.pt)")
+    model_saved_pattern = re.compile(r"Model saved to: (.+/*\d+\.pt)")
     model_paths = []
     model_dir = None
     
@@ -216,25 +215,25 @@ def train_policy(reward_model_path, grid_desc=""):
     cmd.append(f"data.reward_model_path={reward_model_path}")
     
     # Add a descriptive name based on grid parameters
-    timestamp = int(time.time())
     dataset_name = Path(DATASET).stem
-    run_name = f"{POLICY_ALGORITHM}_{dataset_name}{grid_desc}_{timestamp}"
-    cmd.append(f"wandb.name={run_name}")
+    job_name = f"{POLICY_ALGORITHM}_{dataset_name}{grid_desc}"
     
     # Add multirun configuration if enabled
     if USE_MULTIRUN:
         cmd.append(f"wandb.use_wandb=true")
         cmd.append(f"random_seed={RANDOM_SEEDS}")
         cmd.append(f"hydra/launcher={LAUNCHER}")
+        cmd.append(f"hydra.job.name={job_name}")
         cmd.append("--multirun")
     
     # Create log file for the background process
     log_dir = "logs"
     os.makedirs(log_dir, exist_ok=True)
-    log_file = os.path.join(log_dir, f"policy_{run_name}.log")
+    log_file = os.path.join(log_dir, f"policy_{job_name}.log")
     
     # Start policy training in background
     print(f"Running command in background: {' '.join(cmd)}")
+    print(f"Job name: {job_name}")
     print(f"Log file: {log_file}")
     
     with open(log_file, 'w') as f:
@@ -242,7 +241,7 @@ def train_policy(reward_model_path, grid_desc=""):
             cmd,
             stdout=f,
             stderr=subprocess.STDOUT,
-            start_new_session=True  # Run in a new session so it's not tied to this script
+            start_new_session=True 
         )
     
     print(f"Started process with PID: {process.pid}")

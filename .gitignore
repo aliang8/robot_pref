@@ -20,3 +20,10 @@ analysis/*
 results/*
 d3rlpy_logs/*
 old/*
+*.log
+*.out
+*.err
+*.log.*
+*.out.*
+*.err.*
+logs/*
