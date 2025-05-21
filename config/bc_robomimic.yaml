@@ -27,7 +27,7 @@ bc:
 # Training parameters specific to BC
 training:
   n_epochs: 100
-  n_steps_per_epoch: 100
+  n_steps_per_epoch: 1000
   eval_interval: 10
   eval_episodes: 10
   save_interval: 10
@@ -35,5 +35,5 @@ training:
 # Output parameters
 output:
   output_dir: "results/bc_model"
-  model_dir_name: "DATASET_NAME_bc_lr${model.learning_rate}_epochs${training.n_epochs}"
+  model_dir_name: "DATASET_NAME_bc_lr${bc.learning_rate}_epochs${training.n_epochs}"
   artifact_name: "bc_${data.env_name}_DATASET_NAME"

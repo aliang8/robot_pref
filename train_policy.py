@@ -22,16 +22,41 @@ def print_model_architecture(algo):
     """
     print("=" * 50)
     print("\nModel Architecture:")
-    print("Policy Network:")
-    print(algo._impl._modules.policy)
 
-    print("\nQ Functions:")
-    for i, q_func in enumerate(algo._impl._modules.q_funcs):
-        print(f"Q-Function {i}:")
-        print(q_func)
+    modules = getattr(algo._impl, "_modules", None)
+    if modules is None:
+        print("No _modules attribute found in algo._impl.")
+        print("=" * 50)
+        return
 
-    print("\nValue Function:")
-    print(algo._impl._modules.value_func)
+    # For BC, modules is likely just a torch.nn.Module or similar, not a container with .policy, .q_funcs, etc.
+    # For IQL, modules has .policy, .q_funcs, .value_func
+    if hasattr(modules, "policy") or hasattr(modules, "q_funcs") or hasattr(modules, "value_func"):
+        # IQL or similar
+        if hasattr(modules, "policy"):
+            print("Policy Network:")
+            print(modules.policy)
+        else:
+            print("No policy network found.")
+
+        if hasattr(modules, "q_funcs"):
+            print("\nQ Functions:")
+            for i, q_func in enumerate(modules.q_funcs):
+                print(f"Q-Function {i}:")
+                print(q_func)
+        else:
+            print("\nNo Q-functions found.")
+
+        if hasattr(modules, "value_func"):
+            print("\nValue Function:")
+            print(modules.value_func)
+        else:
+            print("\nNo value function found.")
+    else:
+        # BC: just print the modules object itself
+        print("BC Model Modules:")
+        print(modules)
+
     print("=" * 50)
 
 
