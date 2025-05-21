@@ -12,6 +12,7 @@ __pycache__
 *.webm
 *.ogg
 *.mp3
+*.log
 iql_model/*
 outputs/*
 wandb/*
