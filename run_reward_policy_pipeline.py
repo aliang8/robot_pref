@@ -1,23 +1,23 @@
 #!/usr/bin/env python3
+import errno
+import fcntl
+import itertools
 import os
+import pty
+import re
+import select
+import subprocess
 import sys
 import time
-import subprocess
 from pathlib import Path
-import glob
-import re
-import itertools
-import pty
-import fcntl
-import select
-import errno
 
 # ============================================================================
 # EDIT THESE TEMPLATE COMMANDS TO CUSTOMIZE THE PIPELINE
 # ============================================================================
 
 # Dataset configuration
-DATASET = "/scr/aliang80/robot_pref/dataset_mw/buffer_assembly-v2_balanced.pt"  # Dataset path
+DATASET = "/scr2/shared/pref/datasets/robomimic/lift/lift_mg_image_dense.pt"  # Dataset path
+ENV_NAME = "lift"  # Environment name
 
 # Reward model training configuration
 REWARD_MODEL_TEMPLATE = [
@@ -47,11 +47,12 @@ ACTIVE_REWARD_MODEL_GRID = {
 }
 
 # Policy training configuration
-POLICY_ALGORITHM = "iql_mw"  # One of: "iql", "bc"
+POLICY_ALGORITHM = "iql_robomimic"  # One of: "iql", "bc"
 POLICY_TEMPLATE = [
     "python", "train_policy.py",
     f"--config-name={POLICY_ALGORITHM}",
     f"data.data_path={DATASET}",
+    f"data.env_name={ENV_NAME}",
     "training.n_epochs=100",              # Number of training epochs
     "data.use_ground_truth=false",        # Don't use ground truth rewards
     "data.use_zero_rewards=false",        # Don't use zero rewards
@@ -62,19 +63,27 @@ RANDOM_SEEDS = "521,522,523"  # Comma-separated list of seeds to use
 LAUNCHER = "slurm"  # Launcher for multirun (usually "slurm" on clusters)
 
 # Current pipeline mode
-USE_ACTIVE_LEARNING = True 
+USE_ACTIVE_LEARNING = True
 
 def generate_grid_combinations(grid_params):
-    """Generate all combinations of grid parameters."""
+    """Generate all combinations of grid parameters, but only use the max value for active_learning.total_queries."""
     if not grid_params:
         return [{}]  # Return empty dict if no grid params
-    
+
+    # If "active_learning.total_queries" is in the grid, only use its max value
     param_names = list(grid_params.keys())
-    param_values = list(grid_params.values())
-    
+    param_values = []
+    for name in param_names:
+        if name == "active_learning.total_queries":
+            # Only use the max value
+            max_val = max(grid_params[name])
+            param_values.append([max_val])
+        else:
+            param_values.append(grid_params[name])
+
     # Generate all combinations
     combinations = list(itertools.product(*param_values))
-    
+
     # Convert to list of dicts
     param_dicts = []
     for combo in combinations:
@@ -82,7 +91,7 @@ def generate_grid_combinations(grid_params):
         for i, name in enumerate(param_names):
             param_dict[name] = combo[i]
         param_dicts.append(param_dict)
-    
+
     return param_dicts
 
 
@@ -165,7 +174,7 @@ def train_reward_model(template, grid_params=None):
 
     # Run reward model training with output capture
     print("\n" + "#" * 100)
-    print(f"## REWARD MODEL TRAINING ##")
+    print("## REWARD MODEL TRAINING ##")
     print(f"## Command: {' '.join(cmd)}")
     print("#" * 100)
     
@@ -177,7 +186,8 @@ def train_reward_model(template, grid_params=None):
         sys.exit(1)
     
     # Search for model paths in the output
-    model_saved_pattern = re.compile(r"Model saved to: (.+/*\d+\.pt)")
+    model_saved_pattern = re.compile(r"Model saved to: (.+/model_\d+\.pt)")
+    model_saved_pattern_active = re.compile(r"Model saved to: (.+/checkpoint_iter_\d+\.pt)")
     model_paths = []
     model_dir = None
     
@@ -186,7 +196,15 @@ def train_reward_model(template, grid_params=None):
         model_path = os.path.abspath(model_path)
         model_paths.append(model_path)
         model_dir = os.path.dirname(model_path)
-    
+
+    # If nothing matched the first pattern, check the second
+    if not model_paths:
+        for match in model_saved_pattern_active.finditer(output):
+            model_path = match.group(1)
+            model_path = os.path.abspath(model_path)
+            model_paths.append(model_path)
+            model_dir = os.path.dirname(model_path)
+
     if not model_dir:
         print("Error: Could not determine model directory from command output")
         sys.exit(1)
@@ -202,7 +220,7 @@ def train_reward_model(template, grid_params=None):
 def train_policy(reward_model_path, grid_desc=""):
     """Launch policy training in the background without tracking."""
     print("\n" + "*" * 80)
-    print(f"** LAUNCHING POLICY TRAINING IN BACKGROUND **")
+    print("** LAUNCHING POLICY TRAINING IN BACKGROUND **")
     print(f"** Policy Algorithm: {POLICY_ALGORITHM.upper()}")
     print(f"** Reward Model: {reward_model_path}")
     print("*" * 80)
@@ -220,7 +238,7 @@ def train_policy(reward_model_path, grid_desc=""):
     
     # Add multirun configuration if enabled
     if USE_MULTIRUN:
-        cmd.append(f"wandb.use_wandb=true")
+        cmd.append("wandb.use_wandb=true")
         cmd.append(f"random_seed={RANDOM_SEEDS}")
         cmd.append(f"hydra/launcher={LAUNCHER}")
         cmd.append(f"hydra.job.name={job_name}")
@@ -281,10 +299,22 @@ def main():
 
         # Train reward model with these parameters
         _, model_paths, grid_desc = train_reward_model(template, params)
-        
-        # Launch policy training in background for each model
+
+        # Run train_policy for model_paths that match any value in ACTIVE_REWARD_MODEL_GRID["active_learning.total_queries"]
+        total_queries_list = ACTIVE_REWARD_MODEL_GRID["active_learning.total_queries"]
+
         for model_path in model_paths:
-            train_policy(model_path, grid_desc)
+            # Extract the iteration number from the checkpoint filename
+            # e.g., .../checkpoint_iter_10.pt -> 10
+            match = re.search(r"checkpoint_iter_(\d+)\.pt", model_path)
+
+            if match:
+                iter_num = int(match.group(1))
+                if iter_num in total_queries_list:
+                    train_policy(model_path, grid_desc)
+            else:
+                # If no match, fallback to running all (shouldn't happen)
+                train_policy(model_path, grid_desc)
     
     print("\n" + "+" * 100)
     print("+" + " " * 98 + "+")

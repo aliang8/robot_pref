@@ -164,36 +164,73 @@ def plot_active_learning_metrics(model_dir, metrics, augmented_accuracy):
     Returns:
         str: Path to the saved plot.
     """
-    fig, axs = plt.subplots(1, 3, figsize=(18, 6), constrained_layout=False, sharex=True)
+    # Create a 1x3 grid (3 plots side by side)
+    fig, axs = plt.subplots(
+        1, 3, figsize=(18, 6), constrained_layout=False, sharex=True
+    )
+
     dot_size = 10
-    line_color = 'blue'
+    line_color = "blue"
+
+    # Plot test accuracy (left)
     ax1 = axs[0]
-    ax1.plot(metrics["num_labeled"], metrics["test_accuracy"], marker='o', markersize=dot_size, color=line_color)
+    ax1.plot(
+        metrics["num_labeled"],
+        metrics["test_accuracy"],
+        marker="o",
+        markersize=dot_size,
+        color=line_color,
+    )
     ax1.set_ylabel("Test Accuracy", fontsize=16)
     ax1.set_title("Test Accuracy vs Labeled Pairs")
     ax1.grid(True, alpha=0.3)
-    ax1.spines['top'].set_visible(False)
-    ax1.spines['right'].set_visible(False)
+    # Remove top and right spines
+    ax1.spines["top"].set_visible(False)
+    ax1.spines["right"].set_visible(False)
+
+    # Plot test loss (Bradley-Terry) (right)
     ax2 = axs[1]
-    ax2.plot(metrics["num_labeled"], metrics["test_loss"], marker='o', markersize=dot_size, color=line_color)
+    ax2.plot(
+        metrics["num_labeled"],
+        metrics["test_loss"],
+        marker="o",
+        markersize=dot_size,
+        color=line_color,
+    )
     ax2.set_ylabel("Bradley-Terry Loss (BCE)", fontsize=16)
     ax2.set_title("Preference Learning Loss vs Labeled Pairs")
     ax2.grid(True, alpha=0.3)
-    ax2.spines['top'].set_visible(False)
-    ax2.spines['right'].set_visible(False)
-    ax3 = axs[2]
-    ax3.plot(metrics["num_labeled"], augmented_accuracy, marker='o', markersize=dot_size, color=line_color)
-    ax3.set_ylabel("Augmented Accuracy", fontsize=16)
-    ax3.set_title("Augmented Accuracy vs Labeled Pairs")
-    ax3.grid(True, alpha=0.3)
-    ax3.spines['top'].set_visible(False)
-    ax3.spines['right'].set_visible(False)
+    # Remove top and right spines
+    ax2.spines["top"].set_visible(False)
+    ax2.spines["right"].set_visible(False)
+
+    # Plot augmented accuracy
+    if len(augmented_accuracy) > 0:
+        ax3 = axs[2]
+        ax3.plot(
+            metrics["num_labeled"],
+            augmented_accuracy,
+            marker="o",
+            markersize=dot_size,
+            color=line_color,
+        )
+        ax3.set_ylabel("Augmented Accuracy", fontsize=16)
+        ax3.set_title("Augmented Accuracy vs Labeled Pairs")
+        ax3.grid(True, alpha=0.3)
+        ax3.spines["top"].set_visible(False)
+        ax3.spines["right"].set_visible(False)
+
+    # Ensure x-axis has only integer ticks
     from matplotlib.ticker import MaxNLocator
+
     for ax in axs:
         ax.xaxis.set_major_locator(MaxNLocator(integer=True))
+
+    # Make sure there's space for the common x-label
     plt.subplots_adjust(bottom=0.2)
-    fig.supxlabel("Number of Labeled Pairs", fontsize=16, y=0.05)
+
+    # Save plot in the model directory
     learning_curve_path = model_dir / "active_learning_metrics.png"
-    plt.savefig(learning_curve_path, dpi=300, bbox_inches='tight')
+    plt.savefig(learning_curve_path, dpi=300, bbox_inches="tight")
 
     return learning_curve_path
