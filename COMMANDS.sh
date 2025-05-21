@@ -119,8 +119,8 @@ python train_policy.py \
 # train reward model with active
 python train_reward_model_active.py \
     data.data_path=/scr/aliang80/robot_pref/dataset_mw/buffer_assembly-v2_balanced.pt \
-    active_learning.uncertainty_method=entropy,disagreement \
-    active_learning.max_queries=50 \
+    active_learning.uncertainty_method=entropy \
+    active_learning.total_queries=50 \
     dtw_augmentation.enabled=true \
     hydra/launcher=slurm \
     --multirun

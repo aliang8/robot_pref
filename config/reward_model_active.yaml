@@ -7,13 +7,7 @@ active_learning:
 model:
   hidden_dims: [256, 256]
   lr: 1e-4
-
-training:
-  num_epochs: 50
-  batch_size: 256
-  num_workers: 4
-  pin_memory: True
-
+  
 data:
   data_path: "/scr/shared/clam/datasets/metaworld/assembly-v2/buffer_assembly-v2.pt"
   segment_length: 32

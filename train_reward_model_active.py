@@ -227,10 +227,13 @@ def active_preference_learning(cfg, dataset_name=None):
             metrics["num_labeled_curve"] = []
         metrics["test_loss_curve"].append(test_metrics["test_loss"])
         metrics["num_labeled_curve"].append(num_queries)
+
         if iteration % cfg.training.save_model_every == 0:
             checkpoint_path = model_dir / "checkpoints" / f"checkpoint_iter_{iteration}.pt"
             torch.save(ensemble.models[0].state_dict(), checkpoint_path)
             print(f"Saved checkpoint at iteration {iteration}")
+            print(f"Model saved to: {checkpoint_path}")
+
         batch_size = min(cfg.active_learning.total_queries_per_iteration, total_queries - num_queries)
         if batch_size <= 0 or len(unlabeled_pairs) == 0:
             print("No more queries or unlabeled data")
