@@ -97,11 +97,15 @@ def get_robomimic_env(
     seed=42,
 ):
     import os
+    import inspect
 
-    # Dynamically determine the default base_path relative to where the command is run, using pathlib
+    # Dynamically determine the default base_path relative to this file's location, not CWD
     if base_path is None:
-        # Assume datasets are in ./robomimic/robomimic/datasets relative to current working directory
-        base_path = Path.cwd() / "robomimic" / "robomimic" / "datasets"
+        # Use the location of this file to find the project root
+        current_file = Path(inspect.getfile(inspect.currentframe()))
+        # Assume project root is two levels up from utils/env.py
+        project_root = current_file.parent.parent
+        base_path = project_root / "robomimic" / "robomimic" / "datasets"
     else:
         base_path = Path(base_path)
 
