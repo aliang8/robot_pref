@@ -86,16 +86,27 @@ class RobomimicEnvCreator:
         return get_robomimic_env(self.env_name, seed=unique_seed)
 
 
+from pathlib import Path
+
 def get_robomimic_env(
     env_name,
     render=True,
     render_offscreen=True,
     use_image_obs=True,
-    base_path="/scr/matthewh6/robomimic/robomimic/datasets",
+    base_path=None,
     seed=42,
 ):
-    dataset_path = f"{base_path}/{env_name}/mg/demo_v15.hdf5"
-    env_meta = FileUtils.get_env_metadata_from_dataset(dataset_path)
+    import os
+
+    # Dynamically determine the default base_path relative to where the command is run, using pathlib
+    if base_path is None:
+        # Assume datasets are in ./robomimic/robomimic/datasets relative to current working directory
+        base_path = Path.cwd() / "robomimic" / "robomimic" / "datasets"
+    else:
+        base_path = Path(base_path)
+
+    dataset_path = base_path / env_name / "mg" / "demo_v15.hdf5"
+    env_meta = FileUtils.get_env_metadata_from_dataset(str(dataset_path))
 
     obs_modality_dict = {
         "low_dim": [
