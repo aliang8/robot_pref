@@ -48,8 +48,9 @@ python train_policy.py \
 # using balanced dataset
 # make mixed expertise dataset
 python create_mixed_expertise_dataset.py \
-    --data_path=/scr/shared/clam/datasets/metaworld/assembly-v2/buffer_assembly-v2_clean.pt \
-    --output_dir=dataset_mw
+    --data_path=/scr/shared/clam/datasets/metaworld/door-open-v2/buffer_door-open-v2_clean.pt \
+    --output_dir=dataset_mw \
+    --ratios=0.9,0.1,0.0
 
 # train reward model without active learning
 python train_reward_model.py \
@@ -79,7 +80,8 @@ python train_reward_model_active.py \
 # baseline - use ground truth rewards
 python train_policy.py \
     --config-name=iql \
-    data.data_path=/scr/aliang80/robot_pref/dataset_mw/buffer_assembly-v2_balanced.pt \
+    data.data_path=/scr/aliang80/robot_pref/dataset_mw/door-open-v2/buffer_door-open-v2_clean_balanced.pt \
+    data.env_name=door-open-v2-goal-observable \
     wandb.use_wandb=true \
     data.use_ground_truth=true \
     data.scale_rewards=true \
@@ -89,8 +91,9 @@ python train_policy.py \
 
 # baseline - zero rewards
 python train_policy.py \
-    --config-name=iql \
-    data.data_path=/scr/aliang80/robot_pref/dataset_mw/buffer_assembly-v2_balanced.pt \
+    --config-name=iql_mw \
+    data.data_path=/scr/aliang80/robot_pref/dataset_mw/door-open-v2/buffer_door-open-v2_clean_balanced.pt \
+    data.env_name=door-open-v2-goal-observable \
     wandb.use_wandb=true \
     data.use_zero_rewards=true \
     random_seed=521,522,523 \
@@ -100,8 +103,9 @@ python train_policy.py \
 # baseline - BC
 # BC
 python train_policy.py \
-    --config-name=bc \
-    data.data_path=/scr/aliang80/robot_pref/dataset_mw/buffer_assembly-v2_balanced.pt \
+    --config-name=bc_mw \
+    data.data_path=/scr/aliang80/robot_pref/dataset_mw/door-open-v2/buffer_door-open-v2_clean_balanced.pt \
+    data.env_name=door-open-v2-goal-observable \
     wandb.use_wandb=true \
     random_seed=521,522,523 \
     hydra/launcher=slurm \

@@ -182,45 +182,80 @@ def classify_episodes_by_return(returns, num_bins=3):
     return skill_levels
 
 
-def balance_episodes(episode_data, seed=42):
-    """Balance episodes by taking equal numbers from each skill level.
+def balance_episodes_with_ratios(episode_data, ratios=[0.33, 0.33, 0.34], total_episodes=None, seed=42):
+    """Balance episodes according to specified ratios from each skill level.
 
     Args:
         episode_data: Dictionary with episode information including skill_levels
+        ratios: List of ratios for each skill level (random, medium, expert) - must sum to 1.0
+        total_episodes: Total number of episodes to include (default: as many as possible)
         seed: Random seed for reproducibility
 
     Returns:
-        list: Indices of selected episodes for a balanced dataset
+        list: Indices of selected episodes for a ratio-balanced dataset
     """
     # Get skill levels
     skill_levels = episode_data["skill_levels"]
     unique_levels = np.unique(skill_levels)
-
+    
+    # Validate ratios
+    if len(ratios) != len(unique_levels):
+        raise ValueError(f"Number of ratios ({len(ratios)}) must match number of skill levels ({len(unique_levels)})")
+    
+    if abs(sum(ratios) - 1.0) > 1e-6:
+        print(f"Warning: Ratios sum to {sum(ratios)}, normalizing to 1.0")
+        ratios = [r / sum(ratios) for r in ratios]
+    
     # Count episodes per skill level
     counts = []
     for level in unique_levels:
         count = np.sum(skill_levels == level)
         counts.append(count)
-
-    # Determine how many episodes to sample from each skill level
-    min_count = min(counts)
-    print(f"\nBalancing dataset: taking {min_count} episodes from each skill level")
-
+    
+    # Determine how many episodes to include from each level
+    if total_episodes is None:
+        # Calculate the maximum possible episodes while maintaining the desired ratios
+        max_possible = [counts[i] / ratios[i] if ratios[i] > 0 else float('inf') for i in range(len(counts))]
+        total_episodes = int(min(max_possible))
+    
+    # Calculate target counts for each level
+    target_counts = [int(total_episodes * ratios[i]) for i in range(len(ratios))]
+    
+    # Adjust for rounding errors
+    remaining = total_episodes - sum(target_counts)
+    for i in range(remaining):
+        target_counts[i % len(target_counts)] += 1
+    
+    # Ensure we don't try to sample more episodes than available
+    for i in range(len(target_counts)):
+        if target_counts[i] > counts[i]:
+            print(f"Warning: Requested {target_counts[i]} episodes for level {i}, but only {counts[i]} available")
+            target_counts[i] = counts[i]
+    
+    print("\nCreating dataset with custom ratios:")
+    for i, level in enumerate(unique_levels):
+        level_name = ["random", "medium", "expert"][level] if len(unique_levels) == 3 else f"level_{level}"
+        percentage = 100 * target_counts[i] / sum(target_counts)
+        print(f"  {level_name}: {target_counts[i]} episodes ({percentage:.1f}%)")
+    
     # Set random seed for reproducibility
     random.seed(seed)
-
+    
     # Sample episodes from each skill level
     selected_indices = []
-
-    for level in unique_levels:
+    
+    for i, level in enumerate(unique_levels):
+        if target_counts[i] == 0:
+            continue
+            
         # Get indices of episodes with this skill level
         level_indices = np.where(skill_levels == level)[0]
-
+        
         # Randomly sample from this skill level
-        sampled_indices = random.sample(list(level_indices), min_count)
+        sampled_indices = random.sample(list(level_indices), target_counts[i])
         selected_indices.extend(sampled_indices)
-
-    print(f"Selected {len(selected_indices)} episodes for balanced dataset")
+    
+    print(f"Selected {len(selected_indices)} episodes total")
     return selected_indices
 
 
@@ -306,19 +341,19 @@ def create_balanced_dataset(data, episode_data, selected_indices, output_path):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Create a balanced dataset with equal amounts of random/medium/expert episodes."
+        description="Create a dataset with custom ratios of random/medium/expert episodes."
     )
     parser.add_argument(
         "--data_path",
         type=str,
         default=None,
-        help="Path to trajectory data file (if not specified, will list and use the first available dataset)",
+        help="Path to trajectory data file",
     )
     parser.add_argument(
-        "--dataset_idx",
-        type=int,
+        "--task",
+        type=str,
         default=None,
-        help="Index of dataset from DEFAULT_DATA_PATHS to use (alternative to --data_path)",
+        help="Task to use for the dataset",
     )
     parser.add_argument(
         "--output_dir",
@@ -327,7 +362,28 @@ def main():
         help="Directory to save balanced dataset",
     )
     parser.add_argument(
-        "--seed", type=int, default=42, help="Random seed for selecting episodes"
+        "--ratios", 
+        type=str, 
+        default="0.33,0.33,0.34",
+        help="Comma-separated ratios for each skill level (random,medium,expert). Example: '0.9,0.1,0.0' for 90% random, 10% medium, 0% expert"
+    )
+    parser.add_argument(
+        "--total_episodes",
+        type=int,
+        default=None,
+        help="Total number of episodes to include (default: as many as possible)"
+    )
+    parser.add_argument(
+        "--seed", 
+        type=int, 
+        default=42, 
+        help="Random seed for selecting episodes"
+    )
+    parser.add_argument(
+        "--output_suffix",
+        type=str,
+        default=None,
+        help="Suffix to add to output filename (default: auto-generated from ratios)"
     )
 
     args = parser.parse_args()
@@ -335,6 +391,22 @@ def main():
     # Create output directory
     os.makedirs(args.output_dir, exist_ok=True)
 
+    # Parse ratios
+    try:
+        ratios = [float(r) for r in args.ratios.split(',')]
+        if len(ratios) != 3:
+            print(f"Warning: Expected 3 ratios (random,medium,expert), got {len(ratios)}. Padding with zeros.")
+            ratios = ratios + [0.0] * (3 - len(ratios))
+    except ValueError:
+        print(f"Error parsing ratios '{args.ratios}'. Using default equal ratios.")
+        ratios = [0.33, 0.33, 0.34]
+
+    # Auto-generate output suffix if not provided
+    if args.output_suffix is None:
+        ratio_str = "".join([f"_{level}{int(r*100)}" for level, r in 
+                           zip(['r', 'm', 'e'], ratios) if r > 0])
+        args.output_suffix = f"mix{ratio_str}"
+    
     # Load data
     data = load_tensordict(args.data_path)
 
@@ -358,15 +430,25 @@ def main():
     print("\nClassifying episodes by return...")
     skill_levels = classify_episodes_by_return(episode_data["returns"], num_bins=3)
     episode_data["skill_levels"] = skill_levels
+    
+    # Sample episodes according to specified ratios
+    selected_indices = balance_episodes_with_ratios(
+        episode_data, 
+        ratios=ratios, 
+        total_episodes=args.total_episodes,
+        seed=args.seed
+    )
 
-    # Balance episodes across skill levels
-    selected_indices = balance_episodes(episode_data, seed=args.seed)
-
-    # Create and save the balanced dataset
-    output_path = os.path.join(args.output_dir, f"{dataset_name}_balanced.pt")
+    # Create and save the dataset
+    output_path = os.path.join(
+        args.output_dir, 
+        args.task if args.task else "",
+        f"{dataset_name}_{args.output_suffix}.pt"
+    )
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
     create_balanced_dataset(data, episode_data, selected_indices, output_path)
 
-    print("\nBalanced dataset creation complete!")
+    print("\nCustom ratio dataset creation complete!")
 
 
 if __name__ == "__main__":

@@ -1,0 +1,39 @@
+# Complete BC configuration file
+algorithm: bc
+
+# Include common settings
+defaults:
+  - common
+  - _self_
+
+# Data parameters
+data:
+  data_path: "/scr2/shared/pref/datasets/robomimic/lift/mg_image_dense.pt"
+  reward_model_path: null  # Not needed for BC since we learn directly from demonstrations
+  max_segments: 0
+  reward_batch_size: 32
+  env_name: "assembly-v2-goal-observable"  # Exact name of the MetaWorld environment
+
+# Model architecture
+model:
+  hidden_dims: [256, 256]
+  use_weight_decay: False
+  weight_decay: 0.0
+
+bc:
+  learning_rate: 3e-4
+  batch_size: 256
+
+# Training parameters specific to BC
+training:
+  n_epochs: 100
+  n_steps_per_epoch: 1000
+  eval_interval: 10
+  eval_episodes: 10
+  save_interval: 10
+
+# Output parameters
+output:
+  output_dir: "results/bc_model"
+  model_dir_name: "DATASET_NAME_bc_lr${bc.learning_rate}_epochs${training.n_epochs}"
+  artifact_name: "bc_${data.env_name}_DATASET_NAME"
