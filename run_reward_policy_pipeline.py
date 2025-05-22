@@ -16,8 +16,8 @@ from pathlib import Path
 # ============================================================================
 
 # Dataset configuration
-DATASET = "/scr2/shared/pref/datasets/robomimic/lift/lift_mg_image_dense.pt"  # Dataset path
-ENV_NAME = "lift"  # Environment name
+DATASET = "/project2/biyik_1165/hongmm/pref/datasets/robomimic/can/can_mg_image_dense_balanced.pt "  # Dataset path
+ENV_NAME = "can"  # Environment name
 
 # Reward model training configuration
 REWARD_MODEL_TEMPLATE = [
@@ -42,7 +42,7 @@ REWARD_MODEL_TEMPLATE_ACTIVE = [
 # Grid search parameters for active reward model
 ACTIVE_REWARD_MODEL_GRID = {
     "active_learning.uncertainty_method": ["entropy", "disagreement", "random"],  
-    "active_learning.total_queries": [10, 25, 50],   
+    "active_learning.total_queries": [5, 10, 25, 50, 100],
     "dtw_augmentation.enabled": [True, False]
 }
 
@@ -61,7 +61,7 @@ POLICY_TEMPLATE = [
 # Multirun configuration
 USE_MULTIRUN = True  # Set to True to use multirun
 RANDOM_SEEDS = "521,522,523"  # Comma-separated list of seeds to use
-LAUNCHER = "slurm"  # Launcher for multirun (usually "slurm" on clusters)
+LAUNCHER = "slurm_carc"  # Launcher for multirun (usually "slurm" on clusters)
 
 # Current pipeline mode
 USE_ACTIVE_LEARNING = True

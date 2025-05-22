@@ -1,15 +1,13 @@
 import time
 import random
 import torch
+import inspect
 import numpy as np
 from env.robomimic_lowdim import RobomimicLowdimWrapper
 
-try:
-    import robomimic.utils.file_utils as FileUtils
-    import robomimic.utils.obs_utils as ObsUtils
-    import robomimic.utils.env_utils as EnvUtils
-except:
-    pass
+import robomimic.utils.file_utils as FileUtils
+import robomimic.utils.obs_utils as ObsUtils
+import robomimic.utils.env_utils as EnvUtils
 import os
 from pathlib import Path
 
@@ -96,16 +94,10 @@ def get_robomimic_env(
     base_path=None,
     seed=42,
 ):
-    import os
-    import inspect
-
-    # Dynamically determine the default base_path relative to this file's location, not CWD
     if base_path is None:
-        # Use the location of this file to find the project root
         current_file = Path(inspect.getfile(inspect.currentframe()))
-        # Assume project root is two levels up from utils/env.py
-        project_root = current_file.parent.parent
-        base_path = project_root / "robomimic" / "robomimic" / "datasets"
+        root = current_file.parent.parent.parent
+        base_path = root / "robomimic" / "robomimic" / "datasets"
     else:
         base_path = Path(base_path)
 
