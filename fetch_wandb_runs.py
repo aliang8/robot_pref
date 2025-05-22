@@ -55,9 +55,23 @@ def create_display_name(path):
 
         # Look for active learning method
         if "active_" in parent_dir:
-            method_match = re.search(r"active_(\w+)", parent_dir)
+            method_match = re.search(r"active_([a-zA-Z]+)", parent_dir)
             if method_match:
                 components["method"] = method_match.group(1)
+
+        aug_match = re.search(r"aug([a-zA-Z]+)", parent_dir)
+        if aug_match:
+            match = aug_match.group(1) 
+            if match == "True":
+                components["aug"] = "AG"
+
+        max_match = re.search(r"max(\d+)", parent_dir)
+        if max_match:
+            components["total_queries"] = f"TQ{max_match.group(1)}"
+
+        k_match = re.search(r"k(\d+)", parent_dir)
+        if k_match:
+            components["num_augment"] = f"k{k_match.group(1)}"
 
         # Build the display string
         if components:
@@ -302,11 +316,13 @@ def plot_reward_model_comparisons(df, output_dir="reward_model_plots"):
             (df_filtered["data.data_path"] == dataset)
             & (df_filtered["algorithm"] == "bc")
         ].copy()
-        bc_df.loc[:, "key"] = "BC"
-        bc_df["iter"] = None  # BC does not have an iter
 
-        # Add BC to filtered_df
-        filtered_df = pd.concat([filtered_df, bc_df])
+        if len(bc_df) > 0:
+            bc_df.loc[:, "key"] = "BC"
+            bc_df["iter"] = None  # BC does not have an iter
+
+            # Add BC to filtered_df
+            filtered_df = pd.concat([filtered_df, bc_df])
 
         # Special case: use_zero_rewards
         filtered_df.loc[
@@ -330,7 +346,32 @@ def plot_reward_model_comparisons(df, output_dir="reward_model_plots"):
         if not unique_iters:
             unique_iters = [None]
 
-        for iter_value in unique_iters:
+        print(f"Unique iter values: {unique_iters}")
+        
+        # Create a single figure with 3 columns of subplots
+        num_iters = len(unique_iters)
+        num_rows = (num_iters + 2) // 3  # Ceiling division to determine rows needed
+        
+        fig, axes = plt.subplots(num_rows, 3, figsize=(18, 6 * num_rows), constrained_layout=True)
+        # Convert axes to 1D array for easy indexing
+        if num_rows == 1:
+            axes = axes.reshape(1, -1)
+        
+        dataset_name = Path(dataset).name
+        # Add a main title for the entire figure
+        fig.suptitle(f"Reward Model Comparison on {dataset_name}", fontsize=20, y=1.02)
+        
+        for i, iter_value in enumerate(unique_iters):
+            # Calculate row and column for current subplot
+            row_idx = i // 3
+            col_idx = i % 3
+            
+            # Get the current axis
+            if num_rows == 1:
+                ax = axes[col_idx]
+            else:
+                ax = axes[row_idx, col_idx]
+            
             if iter_value is not None:
                 iter_mask = filtered_df["iter"] == iter_value
                 plot_df = filtered_df[iter_mask | filtered_df["iter"].isna()].copy()
@@ -343,10 +384,9 @@ def plot_reward_model_comparisons(df, output_dir="reward_model_plots"):
                 print(f"Plotting for dataset {dataset} with no iter (baseline/non-iter) with {len(plot_df)} runs")
 
             if len(plot_df) == 0:
+                # Hide this axis and continue
+                ax.set_visible(False)
                 continue
-
-            # Set up figure and colors
-            plt.figure(figsize=(8, 6))
 
             # Calculate statistics for each reward model
             metric_column = "top3_avg_eval_success_rate"
@@ -368,11 +408,12 @@ def plot_reward_model_comparisons(df, output_dir="reward_model_plots"):
             stats = stats[stats["key"] != "reward_model/state_action_reward_model.pt"]
 
             # Create the bar plot
-            ax = sns.barplot(
+            sns.barplot(
                 x="key",
                 y="mean",
                 data=stats,
                 palette="viridis",
+                ax=ax
             )
 
             # Remove top and right spines
@@ -380,47 +421,51 @@ def plot_reward_model_comparisons(df, output_dir="reward_model_plots"):
             ax.spines["right"].set_visible(False)
 
             # Add error bars and data labels
-            for i, row in enumerate(stats.itertuples()):
-                plt.errorbar(
-                    i, row.mean, yerr=row.std, fmt="none", ecolor="black", capsize=5
+            for j, row in enumerate(stats.itertuples()):
+                ax.errorbar(
+                    j, row.mean, yerr=row.std, fmt="none", ecolor="black", capsize=5
                 )
-                plt.text(
-                    i,
+                ax.text(
+                    j,
                     row.mean + 0.02,
                     f"{row.mean:.3f}±{row.std:.3f}\nn={row.count}",
                     ha="center",
                     va="bottom",
-                    fontsize=10,
+                    fontsize=9,
                 )
 
-            # Add title and labels
-            dataset_name = Path(dataset).name
+            # Set subplot title
             if iter_value is not None:
-                plt.title(
-                    f"Reward Model Comparison on {dataset_name} (iter={iter_value})",
-                    fontsize=18,
-                )
+                ax.set_title(f"Iteration {iter_value}", fontsize=14)
             else:
-                plt.title(
-                    f"Reward Model Comparison on {dataset_name} (no iter)",
-                    fontsize=18,
-                )
-            plt.ylabel("Success Rate")
-            plt.xlabel("Reward Model")
-            plt.xticks(rotation=45, ha="right")
+                ax.set_title("No Iteration (Baselines)", fontsize=14)
+                
+            ax.set_ylabel("Success Rate")
+            ax.set_xlabel("Reward Model")
+            ax.tick_params(axis='x', labelsize=8)
+            plt.setp(ax.get_xticklabels(), rotation=45)
 
-            # Format and save the plot
-            plt.tight_layout(rect=[0, 0.05, 1, 0.95])
+            # Set y-axis limits
             max_value = stats["mean"].max() + stats["std"].max()
-            plt.ylim(0, min(1.0, max_value * 1.2))
+            ax.set_ylim(0, min(1.0, max_value * 1.2))
 
-            output_path = os.path.join(
-                output_dir,
-                f"{dataset_name}_rm_analysis{iter_str}.png",
-            )
-            plt.savefig(output_path, dpi=300, bbox_inches="tight")
-            print(f"Saved reward model comparison plot to {output_path}")
-            plt.close()
+        # Hide any unused subplots
+        for i in range(len(unique_iters), num_rows * 3):
+            row_idx = i // 3
+            col_idx = i % 3
+            if num_rows == 1:
+                axes[col_idx].set_visible(False)
+            else:
+                axes[row_idx, col_idx].set_visible(False)
+
+        # Save the figure
+        output_path = os.path.join(
+            output_dir,
+            f"{dataset_name}_rm_analysis_combined.png",
+        )
+        plt.savefig(output_path, dpi=300, bbox_inches="tight")
+        print(f"Saved combined reward model comparison plot to {output_path}")
+        plt.close()
 
     return output_dir
 
