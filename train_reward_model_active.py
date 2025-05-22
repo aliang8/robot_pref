@@ -4,6 +4,7 @@ import random
 from pathlib import Path
 
 import hydra
+import matplotlib.pyplot as plt
 import numpy as np
 import torch
 from omegaconf import DictConfig, OmegaConf
@@ -24,7 +25,6 @@ from utils.seed import set_seed
 from utils.training import evaluate_model_on_test_set, train_model
 from utils.viz import plot_active_learning_metrics
 
-import matplotlib.pyplot as plt
 plt.rcParams['text.usetex'] = False
 
 

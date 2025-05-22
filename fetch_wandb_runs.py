@@ -293,7 +293,7 @@ def plot_reward_model_comparisons(df, output_dir="reward_model_plots"):
     print(f"Found {len(algorithms)} algorithms to plot: {algorithms}")
 
     # Loop through each dataset (each separate plot)
-    for dataset in datasets[::-1]:
+    for dataset in datasets:
         # Filter data for this dataset and algorithm
         filtered_df = df_filtered[
             (df_filtered["data.data_path"] == dataset)
@@ -350,28 +350,26 @@ def plot_reward_model_comparisons(df, output_dir="reward_model_plots"):
         
         # Create a single figure with 3 columns of subplots
         num_iters = len(unique_iters)
-        num_rows = (num_iters + 2) // 3  # Ceiling division to determine rows needed
+        # num_rows = (num_iters + 2) // 3  # Ceiling division to determine rows needed
+        num_rows = 2 # TODO: idk why but only if hardcoded to 2, it works
         
         fig, axes = plt.subplots(num_rows, 3, figsize=(18, 6 * num_rows), constrained_layout=True)
-        # Convert axes to 1D array for easy indexing
-        if num_rows == 1:
-            axes = axes.reshape(1, -1)
         
         dataset_name = Path(dataset).name
         # Add a main title for the entire figure
         fig.suptitle(f"Reward Model Comparison on {dataset_name}", fontsize=20, y=1.02)
-        
+
         for i, iter_value in enumerate(unique_iters):
             # Calculate row and column for current subplot
             row_idx = i // 3
             col_idx = i % 3
-            
-            # Get the current axis
-            if num_rows == 1:
-                ax = axes[col_idx]
-            else:
-                ax = axes[row_idx, col_idx]
-            
+
+            # axes is 2D array of shape (num_rows, 3)
+            if row_idx >= axes.shape[0] or col_idx >= axes.shape[1]:
+                # No axis for this subplot, skip
+                continue
+            ax = axes[row_idx, col_idx]
+
             if iter_value is not None:
                 iter_mask = filtered_df["iter"] == iter_value
                 plot_df = filtered_df[iter_mask | filtered_df["iter"].isna()].copy()
@@ -449,14 +447,14 @@ def plot_reward_model_comparisons(df, output_dir="reward_model_plots"):
             max_value = stats["mean"].max() + stats["std"].max()
             ax.set_ylim(0, min(1.0, max_value * 1.2))
 
-        # Hide any unused subplots
-        for i in range(len(unique_iters), num_rows * 3):
-            row_idx = i // 3
-            col_idx = i % 3
-            if num_rows == 1:
-                axes[col_idx].set_visible(False)
-            else:
-                axes[row_idx, col_idx].set_visible(False)
+        # # Hide any unused subplots
+        # for i in range(len(unique_iters), num_rows * 3):
+        #     row_idx = i // 3
+        #     col_idx = i % 3
+        #     if num_rows == 1:
+        #         axes[col_idx].set_visible(False)
+        #     else:
+        #         axes[row_idx, col_idx].set_visible(False)
 
         # Save the figure
         output_path = os.path.join(
