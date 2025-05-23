@@ -27,7 +27,6 @@ from utils.viz import plot_active_learning_metrics
 
 plt.rcParams['text.usetex'] = False
 
-
 def find_similar_segments_dtw(query_idx, k, distance_matrix):
     """Find the k most similar segments to the query segment using a pre-computed distance matrix."""
     if query_idx < 0 or query_idx >= distance_matrix.shape[0]:
