@@ -147,10 +147,12 @@ def active_preference_learning(cfg, seed):
 
         # Get information for the selected query pair
         selected_query_pref = get_gt_preferences(data, segment_start_end, [selected_query_pair])[0]
-        selected_query_pair_cost = distance_matrix[selected_query_pair[0], selected_query_pair[1]]
-
         labeled_preferences.append(selected_query_pref)
-        labeled_costs.append(selected_query_pair_cost)
+
+        # Add cost for selected query pair if DTW is enabled
+        if dtw_enabled and distance_matrix is not None:
+            selected_query_pair_cost = distance_matrix[selected_query_pair[0], selected_query_pair[1]]
+            labeled_costs.append(selected_query_pair_cost)
 
         # Remove the selected query pair from unlabeled pairs
         num_queries += 1
@@ -203,7 +205,7 @@ def active_preference_learning(cfg, seed):
                     candidate_pairs.remove(dtw_augmented_pair)
 
         # Create dataset and data loaders
-        ensemble_dataset = PreferenceDataset(data, labeled_pairs, segment_start_end, labeled_preferences, costs=labeled_costs if cfg.dtw_augmentation.use_heuristic_beta else None)
+        ensemble_dataset = PreferenceDataset(data, labeled_pairs, segment_start_end, labeled_preferences, costs=labeled_costs if cfg.dtw_augmentation.enabled and cfg.dtw_augmentation.use_heuristic_beta else None)
         data_loaders = create_data_loaders(
             ensemble_dataset,
             train_ratio=1.0,
@@ -217,7 +219,7 @@ def active_preference_learning(cfg, seed):
         print("Training new ensemble")
         ensemble = EnsembleRewardModel(state_dim, action_dim, cfg.model.hidden_dims, cfg.active_learning.num_models)
 
-        output_path = model_dir / "rm_training" / f"reward_model_training_{iteration}.png"
+        output_path = mo\del_dir / "rm_training" / f"reward_model_training_{iteration}.png"
         ensemble, _, _ = train_model(
             ensemble,
             train_loader,

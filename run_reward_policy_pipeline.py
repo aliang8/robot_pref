@@ -43,6 +43,7 @@ ACTIVE_REWARD_MODEL_GRID = {
     "active_learning.uncertainty_method": ["entropy", "disagreement"],  
     "active_learning.total_queries": [25,50,100],
     "dtw_augmentation.enabled": [True, False],
+    "dtw_augmentation.use_heuristic_beta": [True, False],
     "random_seed": [521]
 }
 
@@ -53,7 +54,7 @@ POLICY_TEMPLATE = [
     f"--config-name={POLICY_ALGORITHM}",
     f"data.data_path={DATASET}",
     f"data.env_name={ENV_NAME}",
-    "training.n_epochs=100",              # Number of training epochs
+    "training.n_epochs=125",              # Number of training epochs
     "data.use_ground_truth=false",        # Don't use ground truth rewards
     "data.use_zero_rewards=false",        # Don't use zero rewards
 ]
