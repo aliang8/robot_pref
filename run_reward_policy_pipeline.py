@@ -8,7 +8,6 @@ import re
 import select
 import subprocess
 import sys
-import time
 from pathlib import Path
 
 # ============================================================================
@@ -16,8 +15,8 @@ from pathlib import Path
 # ============================================================================
 
 # Dataset configuration
-DATASET = "/scr2/shared/pref/datasets/robomimic/lift/lift_mg_image_dense.pt"  # Dataset path
-ENV_NAME = "lift"  # Environment name
+DATASET = "/project2/biyik_1165/hongmm/pref/datasets/robomimic/can/can_mg_image_dense_balanced.pt"
+ENV_NAME = "can"  # Environment name
 
 # Reward model training configuration
 REWARD_MODEL_TEMPLATE = [
@@ -29,7 +28,7 @@ REWARD_MODEL_TEMPLATE = [
 
 # Grid search parameters for regular reward model
 REWARD_MODEL_GRID = {
-    "data.num_pairs": [100, 500, 1000],  
+    "data.num_pairs": [100, 500, 1000],
 }
 
 # Reward model training configuration for active learning
@@ -42,8 +41,9 @@ REWARD_MODEL_TEMPLATE_ACTIVE = [
 # Grid search parameters for active reward model
 ACTIVE_REWARD_MODEL_GRID = {
     "active_learning.uncertainty_method": ["entropy", "disagreement"],  
-    "active_learning.total_queries": [100],   
-    "dtw_augmentation.enabled": [True, False]
+    "active_learning.total_queries": [25,50,100],
+    "dtw_augmentation.enabled": [True, False],
+    "random_seed": [521]
 }
 
 # Policy training configuration
@@ -59,8 +59,8 @@ POLICY_TEMPLATE = [
 ]
 
 USE_MULTIRUN = True  # Set to True to use multirun
-RANDOM_SEEDS = "521,522,523"  # Comma-separated list of seeds to use
-LAUNCHER = "slurm"  # Launcher for multirun (usually "slurm" on clusters)
+RANDOM_SEEDS = "521"  # Comma-separated list of seeds to use
+LAUNCHER = "slurm_carc"  # Launcher for multirun (usually "slurm" on clusters)
 
 # Current pipeline mode
 USE_ACTIVE_LEARNING = True
@@ -80,7 +80,7 @@ def generate_grid_combinations(grid_params):
             param_values.append([max_val])
         else:
             param_values.append(grid_params[name])
-
+    
     # Generate all combinations
     combinations = list(itertools.product(*param_values))
 

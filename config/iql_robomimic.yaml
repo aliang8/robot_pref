@@ -1,12 +1,5 @@
-# Complete IQL configuration file
 algorithm: iql
 
-# Include common settings
-defaults:
-  - common
-  - _self_  # Allow this config to override common settings
-
-# Data parameters
 data:
   data_path: "/scr2/shared/pref/datasets/robomimic/lift/mg_image_dense.pt"
   reward_model_path: "/scr/matthewh6/robot_pref/reward_model/state_action_reward_model.pt"
@@ -19,11 +12,9 @@ data:
   use_zero_rewards: False  # Sanity check mode: use zero rewards for all transitions
   env_name: "lift"         # Exact name of the RoboMimic environment
 
-# Model architecture
 model:
   hidden_dims: [256, 256]
 
-# IQL configuration
 iql:
   actor_learning_rate: 1e-4
   critic_learning_rate: 1e-4
@@ -34,7 +25,6 @@ iql:
   expectile: 0.7
   weight_temp: 1.0
 
-# Training parameters specific to IQL
 training:
   n_epochs: 100
   n_steps_per_epoch: 1000
@@ -42,12 +32,14 @@ training:
   eval_episodes: 10
   save_interval: 10
 
-# Evaluation settings
 evaluation:
-  record_video: True
+  record_video: False
   parallel_eval: False
 
-# Output parameters
 output:
   output_dir: "results/iql"
   model_dir_name: "DATASET_NAME_iql_temp${iql.weight_temp}_exp${iql.expectile}_gt${data.use_ground_truth}"
+
+defaults:
+  - common
+  - _self_  # Allow this config to override common settings

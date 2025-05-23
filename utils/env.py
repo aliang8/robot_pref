@@ -1,15 +1,13 @@
 import time
 import random
 import torch
+import inspect
 import numpy as np
 from env.robomimic_lowdim import RobomimicLowdimWrapper
 
-try:
-    import robomimic.utils.file_utils as FileUtils
-    import robomimic.utils.obs_utils as ObsUtils
-    import robomimic.utils.env_utils as EnvUtils
-except:
-    pass
+import robomimic.utils.file_utils as FileUtils
+import robomimic.utils.obs_utils as ObsUtils
+import robomimic.utils.env_utils as EnvUtils
 import os
 from pathlib import Path
 
@@ -86,16 +84,25 @@ class RobomimicEnvCreator:
         return get_robomimic_env(self.env_name, seed=unique_seed)
 
 
+from pathlib import Path
+
 def get_robomimic_env(
     env_name,
     render=True,
     render_offscreen=True,
     use_image_obs=True,
-    base_path="/scr/matthewh6/robomimic/robomimic/datasets",
+    base_path=None,
     seed=42,
 ):
-    dataset_path = f"{base_path}/{env_name}/mg/demo_v15.hdf5"
-    env_meta = FileUtils.get_env_metadata_from_dataset(dataset_path)
+    if base_path is None:
+        current_file = Path(inspect.getfile(inspect.currentframe()))
+        root = current_file.parent.parent.parent
+        base_path = root / "robomimic" / "robomimic" / "datasets"
+    else:
+        base_path = Path(base_path)
+
+    dataset_path = base_path / env_name / "mg" / "demo_v15.hdf5"
+    env_meta = FileUtils.get_env_metadata_from_dataset(str(dataset_path))
 
     obs_modality_dict = {
         "low_dim": [

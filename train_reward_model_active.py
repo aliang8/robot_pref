@@ -4,6 +4,7 @@ import random
 from pathlib import Path
 
 import hydra
+import matplotlib.pyplot as plt
 import numpy as np
 import torch
 from omegaconf import DictConfig, OmegaConf
@@ -24,6 +25,7 @@ from utils.seed import set_seed
 from utils.training import evaluate_model_on_test_set, train_model
 from utils.viz import plot_active_learning_metrics
 
+plt.rcParams['text.usetex'] = False
 
 def find_similar_segments_dtw(query_idx, k, distance_matrix):
     """Find the k most similar segments to the query segment using a pre-computed distance matrix."""
