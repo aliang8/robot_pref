@@ -15,7 +15,7 @@ from pathlib import Path
 # ============================================================================
 
 # Dataset configuration
-DATASET = "/project2/biyik_1165/hongmm/pref/datasets/robomimic/can/can_mg_image_dense_balanced.pt"
+DATASET = "/scr2/shared/pref/datasets/robomimic/can/can_mg_image_dense_balanced.pt"
 ENV_NAME = "can"  # Environment name
 
 # Reward model training configuration
@@ -44,6 +44,7 @@ ACTIVE_REWARD_MODEL_GRID = {
     "active_learning.total_queries": [25,50,100],
     "dtw_augmentation.enabled": [True, False],
     "dtw_augmentation.use_heuristic_beta": [True, False],
+    "dtw_augmentation.k_augment": [5,10,25],
     "random_seed": [521]
 }
 

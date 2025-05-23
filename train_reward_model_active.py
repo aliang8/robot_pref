@@ -219,7 +219,7 @@ def active_preference_learning(cfg, seed):
         print("Training new ensemble")
         ensemble = EnsembleRewardModel(state_dim, action_dim, cfg.model.hidden_dims, cfg.active_learning.num_models)
 
-        output_path = mo\del_dir / "rm_training" / f"reward_model_training_{iteration}.png"
+        output_path = model_dir / "rm_training" / f"reward_model_training_{iteration}.png"
         ensemble, _, _ = train_model(
             ensemble,
             train_loader,
