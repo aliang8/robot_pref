@@ -307,7 +307,7 @@ def create_balanced_dataset(data, episode_data, selected_indices, output_path):
             print(f"  {key}: {new_data[key].shape}")
 
     # Save the new dataset
-    print(f"Saving balanced dataset to {output_path}_balanced")
+    print(f"Saving balanced dataset to {output_path}")
     torch.save(new_data, output_path)
 
     # Plot the distribution of returns in the balanced dataset
@@ -364,8 +364,8 @@ def main():
     parser.add_argument(
         "--ratios", 
         type=str, 
-        default="0.33,0.33,0.34",
-        help="Comma-separated ratios for each skill level (random,medium,expert). Example: '0.9,0.1,0.0' for 90% random, 10% medium, 0% expert"
+        default="1,1,1",
+        help="Comma-separated integers for ratio of each skill level (random,medium,expert). Example: '9,1,0' for 90% random, 10% medium, 0% expert"
     )
     parser.add_argument(
         "--total_episodes",
@@ -391,21 +391,36 @@ def main():
     # Create output directory
     os.makedirs(args.output_dir, exist_ok=True)
 
-    # Parse ratios
+    # Parse ratios as integers
     try:
-        ratios = [float(r) for r in args.ratios.split(',')]
-        if len(ratios) != 3:
-            print(f"Warning: Expected 3 ratios (random,medium,expert), got {len(ratios)}. Padding with zeros.")
-            ratios = ratios + [0.0] * (3 - len(ratios))
+        int_ratios = [int(r) for r in args.ratios.split(',')]
+        if len(int_ratios) != 3:
+            print(f"Warning: Expected 3 ratios (random,medium,expert), got {len(int_ratios)}. Padding with zeros.")
+            int_ratios = int_ratios + [0] * (3 - len(int_ratios))
+        
+        # Convert to float ratios that sum to 1.0
+        ratio_sum = sum(int_ratios)
+        if ratio_sum == 0:
+            print("Error: All ratios are zero. Using default equal ratios.")
+            ratios = [0.33, 0.33, 0.34]
+        else:
+            ratios = [r / ratio_sum for r in int_ratios]
     except ValueError:
         print(f"Error parsing ratios '{args.ratios}'. Using default equal ratios.")
         ratios = [0.33, 0.33, 0.34]
 
     # Auto-generate output suffix if not provided
     if args.output_suffix is None:
-        ratio_str = "".join([f"_{level}{int(r*100)}" for level, r in 
-                           zip(['r', 'm', 'e'], ratios) if r > 0])
-        args.output_suffix = f"mix{ratio_str}"
+        # Use the integer ratios in the filename for clarity
+        ratio_parts = []
+        for level, r in zip(['r', 'm', 'e'], int_ratios):
+            if r > 0:
+                ratio_parts.append(f"{level}{r}")
+        if ratio_parts:
+            ratio_str = "_" + "_".join(ratio_parts)
+            args.output_suffix = f"mix{ratio_str}"
+        else:
+            args.output_suffix = "mix_equal"
     
     # Load data
     data = load_tensordict(args.data_path)
