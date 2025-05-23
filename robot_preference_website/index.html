@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Robot Trajectory Preference Collection</title>
+    <link rel="stylesheet" href="css/styles.css">
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Robot Trajectory Preference</h1>
+            <p>Please watch both trajectories and select which one you prefer.</p>
+        </header>
+        
+        <div class="progress-bar">
+            <div class="progress" id="progress"></div>
+            <p><span id="current-pair">1</span> / <span id="total-pairs">10</span></p>
+        </div>
+        
+        <div class="trajectories">
+            <div class="trajectory-container">
+                <h2>Trajectory A</h2>
+                <div class="video-container" id="video-A">
+                    <!-- Video will be loaded here dynamically -->
+                    <video id="trajectory-A" controls loop>
+                        <source src="" type="video/mp4">
+                        Your browser does not support video playback.
+                    </video>
+                </div>
+            </div>
+            
+            <div class="trajectory-container">
+                <h2>Trajectory B</h2>
+                <div class="video-container" id="video-B">
+                    <!-- Video will be loaded here dynamically -->
+                    <video id="trajectory-B" controls loop>
+                        <source src="" type="video/mp4">
+                        Your browser does not support video playback.
+                    </video>
+                </div>
+            </div>
+        </div>
+        
+        <div class="preference-buttons">
+            <button id="prefer-A" class="preference-button">I Prefer Trajectory A</button>
+            <button id="prefer-equal" class="preference-button">No Preference</button>
+            <button id="prefer-B" class="preference-button">I Prefer Trajectory B</button>
+        </div>
+        
+        <div class="navigation-buttons">
+            <button id="prev-pair" class="nav-button" disabled>Previous Pair</button>
+            <button id="next-pair" class="nav-button" disabled>Next Pair</button>
+            <button id="submit-all" class="submit-button" disabled>Submit All Preferences</button>
+        </div>
+    </div>
+    
+    <div id="thanks-message" class="thanks-message hidden">
+        <h2>Thank You!</h2>
+        <p>Your preferences have been recorded.</p>
+        <button id="restart-button">Start New Session</button>
+    </div>
+    
+    <script src="js/script.js"></script>
+</body>
+</html> 
