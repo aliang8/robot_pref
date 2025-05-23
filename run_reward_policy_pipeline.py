@@ -15,7 +15,7 @@ from pathlib import Path
 # ============================================================================
 
 # Dataset configuration
-DATASET = "/scr2/shared/pref/datasets/robomimic/can/can_mg_image_dense_balanced.pt"  # Dataset path
+DATASET = "/project2/biyik_1165/hongmm/pref/datasets/robomimic/can/can_mg_image_dense_balanced.pt"
 ENV_NAME = "can"  # Environment name
 
 # Reward model training configuration
