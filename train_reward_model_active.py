@@ -35,7 +35,57 @@ def find_similar_segments_dtw(query_idx, k, distance_matrix):
     distances[query_idx] = float('inf')  # Exclude self
     similar_indices = np.argsort(distances)[:k]
 
-    return similar_indices, distances[similar_indices]
+    return similar_indices
+
+def plot_dtw_cost_analysis(labeled_costs, labeled_preferences, model_dir, iteration):
+    """Plot analysis of DTW costs used for beta scaling.
+    
+    Args:
+        labeled_costs: List of DTW costs for labeled pairs
+        labeled_preferences: List of preferences (1 or 2) for labeled pairs
+        model_dir: Directory to save plots
+        iteration: Current iteration number
+    """
+    if not labeled_costs:
+        return
+        
+    # Create figure with 2 subplots
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
+    
+    # Plot 1: Distribution of DTW costs
+    ax1.hist(labeled_costs, bins=30, alpha=0.7, color='blue')
+    ax1.set_xlabel('DTW Cost')
+    ax1.set_ylabel('Frequency')
+    ax1.set_title('Distribution of DTW Costs')
+    ax1.grid(True, alpha=0.3)
+    ax1.spines['top'].set_visible(False)
+    ax1.spines['right'].set_visible(False)
+    
+    # Plot 2: Scatter plot of costs vs iteration
+    iterations = list(range(1, len(labeled_costs) + 1))
+    ax2.scatter(iterations, labeled_costs, alpha=0.6, color='blue')
+    ax2.set_xlabel('Iteration')
+    ax2.set_ylabel('DTW Cost')
+    ax2.set_title('DTW Costs Over Time')
+    ax2.grid(True, alpha=0.3)
+    ax2.spines['top'].set_visible(False)
+    ax2.spines['right'].set_visible(False)
+    
+    # Add a trend line
+    z = np.polyfit(iterations, labeled_costs, 1)
+    p = np.poly1d(z)
+    ax2.plot(iterations, p(iterations), "r--", alpha=0.8, label=f'Trend (slope: {z[0]:.3f})')
+    ax2.legend()
+    
+    plt.tight_layout()
+    
+    # Save plot
+    output_path = model_dir / "dtw_cost_analysis" / f"dtw_costs_iter_{iteration}.png"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    plt.savefig(output_path, dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    return output_path
 
 def active_preference_learning(cfg, seed):
     """Main function for active preference learning."""
@@ -153,6 +203,10 @@ def active_preference_learning(cfg, seed):
         if dtw_enabled and distance_matrix is not None:
             selected_query_pair_cost = distance_matrix[selected_query_pair[0], selected_query_pair[1]]
             labeled_costs.append(selected_query_pair_cost)
+            
+            # Plot DTW cost analysis
+            if iteration % cfg.training.reward_analysis_every == 0:
+                plot_dtw_cost_analysis(labeled_costs, labeled_preferences, model_dir, iteration)
 
         # Remove the selected query pair from unlabeled pairs
         num_queries += 1
@@ -166,31 +220,31 @@ def active_preference_learning(cfg, seed):
             print(f"DTW augmenting (k={dtw_k_augment})")
             i, j = selected_query_pair
             if selected_query_pref == 1:
-                similar_to_i_indices, similar_to_i_costs = find_similar_segments_dtw(i, dtw_k_augment, distance_matrix)
-                for sim_idx, sim_cost in zip(similar_to_i_indices, similar_to_i_costs):
+                similar_to_i_indices = find_similar_segments_dtw(i, dtw_k_augment, distance_matrix)
+                for sim_idx in similar_to_i_indices:
                     if sim_idx != j:
                         dtw_augmented_pairs.append((sim_idx, j))
                         dtw_augmented_preferences.append(1)
-                        dtw_augmented_preferences_costs.append(sim_cost)
-                similar_to_j_indices, similar_to_j_costs = find_similar_segments_dtw(j, dtw_k_augment, distance_matrix)
-                for sim_idx, sim_cost in zip(similar_to_j_indices, similar_to_j_costs):
-                    if sim_idx != j:
+                        dtw_augmented_preferences_costs.append(distance_matrix[sim_idx, j])
+                similar_to_j_indices = find_similar_segments_dtw(j, dtw_k_augment, distance_matrix)
+                for sim_idx in similar_to_j_indices:
+                    if sim_idx != i:
                         dtw_augmented_pairs.append((i, sim_idx))
                         dtw_augmented_preferences.append(1)
-                        dtw_augmented_preferences_costs.append(sim_cost)
+                        dtw_augmented_preferences_costs.append(distance_matrix[i, sim_idx])
             elif selected_query_pref == 2:
-                similar_to_j_indices, similar_to_j_costs = find_similar_segments_dtw(j, dtw_k_augment, distance_matrix)
-                for sim_idx, sim_cost in zip(similar_to_j_indices, similar_to_j_costs):
+                similar_to_j_indices = find_similar_segments_dtw(j, dtw_k_augment, distance_matrix)
+                for sim_idx in similar_to_j_indices:
                     if sim_idx != i:
                         dtw_augmented_pairs.append((i, sim_idx))
                         dtw_augmented_preferences.append(2)
-                        dtw_augmented_preferences_costs.append(sim_cost)
-                similar_to_i_indices, similar_to_i_costs = find_similar_segments_dtw(i, dtw_k_augment, distance_matrix)
-                for sim_idx, sim_cost in zip(similar_to_i_indices, similar_to_i_costs):
+                        dtw_augmented_preferences_costs.append(distance_matrix[i, sim_idx])
+                similar_to_i_indices = find_similar_segments_dtw(i, dtw_k_augment, distance_matrix)
+                for sim_idx in similar_to_i_indices:
                     if sim_idx != j:
                         dtw_augmented_pairs.append((sim_idx, j))
                         dtw_augmented_preferences.append(2)
-                        dtw_augmented_preferences_costs.append(sim_cost)
+                        dtw_augmented_preferences_costs.append(distance_matrix[sim_idx, j])
 
             labeled_pairs.extend(dtw_augmented_pairs)
             labeled_preferences.extend(dtw_augmented_preferences)

@@ -65,6 +65,12 @@ def create_display_name(path):
             if match == "True":
                 components["aug"] = "AG"
 
+        beta_match = re.search(r"beta(\d+)", parent_dir)
+        if beta_match:
+            match = beta_match.group(1)
+            if match == "True":
+                components["beta"] = "BH" # Beta heuristic
+
         max_match = re.search(r"max(\d+)", parent_dir)
         if max_match:
             components["total_queries"] = f"TQ{max_match.group(1)}"
