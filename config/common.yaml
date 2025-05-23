@@ -3,7 +3,7 @@
 debug: False
 
 # Random seed for reproducibility
-random_seed: 42
+random_seed: 521
 
 # Data parameters
 data:

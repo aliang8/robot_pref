@@ -35,17 +35,19 @@ def find_similar_segments_dtw(query_idx, k, distance_matrix):
     distances = distance_matrix[query_idx].copy()
     distances[query_idx] = float('inf')  # Exclude self
     similar_indices = np.argsort(distances)[:k]
-    return similar_indices
 
-def active_preference_learning(cfg, dataset_name=None):
+    return similar_indices, distances[similar_indices]
+
+def active_preference_learning(cfg, seed):
     """Main function for active preference learning."""
-    # Print some configs
+
+    # Set random seed for reproducibility
+    set_seed(seed)
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     dtw_enabled = cfg.dtw_augmentation.enabled
     dtw_k_augment = cfg.dtw_augmentation.k_augment
-    print(f"DTW enabled: {dtw_enabled}")
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Using device: {device}")
-
+    
     # Load data
     print(f"Loading data from {cfg.data.data_path}")
     data = load_tensordict(cfg.data.data_path)
@@ -58,6 +60,7 @@ def active_preference_learning(cfg, dataset_name=None):
     state_dim = observations.shape[1]
     action_dim = actions.shape[1]
     print(f"Obs dim: {state_dim}, Action dim: {action_dim}")
+    print(f"Loaded data with {len(observations)} observations")
 
     rewards = data["reward"]
     reward_max = rewards.max().item()
@@ -104,6 +107,7 @@ def active_preference_learning(cfg, dataset_name=None):
     num_queries = 0
     total_queries = cfg.active_learning.total_queries
     labeled_pairs = []
+    labeled_costs = []
     labeled_preferences = []
     augmented_accuracy = []
     candidate_pairs = unlabeled_pairs
@@ -119,7 +123,6 @@ def active_preference_learning(cfg, dataset_name=None):
         "val_losses": [],
         "test_loss_curve": [],
         "num_labeled_curve": [],
-        # Add any additional new keys here as needed
     }
 
     while num_queries < total_queries and len(unlabeled_pairs) > 0:
@@ -128,9 +131,9 @@ def active_preference_learning(cfg, dataset_name=None):
         print(f"Progress: {num_queries}/{total_queries} queries")
         print(f"Candidate pairs: {len(candidate_pairs)}")
 
-        if num_queries == 0:
+        if num_queries == 0: # First iteration, randomly select a pair
             selected_query_pair = random.choice(candidate_pairs)
-        else:
+        else: # Subsequent iterations, use active sampling
             selected_query_pair = select_active_pref_query(
                 ensemble,
                 segment_start_end,
@@ -138,12 +141,19 @@ def active_preference_learning(cfg, dataset_name=None):
                 uncertainty_method=cfg.active_learning.uncertainty_method,
                 max_pairs=1,
                 candidate_pairs=candidate_pairs
-            )[0]      
+            )[0]
 
-        selected_query_pref = get_gt_preferences(data, segment_start_end, [selected_query_pair])[0]
-        print(f"Selected pair: {selected_query_pair}, pref: {selected_query_pref}")
+        print(f"Selected query pair: {selected_query_pair}")
         labeled_pairs.append(selected_query_pair)
+
+        # Get information for the selected query pair
+        selected_query_pref = get_gt_preferences(data, segment_start_end, [selected_query_pair])[0]
+        selected_query_pair_cost = distance_matrix[selected_query_pair[0], selected_query_pair[1]]
+
         labeled_preferences.append(selected_query_pref)
+        labeled_costs.append(selected_query_pair_cost)
+
+        # Remove the selected query pair from unlabeled pairs
         num_queries += 1
         candidate_pairs.remove(selected_query_pair)
 
@@ -151,32 +161,39 @@ def active_preference_learning(cfg, dataset_name=None):
         if dtw_enabled and distance_matrix is not None:
             dtw_augmented_pairs = []
             dtw_augmented_preferences = []
+            dtw_augmented_preferences_costs = []
             print(f"DTW augmenting (k={dtw_k_augment})")
             i, j = selected_query_pair
             if selected_query_pref == 1:
-                similar_to_i_indices = find_similar_segments_dtw(i, dtw_k_augment, distance_matrix)
-                for sim_idx in similar_to_i_indices:
+                similar_to_i_indices, similar_to_i_costs = find_similar_segments_dtw(i, dtw_k_augment, distance_matrix)
+                for sim_idx, sim_cost in zip(similar_to_i_indices, similar_to_i_costs):
                     if sim_idx != j:
                         dtw_augmented_pairs.append((sim_idx, j))
                         dtw_augmented_preferences.append(1)
-                similar_to_j_indices = find_similar_segments_dtw(j, dtw_k_augment, distance_matrix)
-                for sim_idx in similar_to_j_indices:
+                        dtw_augmented_preferences_costs.append(sim_cost)
+                similar_to_j_indices, similar_to_j_costs = find_similar_segments_dtw(j, dtw_k_augment, distance_matrix)
+                for sim_idx, sim_cost in zip(similar_to_j_indices, similar_to_j_costs):
                     if sim_idx != j:
                         dtw_augmented_pairs.append((i, sim_idx))
                         dtw_augmented_preferences.append(1)
+                        dtw_augmented_preferences_costs.append(sim_cost)
             elif selected_query_pref == 2:
-                similar_to_j_indices = find_similar_segments_dtw(j, dtw_k_augment, distance_matrix)
-                for sim_idx in similar_to_j_indices:
+                similar_to_j_indices, similar_to_j_costs = find_similar_segments_dtw(j, dtw_k_augment, distance_matrix)
+                for sim_idx, sim_cost in zip(similar_to_j_indices, similar_to_j_costs):
                     if sim_idx != i:
                         dtw_augmented_pairs.append((i, sim_idx))
                         dtw_augmented_preferences.append(2)
-                similar_to_i_indices = find_similar_segments_dtw(i, dtw_k_augment, distance_matrix)
-                for sim_idx in similar_to_i_indices:
+                        dtw_augmented_preferences_costs.append(sim_cost)
+                similar_to_i_indices, similar_to_i_costs = find_similar_segments_dtw(i, dtw_k_augment, distance_matrix)
+                for sim_idx, sim_cost in zip(similar_to_i_indices, similar_to_i_costs):
                     if sim_idx != j:
                         dtw_augmented_pairs.append((sim_idx, j))
                         dtw_augmented_preferences.append(2)
+                        dtw_augmented_preferences_costs.append(sim_cost)
+
             labeled_pairs.extend(dtw_augmented_pairs)
             labeled_preferences.extend(dtw_augmented_preferences)
+            labeled_costs.extend(dtw_augmented_preferences_costs)
             print(f"DTW augmented pairs: {len(dtw_augmented_pairs)}")
             augmented_pref_with_rewards = get_gt_preferences(data, segment_start_end, dtw_augmented_pairs)
             augmented_acc = (np.array(augmented_pref_with_rewards) == np.array(dtw_augmented_preferences)).mean()
@@ -186,7 +203,8 @@ def active_preference_learning(cfg, dataset_name=None):
                 if dtw_augmented_pair in candidate_pairs:
                     candidate_pairs.remove(dtw_augmented_pair)
 
-        ensemble_dataset = PreferenceDataset(data, labeled_pairs, segment_start_end, labeled_preferences)
+        # Create dataset and data loaders
+        ensemble_dataset = PreferenceDataset(data, labeled_pairs, segment_start_end, labeled_preferences, costs=labeled_costs if cfg.dtw_augmentation.use_heuristic_beta else None)
         data_loaders = create_data_loaders(
             ensemble_dataset,
             train_ratio=1.0,
@@ -263,19 +281,74 @@ def active_preference_learning(cfg, dataset_name=None):
 
     print("Active learning completed.")
 
+    # Return final metrics for seed
+    return {
+        "seed": seed,
+        "test_accuracy": test_metrics["test_accuracy"],
+        "test_log_prob": test_metrics["avg_logpdf"],
+        "model_path": checkpoint_path,
+    }
+
 @hydra.main(config_path="config", config_name="reward_model_active", version_base=None)
 def main(cfg: DictConfig):
-    set_seed(cfg.random_seed)
-    print(f"Random seed set to {cfg.random_seed}")
+    # Get the dataset name
+    dataset_name = Path(cfg.data.data_path).stem
 
-    dataset_path = Path(cfg.data.data_path)
-    dataset_name = dataset_path.stem
-    print(f"Dataset: {dataset_name}")
-
+    # Replace only the dataset name placeholder in the template strings
     if hasattr(cfg.output, "model_dir_name"):
-        cfg.output.model_dir_name = cfg.output.model_dir_name.replace("DATASET_NAME", dataset_name)
+        cfg.output.model_dir_name = cfg.output.model_dir_name.replace(
+            "DATASET_NAME", dataset_name
+        )
 
-    active_preference_learning(cfg)
+    # model_dir = Path(cfg.output.output_dir) / cfg.output.model_dir_name
+
+    print("\n" + "=" * 50)
+    print("Training reward model with Bradley-Terry preference learning")
+    print("=" * 50)
+
+    # Print config for visibility
+    print("\nConfiguration:")
+    print(OmegaConf.to_yaml(cfg))
+
+    # Get number of seeds to run (default to 1 if not specified)
+    # num_seeds = cfg.get("num_seeds", 1)
+    # print(f"Training {num_seeds} models with different seeds")
+
+    # Base random seed
+    base_seed = cfg.get("random_seed", 42)
+    
+    all_seed_metrics = []
+    
+    # for seed_idx in tqdm(range(num_seeds)):
+    # Calculate seed for this run
+    
+    # print("\n" + "=" * 50)
+    # print(f"Training model {seed_idx+1}/{num_seeds} with seed {current_seed}")
+    # print("=" * 50)
+
+    current_seed = base_seed
+    seed_metrics = active_preference_learning(cfg, current_seed)
+    all_seed_metrics.append(seed_metrics)
+
+    # if len(seed_metrics) > 0:
+    #     metrics_df = pd.DataFrame(seed_metrics)
+        
+    #     accuracy_mean = metrics_df["test_accuracy"].mean()
+    #     accuracy_std = metrics_df["test_accuracy"].std()
+    #     log_prob_mean = metrics_df["test_log_prob"].mean()
+    #     log_prob_std = metrics_df["test_log_prob"].std()
+        
+    #     print("\n" + "=" * 50)
+    #     print(f"Summary Statistics Across {num_seeds} Seeds:")
+    #     print(f"Test Accuracy: {accuracy_mean:.4f} ± {accuracy_std:.4f}")
+    #     print(f"Test LogPDF: {log_prob_mean:.4f} ± {log_prob_std:.4f}")
+    #     print("=" * 50)
+        
+    #     with open(model_dir / "summary.txt", "w") as f:
+    #         f.write(f"Summary Statistics Across {num_seeds} Seeds:\n")
+    #         f.write(f"Test Accuracy: {accuracy_mean:.4f} ± {accuracy_std:.4f}\n")
+    #         f.write(f"Test LogPDF: {log_prob_mean:.4f} ± {log_prob_std:.4f}\n")
+    #         f.write("=" * 50 + "\n")
 
 if __name__ == "__main__":
     main() 

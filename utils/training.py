@@ -163,7 +163,14 @@ def train_model(
             dynamic_ncols=True,
         )
 
-        for _, (obs1, actions1, obs2, actions2, pref) in enumerate(progress_bar):
+
+        for _, data in enumerate(progress_bar):
+            # Unpack data
+            obs1, actions1, obs2, actions2, pref, *rest = data
+
+            # Check if cost is provided
+            cost = rest[0] if rest else None
+
             # Move data to device
             obs1, actions1, obs2, actions2, pref = (
                 obs1.to(device),
@@ -172,6 +179,8 @@ def train_model(
                 actions2.to(device),
                 pref.to(device),
             )
+            if cost is not None:
+                cost = cost.to(device)
             optimizer.zero_grad(set_to_none=True)
 
             # Compute rewards directly using the forward method
@@ -183,13 +192,14 @@ def train_model(
                 return1 = reward1.sum(dim=-1)
                 return2 = reward2.sum(dim=-1)
                 pref = pref.unsqueeze(0).repeat(model.num_models, 1)
+                cost = cost.unsqueeze(0).repeat(model.num_models, 1) if cost is not None else None
             else:
                 return1 = reward1.sum(dim=1)
                 return2 = reward2.sum(dim=1)
 
             # Bradley-Terry loss already applies mean over batch dimension
             # For ensemble models, we get one loss per model
-            loss = bradley_terry_loss(return1, return2, pref)
+            loss = bradley_terry_loss(return1, return2, pref, cost=cost)
 
             # For ensemble, take mean across models
             batch_loss = loss.mean() if loss.dim() > 0 else loss
