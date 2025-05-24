@@ -151,12 +151,16 @@ def segment_episodes(data, segment_length):
     episode_lens = [
         len(np.where(data["episode"] == i)[0]) for i in np.unique(data["episode"])
     ]
-    assert len(set(episode_lens)) == 1, "All episodes should be the same length"
-    episode_len = episode_lens[0]
-    print(f"Episode length: {episode_len}")
+    # assert len(set(episode_lens)) == 1, "All episodes should be the same length"
+    unique_episode_lens = np.unique(episode_lens)
+    print(f"Unique episode lengths: {unique_episode_lens}")
+    
+    # only keep segments that are the same length
+    episode_len_gt = episode_lens[10]
+    print(f"Episode length use: {episode_len_gt}")
 
     # Calculate segments_per_trajectory based on the episode length
-    segments_per_trajectory = episode_len // segment_length + 1
+    segments_per_trajectory = episode_len_gt // segment_length + 1
 
     # Get segments from each episode
     segments = []
@@ -170,11 +174,11 @@ def segment_episodes(data, segment_length):
     for episode_idx in unique_episodes:
         episode_mask = data["episode"] == episode_idx
         episode_len = np.sum(episode_mask.numpy())
+        if episode_len != episode_len_gt:
+            print(f"Episode length {episode_len} != {episode_len_gt}, skipping")
+            continue
         episode_start_indices[episode_idx] = abs_idx
-        abs_idx += episode_len
-
-    for episode_idx in tqdm(unique_episodes):
-        episode_abs_start = episode_start_indices[episode_idx]
+        episode_abs_start = abs_idx
 
         # Create segments_per_trajectory evenly spaced segments
         for i in range(segments_per_trajectory):
@@ -201,6 +205,8 @@ def segment_episodes(data, segment_length):
                 segment[key] = data[key][abs_start_idx:abs_end_idx]
 
             segments.append(segment)
+
+        abs_idx += episode_len
 
     print(f"Segmented {len(segments)} segments")
     return segments, segment_indices

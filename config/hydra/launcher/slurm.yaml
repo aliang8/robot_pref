@@ -9,8 +9,7 @@ name: ${hydra.job.name}
 _target_: hydra_plugins.hydra_submitit_launcher.submitit_launcher.SlurmLauncher
 
 # partition: gpu
-gres: shard:20
-cpus_per_task: 8
+gres: shard:10
 
 qos: null
 comment: null
