@@ -37,14 +37,14 @@ def find_similar_segments_dtw(query_idx, k, distance_matrix):
 
     return similar_indices
 
-def plot_dtw_cost_analysis(labeled_costs, labeled_preferences, model_dir, iteration):
+def plot_dtw_cost_analysis(labeled_costs, model_dir, iteration, dtw_costs_per_iter):
     """Plot analysis of DTW costs used for beta scaling.
     
     Args:
         labeled_costs: List of DTW costs for labeled pairs
-        labeled_preferences: List of preferences (1 or 2) for labeled pairs
         model_dir: Directory to save plots
         iteration: Current iteration number
+        dtw_costs_per_iter: List of lists containing DTW costs added in each iteration
     """
     if not labeled_costs:
         return
@@ -61,21 +61,15 @@ def plot_dtw_cost_analysis(labeled_costs, labeled_preferences, model_dir, iterat
     ax1.spines['top'].set_visible(False)
     ax1.spines['right'].set_visible(False)
     
-    # Plot 2: Scatter plot of costs vs iteration
-    iterations = list(range(1, len(labeled_costs) + 1))
-    ax2.scatter(iterations, labeled_costs, alpha=0.6, color='blue')
+    # Plot 2: Box plot of costs per iteration
+    iterations = list(range(1, len(dtw_costs_per_iter) + 1))
+    ax2.boxplot(dtw_costs_per_iter, positions=iterations)
     ax2.set_xlabel('Iteration')
     ax2.set_ylabel('DTW Cost')
-    ax2.set_title('DTW Costs Over Time')
+    ax2.set_title('DTW Costs Per Iteration')
     ax2.grid(True, alpha=0.3)
     ax2.spines['top'].set_visible(False)
     ax2.spines['right'].set_visible(False)
-    
-    # Add a trend line
-    z = np.polyfit(iterations, labeled_costs, 1)
-    p = np.poly1d(z)
-    ax2.plot(iterations, p(iterations), "r--", alpha=0.8, label=f'Trend (slope: {z[0]:.3f})')
-    ax2.legend()
     
     plt.tight_layout()
     
@@ -172,6 +166,7 @@ def active_preference_learning(cfg, seed):
         "val_losses": [],
         "test_loss_curve": [],
         "num_labeled_curve": [],
+        "dtw_costs_per_iter": [],  # Add this to track DTW costs per iteration
     }
 
     while num_queries < total_queries and len(unlabeled_pairs) > 0:
@@ -179,6 +174,9 @@ def active_preference_learning(cfg, seed):
         print(f"\n=== Active Learning Iteration {iteration} ===")
         print(f"Progress: {num_queries}/{total_queries} queries")
         print(f"Candidate pairs: {len(candidate_pairs)}")
+
+        # Track DTW costs for this iteration
+        iteration_dtw_costs = []
 
         if num_queries == 0: # First iteration, randomly select a pair
             selected_query_pair = random.choice(candidate_pairs)
@@ -203,14 +201,7 @@ def active_preference_learning(cfg, seed):
         if dtw_enabled and distance_matrix is not None:
             selected_query_pair_cost = distance_matrix[selected_query_pair[0], selected_query_pair[1]]
             labeled_costs.append(selected_query_pair_cost)
-            
-            # Plot DTW cost analysis
-            if iteration % cfg.training.reward_analysis_every == 0:
-                plot_dtw_cost_analysis(labeled_costs, labeled_preferences, model_dir, iteration)
-
-        # Remove the selected query pair from unlabeled pairs
-        num_queries += 1
-        candidate_pairs.remove(selected_query_pair)
+            iteration_dtw_costs.append(selected_query_pair_cost)
 
         # DTW preference augmentation
         if dtw_enabled and distance_matrix is not None:
@@ -225,26 +216,34 @@ def active_preference_learning(cfg, seed):
                     if sim_idx != j:
                         dtw_augmented_pairs.append((sim_idx, j))
                         dtw_augmented_preferences.append(1)
-                        dtw_augmented_preferences_costs.append(distance_matrix[sim_idx, j])
+                        cost = distance_matrix[sim_idx, j]
+                        dtw_augmented_preferences_costs.append(cost)
+                        iteration_dtw_costs.append(cost)
                 similar_to_j_indices = find_similar_segments_dtw(j, dtw_k_augment, distance_matrix)
                 for sim_idx in similar_to_j_indices:
                     if sim_idx != i:
                         dtw_augmented_pairs.append((i, sim_idx))
                         dtw_augmented_preferences.append(1)
-                        dtw_augmented_preferences_costs.append(distance_matrix[i, sim_idx])
+                        cost = distance_matrix[i, sim_idx]
+                        dtw_augmented_preferences_costs.append(cost)
+                        iteration_dtw_costs.append(cost)
             elif selected_query_pref == 2:
                 similar_to_j_indices = find_similar_segments_dtw(j, dtw_k_augment, distance_matrix)
                 for sim_idx in similar_to_j_indices:
                     if sim_idx != i:
                         dtw_augmented_pairs.append((i, sim_idx))
                         dtw_augmented_preferences.append(2)
-                        dtw_augmented_preferences_costs.append(distance_matrix[i, sim_idx])
+                        cost = distance_matrix[i, sim_idx]
+                        dtw_augmented_preferences_costs.append(cost)
+                        iteration_dtw_costs.append(cost)
                 similar_to_i_indices = find_similar_segments_dtw(i, dtw_k_augment, distance_matrix)
                 for sim_idx in similar_to_i_indices:
                     if sim_idx != j:
                         dtw_augmented_pairs.append((sim_idx, j))
                         dtw_augmented_preferences.append(2)
-                        dtw_augmented_preferences_costs.append(distance_matrix[sim_idx, j])
+                        cost = distance_matrix[sim_idx, j]
+                        dtw_augmented_preferences_costs.append(cost)
+                        iteration_dtw_costs.append(cost)
 
             labeled_pairs.extend(dtw_augmented_pairs)
             labeled_preferences.extend(dtw_augmented_preferences)
@@ -257,6 +256,9 @@ def active_preference_learning(cfg, seed):
             for dtw_augmented_pair in dtw_augmented_pairs:
                 if dtw_augmented_pair in candidate_pairs:
                     candidate_pairs.remove(dtw_augmented_pair)
+
+        # Store the DTW costs for this iteration
+        metrics["dtw_costs_per_iter"].append(iteration_dtw_costs)
 
         # Create dataset and data loaders
         ensemble_dataset = PreferenceDataset(data, labeled_pairs, segment_start_end, labeled_preferences, costs=labeled_costs if cfg.dtw_augmentation.enabled and cfg.dtw_augmentation.use_heuristic_beta else None)
@@ -325,6 +327,10 @@ def active_preference_learning(cfg, seed):
                 reward_min=reward_min,
                 random_seed=cfg.random_seed
             )
+
+        # Plot DTW cost analysis
+        if iteration % cfg.training.reward_analysis_every == 0:
+            plot_dtw_cost_analysis(labeled_costs, model_dir, iteration, metrics["dtw_costs_per_iter"])
 
     # Plot active learning metrics
     plot_active_learning_metrics(model_dir, metrics, augmented_accuracy)

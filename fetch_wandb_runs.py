@@ -65,7 +65,7 @@ def create_display_name(path):
             if match == "True":
                 components["aug"] = "AG"
 
-        beta_match = re.search(r"beta(\d+)", parent_dir)
+        beta_match = re.search(r"beta([a-zA-Z]+)", parent_dir)
         if beta_match:
             match = beta_match.group(1)
             if match == "True":
