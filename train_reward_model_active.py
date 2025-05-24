@@ -191,6 +191,9 @@ def active_preference_learning(cfg, seed):
             )[0]
 
         print(f"Selected query pair: {selected_query_pair}")
+        # Remove the selected query pair from unlabeled pairs
+        num_queries += 1
+        candidate_pairs.remove(selected_query_pair)
         labeled_pairs.append(selected_query_pair)
 
         # Get information for the selected query pair
