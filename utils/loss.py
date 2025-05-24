@@ -1,7 +1,7 @@
 import torch
 
 
-def bradley_terry_loss(rewards1, rewards2, preferences, cost=None, alpha=1.0, beta=1.0):
+def bradley_terry_loss(rewards1, rewards2, preferences, cost=None, alpha=0.1, beta_max=5.0):
     """
     Compute the Bradley-Terry preference learning loss (binary cross-entropy) with optional beta scaling.
 
@@ -26,7 +26,9 @@ def bradley_terry_loss(rewards1, rewards2, preferences, cost=None, alpha=1.0, be
 
     # Optionally use cost to scale beta if provided
     if cost is not None:
-        beta = beta * torch.exp(-alpha * cost)
+        beta = beta_max * torch.exp(-alpha * cost)
+    else:
+        beta = 1
 
     # Compute probability that segment1 is preferred over segment2 using the Bradley-Terry model
     eps = 1e-6
