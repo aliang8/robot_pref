@@ -133,7 +133,6 @@ def active_preference_learning(cfg, seed):
 
             # print mean, ignoring NaNs
             print(f"Post-norm DTW matrix mean: {np.nanmean(distance_matrix):.4f}, std: {np.nanstd(distance_matrix):.4f}")
-            import ipdb; ipdb.set_trace()
     else:
         _, segment_start_end = segment_episodes(data, cfg.data.segment_length)
 
