@@ -169,7 +169,7 @@ def active_preference_learning(cfg, seed):
         "dtw_costs_per_iter": [],  # Add this to track DTW costs per iteration
     }
 
-    while num_queries < total_queries and len(unlabeled_pairs) > 0:
+    while num_queries < total_queries:
         iteration += 1
         print(f"\n=== Active Learning Iteration {iteration} ===")
         print(f"Progress: {num_queries}/{total_queries} queries")
