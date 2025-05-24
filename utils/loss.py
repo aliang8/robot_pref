@@ -1,7 +1,7 @@
 import torch
 
 
-def bradley_terry_loss(rewards1, rewards2, preferences, cost=None, alpha=0.1, beta_max=5.0):
+def bradley_terry_loss(rewards1, rewards2, preferences, cost=None, alpha=3.5, beta_max=8.0):
     """
     Compute the Bradley-Terry preference learning loss (binary cross-entropy) with optional beta scaling.
 

@@ -121,6 +121,19 @@ def active_preference_learning(cfg, seed):
         else:
             distance_matrix, segment_start_end = pickle.load(open(dtw_matrix_file, "rb"))
             print(f"Loaded DTW matrix shape: {distance_matrix.shape}")
+            print(f"Pre-norm DTW matrix mean: {np.nanmean(distance_matrix):.4f}, std: {np.nanstd(distance_matrix):.4f}")
+            # Normalize the distance matrix to [0, 1], taking into account NaNs
+            min_val = np.nanmin(distance_matrix)
+            max_val = np.nanmax(distance_matrix)
+            print(f"DTW matrix min: {min_val:.4f}, max: {max_val:.4f}")
+            if max_val > min_val:
+                distance_matrix = (distance_matrix - min_val) / (max_val - min_val)
+            else:
+                distance_matrix = np.zeros_like(distance_matrix)  # All values are the same, set to 0
+
+            # print mean, ignoring NaNs
+            print(f"Post-norm DTW matrix mean: {np.nanmean(distance_matrix):.4f}, std: {np.nanstd(distance_matrix):.4f}")
+            import ipdb; ipdb.set_trace()
     else:
         _, segment_start_end = segment_episodes(data, cfg.data.segment_length)
 

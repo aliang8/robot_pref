@@ -27,7 +27,7 @@ output:
   model_dir_name: "DATASET_NAME_active_${active_learning.uncertainty_method}_queries${active_learning.total_queries}_aug${dtw_augmentation.enabled}_k${dtw_augmentation.k_augment}_beta${dtw_augmentation.use_heuristic_beta}_seed${random_seed}"
 
 training:
-  save_model_every: 10
+  save_model_every: 5
   reward_analysis_every: 5
   num_epochs: 50
   batch_size: 256
