@@ -10,7 +10,7 @@ import torch
 from tqdm import tqdm
 
 import utils.dtw as dtw
-from utils.data import load_tensordict, segment_episodes
+from utils.data import load_tensordict, segment_episodes, segment_episodes_dynamic
 
 
 def compute_dtw_distance_matrix(segments, use_relative_eef: bool):
@@ -120,7 +120,7 @@ def main():
         data = {
             k: v.cpu() if isinstance(v, torch.Tensor) else v for k, v in data.items()
         }
-        segments, segment_indices = segment_episodes(data, segment_length)
+        segments, segment_indices = segment_episodes_dynamic(data, segment_length)
 
         dtw_matrix = compute_dtw_distance_matrix(segments, use_relative_eef)
 

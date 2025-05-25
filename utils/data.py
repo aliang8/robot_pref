@@ -212,6 +212,85 @@ def segment_episodes(data, segment_length):
     return segments, segment_indices
 
 
+def segment_episodes_dynamic(data, segment_length, min_segment_overlap=0.2):
+    """Segment episodes into smaller segments, handling variable episode lengths.
+
+    Args:
+        data: Raw TensorDict data to segment
+        segment_length: Base length of each segment
+        min_segment_overlap: Minimum overlap between segments as a fraction of segment_length
+
+    Returns:
+        segments: List of segments
+        segment_indices: List of (start_idx, end_idx) tuples for each segment
+    """
+    # Get unique episodes and their lengths
+    unique_episodes = np.unique(data["episode"])
+    episode_lens = {
+        int(ep): len(np.where(data["episode"] == ep)[0]) 
+        for ep in unique_episodes
+    }
+    
+    print(f"Found {len(unique_episodes)} episodes")
+    print(f"Episode lengths range: min={min(episode_lens.values())}, max={max(episode_lens.values())}")
+    
+    segments = []
+    segment_indices = []
+    abs_idx = 0  # Keep track of absolute position in dataset
+    
+    for episode_idx in unique_episodes:
+        episode_len = episode_lens[int(episode_idx)]
+        episode_abs_start = abs_idx
+        
+        # Skip episodes shorter than segment_length
+        if episode_len < segment_length:
+            print(f"Episode {episode_idx} length ({episode_len}) < segment_length ({segment_length}), skipping")
+            abs_idx += episode_len
+            continue
+            
+        # Calculate number of segments for this episode
+        # We want segments to overlap by at least min_segment_overlap
+        max_stride = int(segment_length * (1 - min_segment_overlap))
+        num_segments = max(1, (episode_len - segment_length) // max_stride + 1)
+        
+        # Calculate actual stride to evenly space segments
+        if num_segments > 1:
+            stride = (episode_len - segment_length) / (num_segments - 1)
+        else:
+            stride = 0  # Only one segment, no stride needed
+            
+        print(f"Episode {episode_idx}: length={episode_len}, segments={num_segments}, stride={stride:.1f}")
+        
+        # Create segments
+        for i in range(num_segments):
+            start_idx = int(i * stride)
+            end_idx = start_idx + segment_length - 1
+            
+            # Ensure end_idx doesn't exceed episode length
+            end_idx = min(end_idx, episode_len)
+            # Adjust start_idx if needed for last segment
+            if end_idx - start_idx < segment_length:
+                start_idx = max(0, end_idx - segment_length)
+            
+            # Compute absolute indices in the full dataset
+            abs_start_idx = episode_abs_start + start_idx
+            abs_end_idx = episode_abs_start + end_idx
+            
+            segment_indices.append((abs_start_idx, abs_end_idx))
+            
+            # Create segment dictionary
+            segment = {}
+            for key in data.keys():
+                segment[key] = data[key][abs_start_idx:abs_end_idx]
+            
+            segments.append(segment)
+        
+        abs_idx += episode_len
+    
+    print(f"Created {len(segments)} segments total")
+    return segments, segment_indices
+
+
 def load_dataset(
     data,
     reward_model=None,
