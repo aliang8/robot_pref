@@ -130,3 +130,10 @@ python train_reward_model_active.py \
     --multirun
 
 python run_reward_policy_pipeline.py 
+
+
+
+# Training RM from user preferences 
+python train_reward_model.py \
+    data.data_path=/scr/shared/datasets/robot_pref/pick_up_green_and_slide_pot_right/pick_up_green_and_slide_pot_right_embedded.pt \
+    task=pick_up_green_and_slide_pot_right

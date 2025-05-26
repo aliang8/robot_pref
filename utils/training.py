@@ -36,15 +36,19 @@ def evaluate_model_on_test_set(model, test_loader, device):
     is_ensemble = hasattr(model, "num_models") and model.num_models > 1
 
     with torch.no_grad():
-        for obs1, actions1, obs2, actions2, pref in tqdm(test_loader, desc="Testing"):
-            # Move to device
-            obs1, actions1 = obs1.to(device), actions1.to(device)
-            obs2, actions2 = obs2.to(device), actions2.to(device)
-            pref = pref.to(device)
+        for batch in tqdm(test_loader, desc="Testing"):
+            
+            batch = {k: v.to(device) for k, v in batch.items()}
+            obs1, actions1, obs2, actions2, pref = batch["obs1"], batch["actions1"], batch["obs2"], batch["actions2"], batch["preference"]
+            images1, images2 = batch["images1"], batch["images2"]
+            if images1 is not None:
+                images1 = images1.float().to(device)
+            if images2 is not None:
+                images2 = images2.float().to(device)
 
             # Get reward predictions
-            reward1 = model(obs1, actions1)
-            reward2 = model(obs2, actions2)
+            reward1 = model(obs1, actions1, images1)
+            reward2 = model(obs2, actions2, images2)
 
             # Handle ensemble and non-ensemble models consistently with training
             if is_ensemble:
@@ -163,20 +167,20 @@ def train_model(
             dynamic_ncols=True,
         )
 
-        for _, (obs1, actions1, obs2, actions2, pref) in enumerate(progress_bar):
+        for _, batch in enumerate(progress_bar):
             # Move data to device
-            obs1, actions1, obs2, actions2, pref = (
-                obs1.to(device),
-                actions1.to(device),
-                obs2.to(device),
-                actions2.to(device),
-                pref.to(device),
-            )
+            batch = {k: v.to(device) for k, v in batch.items()}
+            obs1, actions1, obs2, actions2, pref = batch["obs1"], batch["actions1"], batch["obs2"], batch["actions2"], batch["preference"]
+            images1, images2 = batch["images1"], batch["images2"]
+            if images1 is not None:
+                images1 = images1.float().to(device)
+            if images2 is not None:
+                images2 = images2.float().to(device)
             optimizer.zero_grad(set_to_none=True)
 
             # Compute rewards directly using the forward method
-            reward1 = model(obs1, actions1)
-            reward2 = model(obs2, actions2)
+            reward1 = model(obs1, actions1, images1)
+            reward2 = model(obs2, actions2, images2)
 
             if is_ensemble:
                 # [B, N, T] -> [B, N]

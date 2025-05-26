@@ -5,25 +5,40 @@ defaults:
 # Number of models to train with different seeds
 num_seeds: 3
 
+task: pick_up_green_and_slide_pot_right
+data_dir: /scr/shared/datasets/robot_pref
+
 data:
-  data_path: "/scr/shared/clam/datasets/metaworld/assembly-v2/buffer_assembly-v2.pt"
+  data_path: null  # Path to dataset
   segment_length: 32
   num_segments: 50000
-  num_pairs: 100
+  num_pairs: 1000
+  normalize_obs: true
+  norm_method: "standard"
+  segment_pairs_path: "${data_dir}/${task}/segment_pairs.npy"  # Optional: path to segment pairs file
+  segment_indices_path: "${data_dir}/${task}/segment_start_end_indices.npy"  # Optional: path to segment indices file
+  preferences_dir: "${data_dir}/${task}/preferences"  # Optional: directory containing preference JSON files
+
+  use_images: false
+  image_key: "image"
+  obs_key: "obs"
+  action_key: "action"
+  use_image_embeddings: false
+  image_embedding_key: "image_embedding"
 
   preferences_data_path: null
-  normalize_obs: False
-  norm_method: "standard"
-  
+
 model:
   hidden_dims: [256, 256]
-  lr: 3e-4
+  image_model: "resnet50"
+  embedding_dim: 256
+  lr: 0.0003
 
 training:
-  batch_size: 256
+  batch_size: 32
   num_epochs: 100
   num_workers: 4
-  pin_memory: True
+  pin_memory: true
 
 hardware:
   gpu: 0
@@ -34,5 +49,11 @@ output:
   model_dir_name: "DATASET_NAME_model_seg${data.segment_length}_epochs${training.num_epochs}_pairs${data.num_pairs}_seed${random_seed}"
   
 wandb:
-  tags: ["reward_model"]
-  notes: "Training reward model with Bradley-Terry preference learning"
+  use_wandb: false
+  project: "robot_pref"
+  entity: null
+  name: null
+  tags: []
+  notes: null
+
+seed: 42

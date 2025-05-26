@@ -16,49 +16,97 @@ class PreferenceDataset(Dataset):
         normalize_obs=False,
         norm_method="standard",
         norm_stats=None,
+        use_images=False,
+        image_key="image",
+        obs_key="obs",
+        action_key="action",
+        normalize_images=True,
+        use_image_embeddings=False,
+        image_embedding_key="image_embedding"
     ):
         """
         Initialize the dataset for preference learning.
 
         Args:
-            data: Dictionary containing observations and actions, or tensor
+            data: Dictionary containing observations, actions, and optionally images/embeddings
             segment_pairs: List of pairs of segment indices [(i, j), ...]
             segment_indices: List of segment start/end indices [(start, end), ...]
-            preferences: List of preferences (1 = first segment preferred, 2 = second segment preferred)
-            normalize_obs: Whether to normalize observations (default: False)
+            preferences: List of preferences (1 = first segment preferred, 0 = second segment preferred, 0.5 = equal)
+            normalize_obs: Whether to normalize observations
             norm_method: Normalization method ('standard' or 'minmax')
             norm_stats: Pre-computed normalization statistics dict (optional)
+            use_images: Whether to include images in the data
+            image_key: Key for image data in the data dictionary
+            obs_key: Key for observation data in the data dictionary
+            action_key: Key for action data in the data dictionary
+            normalize_images: Whether to normalize images to [0, 1] range
+            use_image_embeddings: Whether to use pre-computed image embeddings
+            image_embedding_key: Key for image embeddings in the data dictionary
         """
-        self.data = data
+        # Convert all tensors to float32
+        self.data = {
+            k: v.float() if isinstance(v, torch.Tensor) else v 
+            for k, v in data.items()
+        }
         self.segment_pairs = segment_pairs
         self.segment_indices = segment_indices
         self.preferences = preferences
         self.normalize_obs = normalize_obs
         self.norm_method = norm_method
+        self.use_images = use_images
+        self.image_key = image_key
+        self.obs_key = obs_key
+        self.action_key = action_key
+        self.normalize_images = normalize_images
+        self.use_image_embeddings = use_image_embeddings
+        self.image_embedding_key = image_embedding_key
 
-        # Determine the data length for bounds checking
-        if isinstance(self.data, dict):
-            # For dictionary data, use the observation tensor length
-            if "obs" in self.data:
-                self.data_length = len(self.data["obs"])
-                self.obs_key = "obs"
-            elif "state" in self.data:
-                self.data_length = len(self.data["state"])
-                self.obs_key = "state"
+        # Verify data contains required keys
+        if self.use_images:
+            if self.use_image_embeddings:
+                if self.image_embedding_key not in self.data:
+                    raise ValueError(f"Image embedding key '{self.image_embedding_key}' not found in data")
+                print(f"Using pre-computed image embeddings with shape: {self.data[self.image_embedding_key].shape}")
             else:
-                raise ValueError("Data dictionary must contain 'obs' or 'state' key")
-        else:
-            raise ValueError("Data must be a dictionary")
+                if self.image_key not in self.data:
+                    raise ValueError(f"Image key '{self.image_key}' not found in data")
+                print(f"Using raw images with shape: {self.data[self.image_key].shape}")
+
+        if self.obs_key not in self.data:
+            raise ValueError(f"Observation key '{self.obs_key}' not found in data")
+        if self.action_key not in self.data:
+            raise ValueError(f"Action key '{self.action_key}' not found in data")
+
+        # Get data length
+        self.data_length = len(self.data[self.obs_key])
+
+        # Process images if using raw images
+        if self.use_images and not self.use_image_embeddings:
+            images = self.data[self.image_key]
+            
+            # Check if images need to be reordered from HWC to CHW
+            if images.shape[-1] == 3:  # If last dimension is 3, it's in HWC format
+                print("Converting images from HWC to CHW format")
+                # Permute dimensions to CHW format
+                images = images.permute(0, 3, 1, 2)
+                self.data[self.image_key] = images
+            
+            # Normalize images if needed
+            if self.normalize_images:
+                if images.max() > 1.0:
+                    print("Normalizing images from [0, 255] to [0, 1] range")
+                    self.data[self.image_key] = images.float() / 255.0
+                print(f"Image range: [{self.data[self.image_key].min():.3f}, {self.data[self.image_key].max():.3f}]")
+            
+            print(f"Final image shape: {self.data[self.image_key].shape} (N, C, H, W)")
 
         # Compute or use provided normalization statistics
         self.norm_stats = {}
         if self.normalize_obs:
             if norm_stats is not None:
-                # Use provided normalization statistics
-                self.norm_stats = norm_stats
+                self.norm_stats = {k: v.float() for k, v in norm_stats.items()}
                 print("Using provided normalization statistics")
             else:
-                # Compute normalization statistics from the data
                 print("Computing observation normalization statistics...")
                 self._compute_normalization_statistics()
 
@@ -72,44 +120,25 @@ class PreferenceDataset(Dataset):
                     f"Observation min: {self.norm_stats['min'].mean().item():.4f}, max: {self.norm_stats['max'].mean().item():.4f}"
                 )
 
-        # print(f"Dataset initialized with data length: {self.data_length}, normalize_obs={normalize_obs}")
-
     def _compute_normalization_statistics(self):
         """Compute normalization statistics from the dataset."""
-        # Get the observations tensor
-        if isinstance(self.data, dict):
-            obs = self.data[self.obs_key]
-        else:
-            obs = self.data
+        obs = self.data[self.obs_key]
 
-        # For standard normalization, compute mean and std
         if self.norm_method == "standard":
-            # Compute along first dimension (time/batch)
             mean = obs.mean(dim=0)
             std = obs.std(dim=0)
-            # Ensure std is not zero (replace zeros with ones)
             std = torch.where(std > 1e-6, std, torch.ones_like(std))
-
             self.norm_stats["mean"] = mean
             self.norm_stats["std"] = std
 
-        # For min-max normalization, compute min and max
         elif self.norm_method == "minmax":
-            # Compute along first dimension (time/batch)
             min_vals = obs.min(dim=0)[0]
             max_vals = obs.max(dim=0)[0]
-            # Ensure range is not zero (replace zero-range with unit range)
             range_vals = max_vals - min_vals
-            valid_range = torch.where(
-                range_vals > 1e-6, range_vals, torch.ones_like(range_vals)
-            )
-
+            valid_range = torch.where(range_vals > 1e-6, range_vals, torch.ones_like(range_vals))
             self.norm_stats["min"] = min_vals
             self.norm_stats["max"] = max_vals
             self.norm_stats["range"] = valid_range
-
-        else:
-            raise ValueError(f"Unsupported normalization method: {self.norm_method}")
 
     def _normalize_observations(self, obs):
         """Apply normalization to the observations."""
@@ -117,11 +146,8 @@ class PreferenceDataset(Dataset):
             return obs
 
         if self.norm_method == "standard":
-            # Apply standard normalization: (x - mean) / std
             return (obs - self.norm_stats["mean"]) / self.norm_stats["std"]
-
         elif self.norm_method == "minmax":
-            # Apply min-max normalization: (x - min) / (max - min)
             return (obs - self.norm_stats["min"]) / self.norm_stats["range"]
 
         return obs
@@ -130,32 +156,48 @@ class PreferenceDataset(Dataset):
         return len(self.segment_pairs)
 
     def __getitem__(self, idx):
+        # Get segment indices
         seg_idx1, seg_idx2 = self.segment_pairs[idx]
         start1, end1 = self.segment_indices[seg_idx1]
         start2, end2 = self.segment_indices[seg_idx2]
 
-        if isinstance(self.data, dict):
-            obs_key = self.obs_key
-            action_key = "action"
-            obs1 = self.data[obs_key][start1:end1]
-            actions1 = self.data[action_key][start1:end1]
-            obs2 = self.data[obs_key][start2:end2]
-            actions2 = self.data[action_key][start2:end2]
+        # Get observations and actions
+        obs1 = self.data[self.obs_key][start1:end1]
+        obs2 = self.data[self.obs_key][start2:end2]
+        actions1 = self.data[self.action_key][start1:end1]
+        actions2 = self.data[self.action_key][start2:end2]
 
         # Apply normalization to observations
         if self.normalize_obs:
             obs1 = self._normalize_observations(obs1)
             obs2 = self._normalize_observations(obs2)
 
+        # Get images or image embeddings if using them
+        if self.use_images:
+            if self.use_image_embeddings:
+                images1 = self.data[self.image_embedding_key][start1:end1]
+                images2 = self.data[self.image_embedding_key][start2:end2]
+            else:
+                images1 = self.data[self.image_key][start1:end1]
+                images2 = self.data[self.image_key][start2:end2]
+        else:
+            images1 = images2 = None
+
         # Convert preference to tensor
         if isinstance(self.preferences[idx], torch.Tensor):
-            # If it's already a tensor, just clone it
-            pref = self.preferences[idx].long()
+            pref = self.preferences[idx].float()
         else:
-            # Otherwise create a new tensor
-            pref = torch.tensor(self.preferences[idx], dtype=torch.long)
+            pref = torch.tensor(self.preferences[idx], dtype=torch.float)
 
-        return obs1, actions1, obs2, actions2, pref
+        return {
+            'obs1': obs1.float(),
+            'obs2': obs2.float(),
+            'actions1': actions1.float(),
+            'actions2': actions2.float(),
+            'images1': images1.float() if images1 is not None else None,
+            'images2': images2.float() if images2 is not None else None,
+            'preference': pref.float()
+        }
 
 
 def shuffle_preference_dataset(dataset, seed=42):
@@ -192,6 +234,13 @@ def shuffle_preference_dataset(dataset, seed=42):
         normalize_obs=dataset.normalize_obs,
         norm_method=dataset.norm_method,
         norm_stats=dataset.norm_stats,
+        use_images=dataset.use_images,
+        image_key=dataset.image_key,
+        obs_key=dataset.obs_key,
+        action_key=dataset.action_key,
+        normalize_images=dataset.normalize_images,
+        use_image_embeddings=dataset.use_image_embeddings,
+        image_embedding_key=dataset.image_embedding_key
     )
 
     print(f"Shuffled preference dataset with {len(shuffled_dataset)} pairs")
@@ -238,11 +287,17 @@ def create_data_loaders(
             preference_dataset.preferences,
             normalize_obs=True,
             norm_method=norm_method,
+            use_images=preference_dataset.use_images,
+            image_key=preference_dataset.image_key,
+            obs_key=preference_dataset.obs_key,
+            action_key=preference_dataset.action_key,
+            normalize_images=preference_dataset.normalize_images,
+            use_image_embeddings=preference_dataset.use_image_embeddings,
+            image_embedding_key=preference_dataset.image_embedding_key
         )
 
     # Shuffle the dataset to ensure random sampling if requested
     if shuffle_dataset:
-        # print("Shuffling dataset before splitting...")
         preference_dataset = shuffle_preference_dataset(preference_dataset, seed=seed)
 
     # Calculate split sizes

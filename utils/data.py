@@ -38,9 +38,9 @@ class AttrDict(dict):
 def load_tensordict(file_path):
     """Load tensordict data from file."""
     data = torch.load(file_path, weights_only=False)
-    print(
-        f"Loaded TensorDict with shape: {data['image'].shape}, device: {data['image'].device}"
-    )
+    # print(
+    #     f"Loaded TensorDict with shape: {data['image'].shape}, device: {data['image'].device}"
+    # )
     print(f"Fields: {list(data.keys())}")
     return data
 
@@ -264,26 +264,48 @@ def segment_episodes_dynamic(data, segment_length, min_segment_overlap=0.2):
         # Create segments
         for i in range(num_segments):
             start_idx = int(i * stride)
-            end_idx = start_idx + segment_length - 1
+            end_idx = start_idx + segment_length
             
-            # Ensure end_idx doesn't exceed episode length
-            end_idx = min(end_idx, episode_len)
-            # Adjust start_idx if needed for last segment
-            if end_idx - start_idx < segment_length:
-                start_idx = max(0, end_idx - segment_length)
+            # Handle boundary cases to ensure exact segment length
+            if end_idx > episode_len:
+                # If we would exceed episode length, shift the window back
+                end_idx = episode_len
+                start_idx = end_idx - segment_length
+            
+            # Verify segment length
+            if end_idx - start_idx != segment_length:
+                print(f"Warning: Skipping invalid segment with length {end_idx - start_idx} != {segment_length}")
+                continue
             
             # Compute absolute indices in the full dataset
             abs_start_idx = episode_abs_start + start_idx
             abs_end_idx = episode_abs_start + end_idx
+            
+            # Double check segment length
+            assert abs_end_idx - abs_start_idx == segment_length, \
+                f"Invalid segment length: {abs_end_idx - abs_start_idx} != {segment_length}"
             
             segment_indices.append((abs_start_idx, abs_end_idx))
             
             # Create segment dictionary
             segment = {}
             for key in data.keys():
-                segment[key] = data[key][abs_start_idx:abs_end_idx]
+                segment_data = data[key][abs_start_idx:abs_end_idx]
+                # Verify the extracted segment has correct length
+                assert len(segment_data) == segment_length, \
+                    f"Segment data length mismatch for key {key}: {len(segment_data)} != {segment_length}"
+                segment[key] = segment_data
             
             segments.append(segment)
+            
+        # Print segment statistics
+        if segments:
+            print(f"Created {len(segments)} segments of length {segment_length}")
+            # Verify all segments have the same length
+            for key in data.keys():
+                lengths = [len(s[key]) for s in segments]
+                assert all(l == segment_length for l in lengths), \
+                    f"Inconsistent segment lengths for key {key}: {lengths}"
         
         abs_idx += episode_len
     

@@ -33,9 +33,13 @@ def predict_rewards(model, episodes):
     for i, episode in enumerate(tqdm(episodes, desc="Predicting rewards")):
         obs = episode["obs"]
         actions = episode["action"]
+        if "image" in episode:
+            images = episode["image"]
+        if "image_embedding" in episode:
+            images = episode["image_embedding"]
 
         # Predict rewards
-        predicted_rewards = model(obs, actions)
+        predicted_rewards = model(obs, actions, images)
         episode["predicted_rewards"] = predicted_rewards
 
     return episodes
@@ -119,42 +123,44 @@ def plot_reward_grid(
                 label="Predicted Rewards",
             )[0]  # Get the line object
 
-            # Plot ground truth rewards if available
-            gt_rewards = episode["reward"].detach().cpu().numpy()
-            ep_len = len(gt_rewards)
-            ep_id = rand_indices[idx]
 
-            # Bound GT rewards to [-1, 1] with min-max scaling
-            if (
-                reward_min is not None
-                and reward_max is not None
-                and reward_min != reward_max
-            ):
-                # Scale to [-1, 1] range
-                normalized_gt = (
-                    2 * (gt_rewards - reward_min) / (reward_max - reward_min) - 1
-                )
+            if "reward" in episode:
+                # Plot ground truth rewards if available
+                gt_rewards = episode["reward"].detach().cpu().numpy()
+                ep_len = len(gt_rewards)
+                ep_id = rand_indices[idx]
 
-                # Add range information to the title
-                ax.set_title(
-                    f"Episode {ep_id}, GT Range: [{gt_rewards.min():.2f}, {gt_rewards.max():.2f}]",
-                    fontsize=14,
-                )
-            else:
-                # If min and max are the same or not provided, use tanh as fallback
-                normalized_gt = np.tanh(gt_rewards)
+                # Bound GT rewards to [-1, 1] with min-max scaling
+                if (
+                    reward_min is not None
+                    and reward_max is not None
+                    and reward_min != reward_max
+                ):
+                    # Scale to [-1, 1] range
+                    normalized_gt = (
+                        2 * (gt_rewards - reward_min) / (reward_max - reward_min) - 1
+                    )
 
-                # Add range information to the title
-                raw_min, raw_max = gt_rewards.mibn(), gt_rewards.max()
-                ax.set_title(
-                    f"Episode {ep_id}, GT Range: [{raw_min:.2f}, {raw_max:.2f}]",
-                    fontsize=14,
-                )
+                    # Add range information to the title
+                    ax.set_title(
+                        f"Episode {ep_id}, GT Range: [{gt_rewards.min():.2f}, {gt_rewards.max():.2f}]",
+                        fontsize=14,
+                    )
+                else:
+                    # If min and max are the same or not provided, use tanh as fallback
+                    normalized_gt = np.tanh(gt_rewards)
 
-            # Plot on same axis with different color
-            gt_line = ax.plot(
-                steps, normalized_gt, "g--", linewidth=3, label="Ground Truth"
-            )[0]  # Get the line object
+                    # Add range information to the title
+                    raw_min, raw_max = gt_rewards.mibn(), gt_rewards.max()
+                    ax.set_title(
+                        f"Episode {ep_id}, GT Range: [{raw_min:.2f}, {raw_max:.2f}]",
+                        fontsize=14,
+                    )
+
+                # Plot on same axis with different color
+                gt_line = ax.plot(
+                    steps, normalized_gt, "g--", linewidth=3, label="Ground Truth"
+                )[0]  # Get the line object
 
             # Set grid
             ax.grid(True, alpha=0.3)
