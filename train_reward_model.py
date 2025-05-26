@@ -13,6 +13,7 @@ from omegaconf import DictConfig, OmegaConf
 from tqdm import tqdm
 import glob
 import matplotlib.pyplot as plt
+import numpy as np
 
 import wandb
 from models.reward_models import RewardModel
@@ -237,15 +238,16 @@ def main(cfg: DictConfig):
                 cfg.data.segment_pairs_path,
                 cfg.data.segment_indices_path
             )
+            all_segment_pairs = all_segment_pairs.tolist()
         else:
             print("Generating segments from data...")
             segments, segment_indices = segment_episodes(data_cpu, cfg.data.segment_length)
             all_segment_pairs = list(itertools.combinations(range(len(segment_indices)), 2))
-            random.seed(current_seed)
-            all_segment_pairs = random.sample(all_segment_pairs, cfg.data.num_pairs)
+
+        all_segment_pairs = random.sample(all_segment_pairs, cfg.data.num_pairs)
 
         # Load preferences if path is provided
-        if hasattr(cfg.data, 'preferences_dir'):
+        if hasattr(cfg.data, 'preferences_dir') and cfg.data.preferences_dir is not None:
             print("Loading preferences from files...")
             preferences, pref_stats = load_preferences_from_directory(cfg.data.preferences_dir)
             all_segment_pairs, preferences = filter_pairs_with_preferences(all_segment_pairs, preferences)
@@ -291,7 +293,6 @@ def main(cfg: DictConfig):
             normalize_obs=cfg.data.normalize_obs,
             norm_method=cfg.data.norm_method,
             num_workers=cfg.training.num_workers,
-            pin_memory=cfg.training.pin_memory
         )
 
         train_loader = dataloaders["train"]

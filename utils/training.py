@@ -39,8 +39,13 @@ def evaluate_model_on_test_set(model, test_loader, device):
         for batch in tqdm(test_loader, desc="Testing"):
             
             batch = {k: v.to(device) for k, v in batch.items()}
-            obs1, actions1, obs2, actions2, pref = batch["obs1"], batch["actions1"], batch["obs2"], batch["actions2"], batch["preference"]
-            images1, images2 = batch["images1"], batch["images2"]
+            obs1 = batch["obs1"]
+            actions1 = batch["actions1"]
+            obs2 = batch["obs2"]
+            actions2 = batch["actions2"]
+            pref = batch["preference"]
+            images1 = batch.get("images1")
+            images2 = batch.get("images2")
             if images1 is not None:
                 images1 = images1.float().to(device)
             if images2 is not None:

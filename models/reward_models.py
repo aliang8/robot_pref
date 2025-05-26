@@ -48,10 +48,13 @@ class RewardModel(nn.Module):
             image_shape=(224, 224) if use_images and not use_image_embeddings else None,
             seq_len=1
         )
+
+        self.action_embedder = nn.Linear(action_dim, embedding_dim)
         
         # Build MLP layers for reward prediction
         layers = []
-        prev_dim = embedding_dim + action_dim  # Embedder output + action
+        # prev_dim = embedding_dim * 2 
+        prev_dim = state_dim + action_dim
 
         for hidden_dim in hidden_dims:
             layers.append(nn.Linear(prev_dim, hidden_dim))
@@ -94,19 +97,22 @@ class RewardModel(nn.Module):
         
         batch_size, seq_len = obs.shape[0], obs.shape[1]
         
-        # Prepare inputs for embedder
-        inputs = {"states": obs}
-        if self.use_images:
-            if self.use_image_embeddings:
-                inputs["image_embed"] = images
-            else:
-                inputs["image"] = images
+        # # Prepare inputs for embedder
+        # inputs = {"states": obs}
+        # if self.use_images:
+        #     if self.use_image_embeddings:
+        #         inputs["image_embed"] = images
+        #     else:
+        #         inputs["image"] = images
 
-        # Get embeddings
-        embeddings = self.embedder(inputs)
-        
-        # Concatenate with actions
-        x = torch.cat([embeddings, action], dim=-1)
+        # # Get embeddings
+        # embeddings = self.embedder(inputs)
+        # action_embeddings = self.action_embedder(action)
+
+        # # Concatenate with actions
+        # x = torch.cat([embeddings, action_embeddings], dim=-1)
+
+        x = torch.cat([obs, action], dim=-1)
 
         # Apply model to get logits
         logits = self.model(x).squeeze(-1)  # Squeeze to remove last dimension if batch size = 1

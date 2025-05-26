@@ -5,7 +5,8 @@ defaults:
 # Number of models to train with different seeds
 num_seeds: 3
 
-task: pick_up_green_and_slide_pot_right
+# task: pick_up_green_and_slide_pot_right
+task: assembly-v2
 data_dir: /scr/shared/datasets/robot_pref
 
 data:
@@ -17,7 +18,8 @@ data:
   norm_method: "standard"
   segment_pairs_path: "${data_dir}/${task}/segment_pairs.npy"  # Optional: path to segment pairs file
   segment_indices_path: "${data_dir}/${task}/segment_start_end_indices.npy"  # Optional: path to segment indices file
-  preferences_dir: "${data_dir}/${task}/preferences"  # Optional: directory containing preference JSON files
+  # preferences_dir: "${data_dir}/${task}/preferences"  # Optional: directory containing preference JSON files
+  preferences_dir: null
 
   use_images: false
   image_key: "image"
