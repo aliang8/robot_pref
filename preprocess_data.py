@@ -19,7 +19,7 @@ from utils.data import load_tensordict, segment_episodes_dynamic
 from utils.seed import set_seed
 
 
-def compute_dtw_distance_matrix(segments: List[Dict], use_relative_eef: bool) -> np.ndarray:
+def compute_dtw_distance_matrix(segments: List[Dict], use_relative_eef: bool, use_subsequence: bool) -> np.ndarray:
     """Compute DTW distance matrix between segments.
 
     Args:
@@ -52,7 +52,10 @@ def compute_dtw_distance_matrix(segments: List[Dict], use_relative_eef: bool) ->
                     query = query[1:] - query[:-1]
                     reference = reference[1:] - reference[:-1]
 
-                cost, _ = dtw.get_single_match(query, reference)
+                if use_subsequence:
+                    cost, _ = dtw.get_single_match_subsequence(query, reference)
+                else:
+                    cost, _ = dtw.get_single_match(query, reference)
 
                 distance_matrix[i, j] = cost
                 distance_matrix[j, i] = cost
@@ -172,7 +175,7 @@ def main(cfg: DictConfig):
             print(f"DTW matrix file already exists: {dtw_matrix_file}")
         else:
             print("\nComputing DTW distance matrix...")
-            dtw_matrix = compute_dtw_distance_matrix(segments, cfg.dtw.use_relative_eef)
+            dtw_matrix = compute_dtw_distance_matrix(segments, cfg.dtw.use_relative_eef, cfg.dtw.use_subsequence)
             
             print(f"Saving DTW matrix to: {dtw_matrix_file}")
             with open(dtw_matrix_file, "wb") as f:

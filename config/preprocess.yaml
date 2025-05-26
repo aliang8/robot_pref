@@ -18,5 +18,6 @@ image_embedding:
 dtw:
   enabled: true
   use_relative_eef: false
+  use_subsequence: true
 
 seed: 42 
