@@ -81,6 +81,29 @@ def plot_dtw_cost_analysis(labeled_costs, model_dir, iteration, dtw_costs_per_it
     
     return output_path
 
+def compute_segment_return(data, segment_start_end):
+    """Compute the return (sum of rewards) for each segment."""
+    rewards = data["reward"]
+    segment_returns = []
+    for (start, end) in segment_start_end:
+        # rewards[start:end] is a 1D tensor or numpy array
+        segment_returns.append(float(rewards[start:end].sum().item() if hasattr(rewards[start:end], "sum") else np.sum(rewards[start:end])))
+    return segment_returns
+
+def save_labeled_pairs_info(labeled_pairs, labeled_preferences, segment_returns, output_path, is_augmented_list=None):
+    """
+    Save labeled pair info to a text file.
+    Each line: pair_id, segment_1_idx, segment_2_idx, ret1, ret2, preference, is_augmented
+    """
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(output_path, "w") as f:
+        f.write("pair_id,segment_1_idx,segment_2_idx,ret1,ret2,preference,is_augmented\n")
+        for idx, ((seg1, seg2), pref) in enumerate(zip(labeled_pairs, labeled_preferences)):
+            ret1 = segment_returns[seg1]
+            ret2 = segment_returns[seg2]
+            is_aug = is_augmented_list[idx] if is_augmented_list is not None else "NA"
+            f.write(f"{idx},{seg1},{seg2},{ret1},{ret2},{pref},{is_aug}\n")
+
 def active_preference_learning(cfg, seed):
     """Main function for active preference learning."""
 
@@ -136,6 +159,9 @@ def active_preference_learning(cfg, seed):
     else:
         _, segment_start_end = segment_episodes(data, cfg.data.segment_length)
 
+    # Compute returns for each segment for logging
+    segment_returns = compute_segment_return(data, segment_start_end)
+
     # Get all possible segment pairs, sample, and create dataset
     all_segment_pairs = list(itertools.combinations(range(len(segment_start_end)), 2))
     sampled_segment_pairs = random.sample(all_segment_pairs, cfg.data.subsamples)
@@ -158,12 +184,16 @@ def active_preference_learning(cfg, seed):
     for subdir in ["checkpoints", "rm_training", "reward_analysis"]:
         (model_dir / subdir).mkdir(parents=True, exist_ok=True)
 
+    # Prepare path for saving labeled pairs info
+    labeled_pairs_info_path = model_dir / "labeled_pairs_info.txt"
+
     # Active learning training loop
     num_queries = 0
     total_queries = cfg.active_learning.total_queries
     labeled_pairs = []
     labeled_costs = []
     labeled_preferences = []
+    is_augmented_list = []
     augmented_accuracy = []
     candidate_pairs = unlabeled_pairs
     iteration = 0
@@ -207,6 +237,7 @@ def active_preference_learning(cfg, seed):
         num_queries += 1
         candidate_pairs.remove(selected_query_pair)
         labeled_pairs.append(selected_query_pair)
+        is_augmented_list.append(False)  # Not augmented, original query
 
         # Get information for the selected query pair
         selected_query_pref = get_gt_preferences(data, segment_start_end, [selected_query_pair])[0]
@@ -223,6 +254,7 @@ def active_preference_learning(cfg, seed):
             dtw_augmented_pairs = []
             dtw_augmented_preferences = []
             dtw_augmented_preferences_costs = []
+            dtw_augmented_is_aug = []
             print(f"DTW augmenting (k={dtw_k_augment})")
             i, j = selected_query_pair
             if selected_query_pref == 1:
@@ -231,6 +263,7 @@ def active_preference_learning(cfg, seed):
                     if sim_idx != j:
                         dtw_augmented_pairs.append((sim_idx, j))
                         dtw_augmented_preferences.append(1)
+                        dtw_augmented_is_aug.append(True)
                         cost = distance_matrix[sim_idx, j]
                         dtw_augmented_preferences_costs.append(cost)
                         iteration_dtw_costs.append(cost)
@@ -239,6 +272,7 @@ def active_preference_learning(cfg, seed):
                     if sim_idx != i:
                         dtw_augmented_pairs.append((i, sim_idx))
                         dtw_augmented_preferences.append(1)
+                        dtw_augmented_is_aug.append(True)
                         cost = distance_matrix[i, sim_idx]
                         dtw_augmented_preferences_costs.append(cost)
                         iteration_dtw_costs.append(cost)
@@ -248,6 +282,7 @@ def active_preference_learning(cfg, seed):
                     if sim_idx != i:
                         dtw_augmented_pairs.append((i, sim_idx))
                         dtw_augmented_preferences.append(2)
+                        dtw_augmented_is_aug.append(True)
                         cost = distance_matrix[i, sim_idx]
                         dtw_augmented_preferences_costs.append(cost)
                         iteration_dtw_costs.append(cost)
@@ -256,6 +291,7 @@ def active_preference_learning(cfg, seed):
                     if sim_idx != j:
                         dtw_augmented_pairs.append((sim_idx, j))
                         dtw_augmented_preferences.append(2)
+                        dtw_augmented_is_aug.append(True)
                         cost = distance_matrix[sim_idx, j]
                         dtw_augmented_preferences_costs.append(cost)
                         iteration_dtw_costs.append(cost)
@@ -263,6 +299,7 @@ def active_preference_learning(cfg, seed):
             labeled_pairs.extend(dtw_augmented_pairs)
             labeled_preferences.extend(dtw_augmented_preferences)
             labeled_costs.extend(dtw_augmented_preferences_costs)
+            is_augmented_list.extend(dtw_augmented_is_aug)
             print(f"DTW augmented pairs: {len(dtw_augmented_pairs)}")
             augmented_pref_with_rewards = get_gt_preferences(data, segment_start_end, dtw_augmented_pairs)
             augmented_acc = (np.array(augmented_pref_with_rewards) == np.array(dtw_augmented_preferences)).mean()
@@ -275,8 +312,17 @@ def active_preference_learning(cfg, seed):
         # Store the DTW costs for this iteration
         metrics["dtw_costs_per_iter"].append(iteration_dtw_costs)
 
+        # Save labeled pairs info to file after each iteration
+        save_labeled_pairs_info(labeled_pairs, labeled_preferences, segment_returns, labeled_pairs_info_path, is_augmented_list=is_augmented_list)
+
         # Create dataset and data loaders
-        ensemble_dataset = PreferenceDataset(data, labeled_pairs, segment_start_end, labeled_preferences, costs=labeled_costs if cfg.dtw_augmentation.enabled and cfg.dtw_augmentation.use_heuristic_beta else None)
+        ensemble_dataset = PreferenceDataset(
+            data, 
+            labeled_pairs, 
+            segment_start_end, 
+            labeled_preferences, 
+            costs=labeled_costs if cfg.dtw_augmentation.enabled and cfg.dtw_augmentation.use_heuristic_beta else None,
+        )
         data_loaders = create_data_loaders(
             ensemble_dataset,
             train_ratio=1.0,
