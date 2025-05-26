@@ -5,9 +5,12 @@ import inspect
 import numpy as np
 from env.robomimic_lowdim import RobomimicLowdimWrapper
 
-import robomimic.utils.file_utils as FileUtils
-import robomimic.utils.obs_utils as ObsUtils
-import robomimic.utils.env_utils as EnvUtils
+try:
+    import robomimic.utils.file_utils as FileUtils
+    import robomimic.utils.obs_utils as ObsUtils
+    import robomimic.utils.env_utils as EnvUtils
+except:
+    pass
 import os
 from pathlib import Path
 

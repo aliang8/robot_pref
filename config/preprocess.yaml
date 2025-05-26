@@ -1,0 +1,23 @@
+defaults:
+  - _self_
+
+data:
+  data_path: "/scr2/shared/pref/datasets/robomimic/can/mg_image_dense.pt"
+  segment_length: 32
+  use_relative_eef: false
+  overwrite: false
+
+image_embedding:
+  enabled: true
+  model_name: "resnet50"  # Options: resnet50, r3m, radio-g, radio-h, radio-l, radio-b, e-radio
+  device: "cuda"
+  feature_fmt: "NCHW"
+  use_spatial_features: false
+  batch_size: 32
+
+dtw:
+  enabled: true
+  use_relative_eef: false
+  use_subsequence: true
+
+seed: 42 
