@@ -2,7 +2,27 @@ import random
 
 import torch
 from torch.utils.data import DataLoader, Dataset, random_split
+from torch.utils.data._utils.collate import default_collate
 
+
+def custom_collate(batch):
+    """Custom collate function to handle None values."""
+    if isinstance(batch[0], dict):
+        collated = {}
+        for key in batch[0]:
+            values = [d[key] for d in batch]
+            if all(v is None for v in values):
+                collated[key] = None
+            else:
+                # For mixed None and Tensor: skip None for collating
+                non_none_values = [v for v in values if v is not None]
+                try:
+                    collated[key] = default_collate(non_none_values)
+                except:
+                    collated[key] = values  # fallback to list of values
+        return collated
+    else:
+        return default_collate(batch)
 
 class PreferenceDataset(Dataset):
     """Dataset for segment preference pairs."""
@@ -23,7 +43,7 @@ class PreferenceDataset(Dataset):
         action_key="action",
         normalize_images=True,
         use_image_embeddings=False,
-        image_embedding_key="image_embedding"
+        image_embedding_key="image_embedding",
     ):
         """
         Initialize the dataset for preference learning.
@@ -199,6 +219,8 @@ class PreferenceDataset(Dataset):
                 cost = torch.tensor(cost, dtype=torch.float)
             else:
                 cost = cost.float()
+        else:
+            cost = None
 
         return {
             'obs1': obs1.float(),
@@ -210,6 +232,22 @@ class PreferenceDataset(Dataset):
             'preference': pref.float(),
             'cost': cost.float() if cost is not None else None
         }
+
+
+        # item = {
+        #     'obs1': obs1.float(),
+        #     'obs2': obs2.float(),
+        #     'actions1': actions1.float(),
+        #     'actions2': actions2.float(),
+        #     'images1': images1.float() if images1 is not None else None,
+        #     'images2': images2.float() if images2 is not None else None,
+        #     'preference': pref.float(),
+        #     'cost': cost.float() if cost is not None else None
+        # }
+
+        # # Remove keys that are None
+        # item = {k: v for k, v in item.items() if v is not None}
+        # return item
 
 
 def shuffle_preference_dataset(dataset, seed=42):
@@ -274,6 +312,7 @@ def create_data_loaders(
     normalize_obs=False,
     norm_method="standard",
     shuffle_dataset=True,
+    custom_collate_fn=custom_collate
 ):
     """Create data loaders for training, validation, and testing.
 
@@ -341,6 +380,7 @@ def create_data_loaders(
         pin_memory=True,
         persistent_workers=True,
         prefetch_factor=2,
+        collate_fn=custom_collate_fn,
     )
 
     val_loader = DataLoader(
@@ -350,6 +390,7 @@ def create_data_loaders(
         pin_memory=True,
         persistent_workers=True,
         prefetch_factor=2,
+        collate_fn=custom_collate_fn,
     )
 
     test_loader = DataLoader(
@@ -359,6 +400,7 @@ def create_data_loaders(
         pin_memory=True,
         persistent_workers=True,
         prefetch_factor=2,
+        collate_fn=custom_collate_fn,
     )
 
     return {
@@ -408,3 +450,4 @@ def load_preferences_data(file_path):
 
     print(f"Loaded {len(segment_pairs)} preference pairs")
     return segment_pairs, segment_indices, preferences, data
+

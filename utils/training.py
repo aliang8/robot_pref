@@ -37,8 +37,8 @@ def evaluate_model_on_test_set(model, test_loader, device):
 
     with torch.no_grad():
         for batch in tqdm(test_loader, desc="Testing"):
-            
-            batch = {k: v.to(device) for k, v in batch.items()}
+            # Move data to device
+            batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
             obs1, actions1, obs2, actions2, pref = batch["obs1"], batch["actions1"], batch["obs2"], batch["actions2"], batch["preference"]
             images1, images2 = batch["images1"], batch["images2"]
             if images1 is not None:
@@ -169,13 +169,14 @@ def train_model(
 
         for _, batch in enumerate(progress_bar):
             # Move data to device
-            batch = {k: v.to(device) for k, v in batch.items()}
-            obs1, actions1, obs2, actions2, pref = batch["obs1"], batch["actions1"], batch["obs2"], batch["actions2"], batch["preference"]
+            batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
+            obs1, actions1, obs2, actions2, pref, cost = batch["obs1"], batch["actions1"], batch["obs2"], batch["actions2"], batch["preference"], batch["cost"]
             images1, images2 = batch["images1"], batch["images2"]
             if images1 is not None:
                 images1 = images1.float().to(device)
             if images2 is not None:
                 images2 = images2.float().to(device)
+
             optimizer.zero_grad(set_to_none=True)
 
             # Compute rewards directly using the forward method

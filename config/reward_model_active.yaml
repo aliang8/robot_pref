@@ -34,6 +34,12 @@ training:
   num_workers: 0
   pin_memory: True
 
+wandb:
+  use_wandb: False
+  project: robot_pref
+  entity: clvr
+  name: null  # Will be auto-generated if null 
+
 defaults:
   - reward_model
   - _self_
