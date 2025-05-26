@@ -1,0 +1,35 @@
+data:
+  data_path: ${data_path}
+  num_pairs: 100
+  segment_length: 32
+  normalize_obs: true
+  norm_method: "standard"
+  use_images: false
+  image_key: "image"
+  obs_key: "obs"
+  action_key: "action"
+  use_image_embeddings: false
+
+model:
+  hidden_dims: [256, 256]
+  image_model: "resnet50"
+  embedding_dim: 256
+  lr: 1e-3  # Higher learning rate for faster convergence
+
+training:
+  num_epochs: 10  # Reduced epochs for faster training
+  batch_size: 32
+  num_workers: 4
+  pin_memory: true
+
+output:
+  output_dir: "outputs"
+  model_dir_name: "reward_model_DATASET_NAME"
+
+wandb:
+  use_wandb: false
+  project: "robot_pref"
+  entity: "aliang"
+  name: null
+  tags: ["quick_train"]
+  notes: "Quick training configuration for active learning" 

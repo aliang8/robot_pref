@@ -19,18 +19,19 @@ from utils.data import load_tensordict, segment_episodes_dynamic
 from utils.seed import set_seed
 
 
-def compute_dtw_distance_matrix(segments: List[Dict], use_relative_eef: bool, use_subsequence: bool) -> np.ndarray:
+def compute_dtw_distance_matrix(segments: List[Dict], use_relative_eef: bool, dtw_type: str = "dtw") -> np.ndarray:
     """Compute DTW distance matrix between segments.
 
     Args:
         segments: List of segments to compute distances between
         use_relative_eef: Whether to use relative EEF positions
+        dtw_type: Type of DTW to compute ("dtw" or "sdtw")
 
     Returns:
         distance_matrix: Matrix of DTW distances between segments
     """
     n_segments = len(segments)
-    print(f"Computing DTW distance matrix for {n_segments} segments")
+    print(f"Computing {dtw_type.upper()} distance matrix for {n_segments} segments")
 
     distance_matrix = np.zeros((n_segments, n_segments))
     min_dist = float("inf")
@@ -40,7 +41,7 @@ def compute_dtw_distance_matrix(segments: List[Dict], use_relative_eef: bool, us
     non_finite_count = 0
 
     total_comparisons = n_segments * (n_segments - 1) // 2
-    with tqdm(total=total_comparisons, desc="Computing DTW distances") as pbar:
+    with tqdm(total=total_comparisons, desc=f"Computing {dtw_type.upper()} distances") as pbar:
         for i in range(n_segments):
             for j in range(i + 1, n_segments):
                 # EE positions
@@ -52,9 +53,9 @@ def compute_dtw_distance_matrix(segments: List[Dict], use_relative_eef: bool, us
                     query = query[1:] - query[:-1]
                     reference = reference[1:] - reference[:-1]
 
-                if use_subsequence:
+                if dtw_type == "sdtw":
                     cost, _ = dtw.get_single_match_subsequence(query, reference)
-                else:
+                else:  # dtw_type == "dtw"
                     cost, _ = dtw.get_single_match(query, reference)
 
                 distance_matrix[i, j] = cost
@@ -74,11 +75,11 @@ def compute_dtw_distance_matrix(segments: List[Dict], use_relative_eef: bool, us
     if count > 0:
         avg_dist = sum_dist / count
         print(
-            f"Distance statistics - Min: {min_dist:.2f}, Max: {max_dist:.2f}, Avg: {avg_dist:.2f}"
+            f"{dtw_type.upper()} distance statistics - Min: {min_dist:.2f}, Max: {max_dist:.2f}, Avg: {avg_dist:.2f}"
         )
     if non_finite_count > 0:
         print(
-            f"WARNING: {non_finite_count} distances used fallback due to non-finite DTW values"
+            f"WARNING: {non_finite_count} {dtw_type.upper()} distances used fallback due to non-finite values"
         )
     return distance_matrix
 
@@ -167,19 +168,33 @@ def main(cfg: DictConfig):
     np.save(output_dir / 'segment_pairs.npy', segment_pairs)
     print(f"Saved segment indices and pairs to {output_dir}")
 
-    # Compute DTW matrix if enabled
+    # Compute DTW matrices if enabled
     if cfg.dtw.enabled:
+        # Compute standard DTW matrix
         dtw_matrix_file = output_dir / f"dtw_matrix_{cfg.data.segment_length}.pkl"
         
         if os.path.exists(dtw_matrix_file) and not cfg.data.overwrite:
             print(f"DTW matrix file already exists: {dtw_matrix_file}")
         else:
             print("\nComputing DTW distance matrix...")
-            dtw_matrix = compute_dtw_distance_matrix(segments, cfg.dtw.use_relative_eef, cfg.dtw.use_subsequence)
+            dtw_matrix = compute_dtw_distance_matrix(segments, cfg.dtw.use_relative_eef, "dtw")
             
             print(f"Saving DTW matrix to: {dtw_matrix_file}")
             with open(dtw_matrix_file, "wb") as f:
                 pickle.dump((dtw_matrix, segment_indices), f)
+
+        # Compute S-DTW matrix
+        sdtw_matrix_file = output_dir / f"sdtw_matrix_{cfg.data.segment_length}.pkl"
+        
+        if os.path.exists(sdtw_matrix_file) and not cfg.data.overwrite:
+            print(f"S-DTW matrix file already exists: {sdtw_matrix_file}")
+        else:
+            print("\nComputing S-DTW distance matrix...")
+            sdtw_matrix = compute_dtw_distance_matrix(segments, cfg.dtw.use_relative_eef, "sdtw")
+            
+            print(f"Saving S-DTW matrix to: {sdtw_matrix_file}")
+            with open(sdtw_matrix_file, "wb") as f:
+                pickle.dump((sdtw_matrix, segment_indices), f)
 
     # Compute image embeddings if enabled
     if cfg.image_embedding.enabled and "image" in data:

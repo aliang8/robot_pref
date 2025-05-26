@@ -170,27 +170,42 @@ def train_model(
         for _, batch in enumerate(progress_bar):
             # Move data to device
             batch = {k: v.to(device) for k, v in batch.items()}
-            obs1, actions1, obs2, actions2, pref = batch["obs1"], batch["actions1"], batch["obs2"], batch["actions2"], batch["preference"]
-            images1, images2 = batch["images1"], batch["images2"]
-            if images1 is not None:
-                images1 = images1.float().to(device)
-            if images2 is not None:
-                images2 = images2.float().to(device)
+           
             optimizer.zero_grad(set_to_none=True)
 
-            # Compute rewards directly using the forward method
-            reward1 = model(obs1, actions1, images1)
-            reward2 = model(obs2, actions2, images2)
+            # Get batch data
+            obs1, obs2 = batch["obs1"].float().to(device), batch["obs2"].float().to(device)
+            actions1, actions2 = batch["actions1"].float().to(device), batch["actions2"].float().to(device)
+            pref = batch["preference"].float().to(device)
 
+            # Handle optional batch items
+            images1 = batch.get("images1")
+            images2 = batch.get("images2")
+            if images1 is not None and images2 is not None:
+                images1 = images1.float().to(device)
+                images2 = images2.float().to(device)
+            
+            cost = batch.get("cost")
+            if cost is not None:
+                cost = cost.float().to(device)
+
+            # Forward pass
+            if images1 is not None and images2 is not None:
+                r1 = model(obs1, actions1, images1)
+                r2 = model(obs2, actions2, images2)
+            else:
+                r1 = model(obs1, actions1)
+                r2 = model(obs2, actions2)
+
+            # Handle ensemble and non-ensemble models consistently with training
             if is_ensemble:
                 # [B, N, T] -> [B, N]
-                return1 = reward1.sum(dim=-1)
-                return2 = reward2.sum(dim=-1)
+                return1 = r1.sum(dim=-1)
+                return2 = r2.sum(dim=-1)
                 pref = pref.unsqueeze(0).repeat(model.num_models, 1)
-                cost = cost.unsqueeze(0).repeat(model.num_models, 1) if cost is not None else None
             else:
-                return1 = reward1.sum(dim=1)
-                return2 = reward2.sum(dim=1)
+                return1 = r1.sum(dim=1)
+                return2 = r2.sum(dim=1)
 
             # Bradley-Terry loss already applies mean over batch dimension
             # For ensemble models, we get one loss per model
@@ -226,37 +241,40 @@ def train_model(
             )
 
             with torch.no_grad():
-                for batch_idx, (obs1, actions1, obs2, actions2, pref) in enumerate(
-                    val_progress
-                ):
-                    obs1, actions1, obs2, actions2, pref = (
-                        obs1.to(device),
-                        actions1.to(device),
-                        obs2.to(device),
-                        actions2.to(device),
-                        pref.to(device),
-                    )
+                for batch_idx, batch in enumerate(val_progress):
+                    # Handle optional batch items
+                    obs1 = batch.get('obs1').to(device)
+                    obs2 = batch.get('obs2').to(device)
+                    actions1 = batch.get('actions1').to(device)
+                    actions2 = batch.get('actions2').to(device)
+                    pref = batch.get('preference').to(device)
 
                     # Compute rewards directly
                     reward1 = model(obs1, actions1)
                     reward2 = model(obs2, actions2)
 
                     if is_ensemble:
-                        # [B, N, T] -> [B, N]
-                        return1 = reward1.sum(dim=-1)
-                        return2 = reward2.sum(dim=-1)
-                        pref = pref.unsqueeze(0).repeat(model.num_models, 1)
+                        # For ensemble model:
+                        # reward1, reward2 shape: [num_models, batch_size, seq_len]
+                        # Sum over sequence length to get returns
+                        return1 = reward1.sum(dim=-1)  # [num_models, batch_size]
+                        return2 = reward2.sum(dim=-1)  # [num_models, batch_size]
+                        
+                        # Expand preferences for each model
+                        # pref shape: [batch_size] -> [num_models, batch_size]
+                        pref = pref.unsqueeze(0).expand(model.num_models, -1)
                     else:
-                        return1 = reward1.sum(dim=1)
-                        return2 = reward2.sum(dim=1)
+                        # For single model:
+                        # reward1, reward2 shape: [batch_size, seq_len]
+                        return1 = reward1.sum(dim=1)  # [batch_size]
+                        return2 = reward2.sum(dim=1)  # [batch_size]
 
-                    # Bradley-Terry loss already applies mean over batch dimension
+                    # Bradley-Terry loss handles the mean over batch dimension
                     batch_loss = bradley_terry_loss(return1, return2, pref)
 
                     # For ensemble, take mean across models
-                    batch_loss = (
-                        batch_loss.mean() if batch_loss.dim() > 0 else batch_loss
-                    )
+                    if is_ensemble:
+                        batch_loss = batch_loss.mean()
 
                     val_loss += batch_loss.item()
                     val_progress.set_postfix({"loss": f"{batch_loss.item():.4f}"})
