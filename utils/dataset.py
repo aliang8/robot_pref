@@ -13,6 +13,7 @@ class PreferenceDataset(Dataset):
         segment_pairs,
         segment_indices,
         preferences,
+        costs=None,
         normalize_obs=False,
         norm_method="standard",
         norm_stats=None,
@@ -31,8 +32,9 @@ class PreferenceDataset(Dataset):
             data: Dictionary containing observations, actions, and optionally images/embeddings
             segment_pairs: List of pairs of segment indices [(i, j), ...]
             segment_indices: List of segment start/end indices [(start, end), ...]
-            preferences: List of preferences (1 = first segment preferred, 0 = second segment preferred, 0.5 = equal)
-            normalize_obs: Whether to normalize observations
+            preferences: List of preferences (1 = first segment preferred, 2 = second segment preferred)
+            costs: DTW costs for each segment pair (optional)
+            normalize_obs: Whether to normalize observations (default: False)
             norm_method: Normalization method ('standard' or 'minmax')
             norm_stats: Pre-computed normalization statistics dict (optional)
             use_images: Whether to include images in the data
@@ -51,6 +53,7 @@ class PreferenceDataset(Dataset):
         self.segment_pairs = segment_pairs
         self.segment_indices = segment_indices
         self.preferences = preferences
+        self.costs = costs
         self.normalize_obs = normalize_obs
         self.norm_method = norm_method
         self.use_images = use_images
@@ -189,6 +192,14 @@ class PreferenceDataset(Dataset):
         else:
             pref = torch.tensor(self.preferences[idx], dtype=torch.float)
 
+        # Costs
+        if self.costs is not None:
+            cost = self.costs[idx]
+            if not isinstance(cost, torch.Tensor):
+                cost = torch.tensor(cost, dtype=torch.float)
+            else:
+                cost = cost.float()
+
         return {
             'obs1': obs1.float(),
             'obs2': obs2.float(),
@@ -196,7 +207,8 @@ class PreferenceDataset(Dataset):
             'actions2': actions2.float(),
             'images1': images1.float() if images1 is not None else None,
             'images2': images2.float() if images2 is not None else None,
-            'preference': pref.float()
+            'preference': pref.float(),
+            'cost': cost.float() if cost is not None else None
         }
 
 
@@ -224,6 +236,10 @@ def shuffle_preference_dataset(dataset, seed=42):
     # Create shuffled segment_pairs and preferences
     shuffled_segment_pairs = [dataset.segment_pairs[i] for i in indices]
     shuffled_preferences = [dataset.preferences[i] for i in indices]
+    if dataset.costs is not None:
+        shuffled_costs = [dataset.costs[i] for i in indices]
+    else:
+        shuffled_costs = None
 
     # Create a new dataset with the shuffled pairs
     shuffled_dataset = PreferenceDataset(
@@ -231,6 +247,7 @@ def shuffle_preference_dataset(dataset, seed=42):
         shuffled_segment_pairs,
         dataset.segment_indices,
         shuffled_preferences,
+        costs=shuffled_costs,
         normalize_obs=dataset.normalize_obs,
         norm_method=dataset.norm_method,
         norm_stats=dataset.norm_stats,
@@ -253,7 +270,6 @@ def create_data_loaders(
     val_ratio=0.1,
     batch_size=32,
     num_workers=4,
-    pin_memory=True,
     seed=42,
     normalize_obs=False,
     norm_method="standard",
@@ -267,7 +283,6 @@ def create_data_loaders(
         val_ratio: Proportion of data to use for validation
         batch_size: Batch size for data loaders
         num_workers: Number of workers for data loading
-        pin_memory: Whether to pin memory for faster GPU transfer
         seed: Random seed for reproducibility
         normalize_obs: Whether to normalize observations
         norm_method: Normalization method ('standard' or 'minmax')
@@ -276,6 +291,7 @@ def create_data_loaders(
     Returns:
         Dictionary containing 'train', 'val', and 'test' data loaders, plus dataset sizes
     """
+
     # Apply normalization to the dataset if requested
     if normalize_obs and not preference_dataset.normalize_obs:
         print(f"Applying {norm_method} normalization to dataset")
@@ -285,6 +301,7 @@ def create_data_loaders(
             preference_dataset.segment_pairs,
             preference_dataset.segment_indices,
             preference_dataset.preferences,
+            costs=preference_dataset.costs,
             normalize_obs=True,
             norm_method=norm_method,
             use_images=preference_dataset.use_images,

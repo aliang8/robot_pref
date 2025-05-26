@@ -20,17 +20,18 @@ dtw_augmentation:
   enabled: false              # Set to true to enable DTW augmentation
   k_augment: 5                # Number of similar segments to find for each part of a pair
   max_dtw_segments: 5000      # Max segments for computing DTW matrix (null or remove for all).
+  use_heuristic_beta: false   # Use heuristic beta for BT Loss
 
 output:
   output_dir: results/active_reward_model
-  model_dir_name: "DATASET_NAME_active_${active_learning.uncertainty_method}_queries${active_learning.total_queries}_aug${dtw_augmentation.enabled}_k${dtw_augmentation.k_augment}"
+  model_dir_name: "DATASET_NAME_active_${active_learning.uncertainty_method}_queries${active_learning.total_queries}_aug${dtw_augmentation.enabled}_k${dtw_augmentation.k_augment}_beta${dtw_augmentation.use_heuristic_beta}_seed${random_seed}"
 
 training:
-  save_model_every: 25
+  save_model_every: 5
   reward_analysis_every: 5
   num_epochs: 50
   batch_size: 256
-  num_workers: 4
+  num_workers: 0
   pin_memory: True
 
 defaults:

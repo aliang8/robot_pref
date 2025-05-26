@@ -187,13 +187,14 @@ def train_model(
                 return1 = reward1.sum(dim=-1)
                 return2 = reward2.sum(dim=-1)
                 pref = pref.unsqueeze(0).repeat(model.num_models, 1)
+                cost = cost.unsqueeze(0).repeat(model.num_models, 1) if cost is not None else None
             else:
                 return1 = reward1.sum(dim=1)
                 return2 = reward2.sum(dim=1)
 
             # Bradley-Terry loss already applies mean over batch dimension
             # For ensemble models, we get one loss per model
-            loss = bradley_terry_loss(return1, return2, pref)
+            loss = bradley_terry_loss(return1, return2, pref, cost=cost)
 
             # For ensemble, take mean across models
             batch_loss = loss.mean() if loss.dim() > 0 else loss

@@ -15,7 +15,7 @@ from pathlib import Path
 # ============================================================================
 
 # Dataset configuration
-DATASET = "/project2/biyik_1165/hongmm/pref/datasets/robomimic/can/can_mg_image_dense_balanced.pt"
+DATASET = "/scr2/shared/pref/datasets/robomimic/can/can_mg_image_dense_balanced.pt"
 ENV_NAME = "can"  # Environment name
 
 # Reward model training configuration
@@ -41,8 +41,10 @@ REWARD_MODEL_TEMPLATE_ACTIVE = [
 # Grid search parameters for active reward model
 ACTIVE_REWARD_MODEL_GRID = {
     "active_learning.uncertainty_method": ["entropy", "disagreement"],  
-    "active_learning.total_queries": [25,50,100],
-    "dtw_augmentation.enabled": [True, False],
+    "active_learning.total_queries": [5],
+    "dtw_augmentation.enabled": [True],
+    "dtw_augmentation.use_heuristic_beta": [True],
+    "dtw_augmentation.k_augment": [5],
     "random_seed": [521]
 }
 
@@ -53,14 +55,14 @@ POLICY_TEMPLATE = [
     f"--config-name={POLICY_ALGORITHM}",
     f"data.data_path={DATASET}",
     f"data.env_name={ENV_NAME}",
-    "training.n_epochs=100",              # Number of training epochs
+    "training.n_epochs=125",              # Number of training epochs
     "data.use_ground_truth=false",        # Don't use ground truth rewards
     "data.use_zero_rewards=false",        # Don't use zero rewards
 ]
 
 USE_MULTIRUN = True  # Set to True to use multirun
 RANDOM_SEEDS = "521"  # Comma-separated list of seeds to use
-LAUNCHER = "slurm_carc"  # Launcher for multirun (usually "slurm" on clusters)
+LAUNCHER = "slurm"  # Launcher for multirun (usually "slurm" on clusters)
 
 # Current pipeline mode
 USE_ACTIVE_LEARNING = True

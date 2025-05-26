@@ -1,5 +1,5 @@
-import random
 import itertools
+import random
 
 import numpy as np
 import torch
@@ -52,6 +52,10 @@ def compute_uncertainty_scores(
     for seg_idx1, seg_idx2 in tqdm(segment_pairs, desc=f"Computing {method} scores"):
         reward1 = segment_rewards[seg_idx1]
         reward2 = segment_rewards[seg_idx2]
+
+        reward1 = reward1.sum(dim=1)
+        reward2 = reward2.sum(dim=1)
+
         logits = reward1 - reward2
 
         if method == "entropy":

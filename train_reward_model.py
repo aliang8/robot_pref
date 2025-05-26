@@ -1,39 +1,35 @@
+import itertools
 import os
-import pickle
+import random
 import time
 import json
 from pathlib import Path
-import numpy as np
-import pandas as pd
 
 import hydra
+import pandas as pd
 import torch
 import torch.nn.functional as F
 from omegaconf import DictConfig, OmegaConf
-
-import wandb
-import random
-import itertools
 from tqdm import tqdm
 import glob
 import matplotlib.pyplot as plt
 
+import wandb
 from models.reward_models import RewardModel
-
+from utils.analyze_rewards import analyze_rewards
 from utils.data import (
-    load_tensordict,
-    segment_episodes,
     get_gt_preferences,
+    load_tensordict,
     process_data_trajectories,
+    segment_episodes,
 )
 from utils.dataset import (
     PreferenceDataset,
     create_data_loaders,
 )
-from utils.training import train_model, evaluate_model_on_test_set
 from utils.seed import set_seed
+from utils.training import evaluate_model_on_test_set, train_model
 from utils.wandb import log_to_wandb
-from utils.analyze_rewards import analyze_rewards
 
 def load_preferences_from_directory(pref_dir):
     """
@@ -190,7 +186,6 @@ def main(cfg: DictConfig):
         
         # Set random seed for reproducibility
         set_seed(current_seed)
-        print(f"Random seed set to {current_seed}")
 
         # Initialize wandb for this seed
         if cfg.wandb.use_wandb:
@@ -398,7 +393,7 @@ def main(cfg: DictConfig):
         print(f"Test LogPDF: {log_prob_mean:.4f} ± {log_prob_std:.4f}")
         print("=" * 50)
         
-        with open(os.path.join(model_dir, f"summary.txt"), "w") as f:
+        with open(os.path.join(model_dir, "summary.txt"), "w") as f:
             f.write(f"Summary Statistics Across {num_seeds} Seeds:\n")
             f.write(f"Test Accuracy: {accuracy_mean:.4f} ± {accuracy_std:.4f}\n")
             f.write(f"Test LogPDF: {log_prob_mean:.4f} ± {log_prob_std:.4f}\n")

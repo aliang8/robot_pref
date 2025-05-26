@@ -11,6 +11,7 @@ import seaborn as sns
 from omegaconf import DictConfig, OmegaConf
 
 import wandb
+from wandb.errors import CommError
 
 sns.set_style("white")
 sns.set_style("ticks")
@@ -64,6 +65,12 @@ def create_display_name(path):
             match = aug_match.group(1) 
             if match == "True":
                 components["aug"] = "AG"
+
+        beta_match = re.search(r"beta([a-zA-Z]+)", parent_dir)
+        if beta_match:
+            match = beta_match.group(1)
+            if match == "True":
+                components["beta"] = "BH" # Beta heuristic
 
         max_match = re.search(r"max(\d+)", parent_dir)
         if max_match:
@@ -165,10 +172,21 @@ def fetch_wandb_runs(
         if hasattr(run, "user"):
             run_dict["user"] = run.user.username
 
-        # Try both possible epoch keys
-        history = run.history(keys=["eval/success_rate", "eval/epoch"])
-        if history.empty:
-            history = run.history(keys=["eval/success_rate", "epoch"])
+        
+
+        history = None
+        try:
+            history = run.history(keys=["eval/success_rate", "eval/epoch"])
+        except CommError as e:
+            print(f"Run {run.name}: CommError when fetching history with eval/epoch: {e}")
+            history = None
+
+        if history is None or history.empty:
+            try:
+                history = run.history(keys=["eval/success_rate", "epoch"])
+            except CommError as e:
+                print(f"Run {run.name}: CommError when fetching history with epoch: {e}")
+                history = None
 
         if not history.empty and "eval/success_rate" in history.columns:
             success_rates = history["eval/success_rate"].dropna().tolist()
