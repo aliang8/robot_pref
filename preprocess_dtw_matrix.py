@@ -71,13 +71,13 @@ def main():
     parser.add_argument(
         "--data_path",
         type=str,
-        default="/scr2/shared/pref/datasets/robomimic/can/mg_image_dense.pt",
+        default="/scr2/shared/pref/datasets/robomimic/lift/lift_mg_image_dense.pt",
         help="Path to trajectory data and save path",
     )
     parser.add_argument(
         "--segment_length",
         type=int,
-        default=64,
+        default=32,
         help="Length of each trajectory segment",
     )
     parser.add_argument(
