@@ -61,11 +61,11 @@ def compute_uncertainty_scores(
         if method == "entropy":
             probs = torch.sigmoid(logits)
             p = torch.clamp(probs, min=1e-4, max=1 - 1e-4)
-            entropy = -p * torch.log(p) - (1 - p) * torch.log(1 - p)
-            score = entropy.mean().item()
+            mean_p = p.mean()  # Average over ensemble
+            entropy = -mean_p * torch.log(mean_p) - (1 - mean_p) * torch.log(1 - mean_p)
+            score = entropy.item()
         elif method == "disagreement":
-            # score = logits.var().item()
-            score = logits.mean(1).var().item()
+            score = logits.var().item()
         else:
             raise ValueError(f"Invalid method: {method}")
         
