@@ -14,7 +14,7 @@ data:
   segment_length: 32
   num_segments: 50000
   num_pairs: 1000
-  normalize_obs: true
+  normalize_obs: false
   norm_method: "standard"
   segment_pairs_path: "${data_dir}/${task}/segment_pairs.npy"  # Optional: path to segment pairs file
   segment_indices_path: "${data_dir}/${task}/segment_start_end_indices.npy"  # Optional: path to segment indices file
@@ -39,8 +39,8 @@ model:
   
   # Distributional-specific parameters (used when is_distributional=true)
   lambda_weight: 1.0    # Weight for stochastic term in Bradley-Terry loss
-  alpha_reg: 0.1        # Weight for regularization loss
-  eta: 1.0              # Minimum entropy level for regularization
+  alpha_reg: 0.001        # Weight for regularization loss
+  eta: 10.0              # Minimum entropy level for regularization
   num_samples: 5        # Number of samples for approximating expectation
 
 training:

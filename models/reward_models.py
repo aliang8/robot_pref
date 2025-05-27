@@ -269,6 +269,7 @@ class DistributionalRewardModel(nn.Module):
         
         # Compute mean and variance
         reward_mean = self.mean_branch(mean_features).squeeze(-1)  # [batch_size, T]
+        reward_mean = torch.tanh(reward_mean)
         log_variance = self.variance_branch(var_features).squeeze(-1)  # [batch_size, T]
         
         # Convert log variance to variance (ensure positive)
