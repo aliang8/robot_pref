@@ -16,7 +16,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 import wandb
-from models.reward_models import RewardModel
+from models.reward_models import RewardModel, DistributionalRewardModel
 from utils.analyze_rewards import analyze_rewards
 from utils.data import (
     get_gt_preferences,
@@ -29,7 +29,7 @@ from utils.dataset import (
     create_data_loaders,
 )
 from utils.seed import set_seed
-from utils.training import evaluate_model_on_test_set, train_model
+from utils.training import evaluate_model_on_test_set, train_model, train_distributional_model
 from utils.wandb import log_to_wandb
 
 def load_preferences_from_directory(pref_dir):
@@ -299,19 +299,33 @@ def main(cfg: DictConfig):
         val_loader = dataloaders["val"]
         test_loader = dataloaders["test"]
 
-        # Initialize reward model
-        model = RewardModel(
-            state_dim, 
-            action_dim, 
-            hidden_dims=cfg.model.hidden_dims,
-            use_images=cfg.data.use_images,
-            image_model=cfg.model.image_model,
-            embedding_dim=cfg.model.embedding_dim,
-            use_image_embeddings=cfg.data.use_image_embeddings,
-            device=device
-        )
+        # Initialize reward model (regular or distributional)
+        if cfg.model.is_distributional:
+            print("Initializing distributional reward model...")
+            model = DistributionalRewardModel(
+                state_dim, 
+                action_dim, 
+                hidden_dims=cfg.model.hidden_dims,
+                use_images=cfg.data.use_images,
+                image_model=cfg.model.image_model,
+                embedding_dim=cfg.model.embedding_dim,
+                use_image_embeddings=cfg.data.use_image_embeddings,
+                device=device
+            )
+        else:
+            print("Initializing regular reward model...")
+            model = RewardModel(
+                state_dim, 
+                action_dim, 
+                hidden_dims=cfg.model.hidden_dims,
+                use_images=cfg.data.use_images,
+                image_model=cfg.model.image_model,
+                embedding_dim=cfg.model.embedding_dim,
+                use_image_embeddings=cfg.data.use_image_embeddings,
+                device=device
+            )
+        
         model = model.to(device)
-        print(f"Reward model: {model}")
         print(f"Total parameters: {sum(p.numel() for p in model.parameters())}")
 
         start_time = time.time()
@@ -324,17 +338,41 @@ def main(cfg: DictConfig):
 
         training_curve_path = os.path.join(model_dir, f"training_curve_{current_seed}.png")
 
-        print("\nTraining reward model...")
-        model, *_ = train_model(
-            model,
-            train_loader,
-            val_loader,
-            device,
-            num_epochs=cfg.training.num_epochs,
-            lr=cfg.model.lr,
-            wandb_run=wandb_run,
-            output_path=training_curve_path,
-        )
+        print(f"\nTraining {'distributional' if cfg.model.is_distributional else 'regular'} reward model...")
+        
+        if cfg.model.is_distributional:
+            # Use distributional training function with additional parameters
+            lambda_weight = cfg.model.get("lambda_weight", 1.0)
+            alpha_reg = cfg.model.get("alpha_reg", 0.1)
+            eta = cfg.model.get("eta", 1.0)
+            num_samples = cfg.model.get("num_samples", 5)
+            
+            model, *_ = train_distributional_model(
+                model,
+                train_loader,
+                val_loader,
+                device,
+                num_epochs=cfg.training.num_epochs,
+                lr=cfg.model.lr,
+                wandb_run=wandb_run,
+                output_path=training_curve_path,
+                lambda_weight=lambda_weight,
+                alpha_reg=alpha_reg,
+                eta=eta,
+                num_samples=num_samples,
+            )
+        else:
+            # Use regular training function
+            model, *_ = train_model(
+                model,
+                train_loader,
+                val_loader,
+                device,
+                num_epochs=cfg.training.num_epochs,
+                lr=cfg.model.lr,
+                wandb_run=wandb_run,
+                output_path=training_curve_path,
+            )
 
         training_time = time.time() - start_time
         hours, remainder = divmod(training_time, 3600)
@@ -343,7 +381,7 @@ def main(cfg: DictConfig):
         print(f"\nTraining completed in {int(hours)}h {int(minutes)}m {int(seconds)}s")
 
         # Evaluate on test set
-        test_metrics = evaluate_model_on_test_set(model, test_loader, device)
+        test_metrics = evaluate_model_on_test_set(model, test_loader, device, is_distributional=cfg.model.is_distributional)
         test_metrics["seed"] = current_seed
         all_test_metrics.append(test_metrics)
         
@@ -377,7 +415,8 @@ def main(cfg: DictConfig):
             output_file=os.path.join(model_dir, f"reward_grid_{current_seed}.png"),
             wandb_run=wandb_run,
             reward_max=reward_max,
-            reward_min=reward_min
+            reward_min=reward_min,
+            is_distributional=cfg.model.is_distributional
         )
 
     if len(seed_metrics) > 0:
@@ -400,7 +439,7 @@ def main(cfg: DictConfig):
             f.write(f"Test LogPDF: {log_prob_mean:.4f} ± {log_prob_std:.4f}\n")
             f.write("=" * 50 + "\n")
         
-    print("\nReward model training complete!")
+    print(f"\n{'distributional' if cfg.model.is_distributional else 'regular'} reward model training complete!")
     print("Model saved to: ", model_path)
 
 if __name__ == "__main__":

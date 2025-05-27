@@ -122,12 +122,18 @@ python train_policy.py \
 
 # train reward model with active
 python train_reward_model_active.py \
-    data.data_path=/scr/aliang80/robot_pref/dataset_mw/buffer_assembly-v2_balanced.pt \
+    data.data_path=/scr/shared/datasets/robot_pref/assembly-v2/assembly-v2.pt \
     active_learning.uncertainty_method=entropy \
     active_learning.total_queries=50 \
     dtw_augmentation.enabled=true \
     hydra/launcher=slurm \
     --multirun
+
+python train_reward_model.py \
+    data.data_path=/scr/shared/datasets/robot_pref/assembly-v2/assembly-v2.pt \
+    data.num_pairs=100 \
+    model.is_distributional=true
+
 
 python run_reward_policy_pipeline.py 
 

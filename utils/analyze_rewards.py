@@ -17,12 +17,13 @@ sns.set_context("talk")
 plt.rc("text", usetex=True)  # camera-ready formatting + latex in plots
 
 
-def predict_rewards(model, episodes):
+def predict_rewards(model, episodes, is_distributional=False):
     """Predict rewards for each step in the episodes using the reward model.
 
     Args:
         model: Trained reward model
         episodes: List of episode dictionaries
+        is_distributional: Whether the model is distributional
 
     Returns:
         List of episode dictionaries with predicted rewards added
@@ -33,14 +34,28 @@ def predict_rewards(model, episodes):
     for i, episode in enumerate(tqdm(episodes, desc="Predicting rewards")):
         obs = episode["obs"]
         actions = episode["action"]
+        images = None
         if "image" in episode:
             images = episode["image"]
-        if "image_embedding" in episode:
+        elif "image_embedding" in episode:
             images = episode["image_embedding"]
 
-        # Predict rewards
-        predicted_rewards = model(obs, actions, images)
-        episode["predicted_rewards"] = predicted_rewards
+        # Predict rewards based on model type
+        if is_distributional:
+            # For distributional models, get both mean and variance
+            predicted_mean, predicted_variance = model(obs, actions, images, return_distribution=True)
+            episode["predicted_rewards"] = predicted_mean
+            episode["predicted_variance"] = predicted_variance
+            
+            # Also compute confidence intervals (mean ± 2*std)
+            predicted_std = torch.sqrt(predicted_variance)
+            episode["predicted_std"] = predicted_std
+            episode["predicted_upper"] = predicted_mean + 2 * predicted_std
+            episode["predicted_lower"] = predicted_mean - 2 * predicted_std
+        else:
+            # For regular models, just get the reward prediction
+            predicted_rewards = model(obs, actions, images)
+            episode["predicted_rewards"] = predicted_rewards
 
     return episodes
 
@@ -53,16 +68,19 @@ def plot_reward_grid(
     smooth_window=5,
     reward_min=None,
     reward_max=None,
+    is_distributional=False,
 ):
     """Plot a grid of reward curves for multiple episodes.
 
     Args:
         episodes: List of episode dictionaries with rewards
-        output_dir: Directory to save the plot
+        rand_indices: Random indices for episode selection
+        output_file: File path to save the plot
         grid_size: Tuple of (rows, cols) for the grid layout
         smooth_window: Window size for smoothing the rewards
         reward_min: Global minimum reward for normalization
         reward_max: Global maximum reward for normalization
+        is_distributional: Whether the model is distributional
     """
     rows, cols = grid_size
     fig, axes = plt.subplots(
@@ -80,6 +98,7 @@ def plot_reward_grid(
     # Keep track of the line objects for the legend
     pred_line = None
     gt_line = None
+    uncertainty_patch = None
 
     # Process each episode in the grid
     for i in range(rows):
@@ -114,6 +133,29 @@ def plot_reward_grid(
                 pred_rewards_smooth = pred_rewards
                 steps_smooth = steps
 
+            # Add uncertainty bands for distributional models (plot first so it's behind the line)
+            if is_distributional and "predicted_upper" in episode and "predicted_lower" in episode:
+                pred_upper = episode["predicted_upper"].detach().cpu().numpy()
+                pred_lower = episode["predicted_lower"].detach().cpu().numpy()
+                
+                # Smooth uncertainty bounds if needed
+                if smooth_window > 1 and len(pred_upper) > smooth_window:
+                    pred_upper_smooth = np.convolve(pred_upper, kernel, mode="valid")
+                    pred_lower_smooth = np.convolve(pred_lower, kernel, mode="valid")
+                else:
+                    pred_upper_smooth = pred_upper
+                    pred_lower_smooth = pred_lower
+                
+                # Plot uncertainty band
+                uncertainty_patch = ax.fill_between(
+                    steps_smooth,
+                    pred_lower_smooth,
+                    pred_upper_smooth,
+                    alpha=0.2,
+                    color="blue",
+                    label="Uncertainty (2std)"
+                )
+
             # Plot predicted rewards (save the line object for legend)
             pred_line = ax.plot(
                 steps_smooth,
@@ -122,7 +164,6 @@ def plot_reward_grid(
                 linewidth=3,
                 label="Predicted Rewards",
             )[0]  # Get the line object
-
 
             if "reward" in episode:
                 # Plot ground truth rewards if available
@@ -151,7 +192,7 @@ def plot_reward_grid(
                     normalized_gt = np.tanh(gt_rewards)
 
                     # Add range information to the title
-                    raw_min, raw_max = gt_rewards.mibn(), gt_rewards.max()
+                    raw_min, raw_max = gt_rewards.min(), gt_rewards.max()
                     ax.set_title(
                         f"Episode {ep_id}, GT Range: [{raw_min:.2f}, {raw_max:.2f}]",
                         fontsize=14,
@@ -176,16 +217,31 @@ def plot_reward_grid(
     fig.supxlabel("Environment Steps", fontsize=20, y=0.1)
     fig.supylabel("Per-step reward", fontsize=20, x=0.05)
 
-    # Add a common legend at the bottom of the figure with two columns
-    if pred_line and gt_line:
+    # Add a common legend at the bottom of the figure
+    legend_elements = []
+    legend_labels = []
+    
+    if pred_line:
+        legend_elements.append(pred_line)
+        legend_labels.append("Predicted Rewards")
+    
+    if gt_line:
+        legend_elements.append(gt_line)
+        legend_labels.append("Ground Truth")
+    
+    if uncertainty_patch and is_distributional:
+        legend_elements.append(uncertainty_patch)
+        legend_labels.append("Uncertainty (2std)")
+
+    if legend_elements:
         fig.legend(
-            [pred_line, gt_line],
-            ["Predicted Rewards", "Ground Truth"],
+            legend_elements,
+            legend_labels,
             loc="lower center",
-            ncol=2,
+            ncol=len(legend_elements),
             fontsize=14,
             frameon=False,
-            bbox_to_anchor=(0.5, 0.05),
+            bbox_to_anchor=(0.5, 0.02),
         )
 
     # Save the figure
@@ -202,6 +258,7 @@ def analyze_rewards(
     reward_max=None,
     wandb_run=None,
     random_seed=None,
+    is_distributional=False,
 ):
     """Analyze rewards for episodes in the dataset.
 
@@ -210,7 +267,11 @@ def analyze_rewards(
         episodes: List of episode dictionaries
         output_file: Directory to save the plots. If None, uses the model directory.
         num_episodes: Number of episodes to analyze
+        reward_min: Minimum reward for normalization
+        reward_max: Maximum reward for normalization
         wandb_run: Wandb run to log
+        random_seed: Random seed for reproducibility
+        is_distributional: Whether the model is distributional
     """
     if random_seed is not None:
         set_seed(random_seed)
@@ -221,7 +282,7 @@ def analyze_rewards(
 
     # Predict rewards for each episode
     print("Predicting rewards for episodes")
-    sampled_episodes = predict_rewards(model, sampled_episodes)
+    sampled_episodes = predict_rewards(model, sampled_episodes, is_distributional=is_distributional)
 
     # Plot rewards in a grid
     print("Creating reward grid plot")
@@ -232,6 +293,7 @@ def analyze_rewards(
         grid_size=(3, 3),
         reward_min=reward_min,
         reward_max=reward_max,
+        is_distributional=is_distributional,
     )
 
     print(f"Analysis complete. Results saved to {output_file}")
