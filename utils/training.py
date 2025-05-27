@@ -13,28 +13,37 @@ sns.set_context("talk")
 plt.rc("text", usetex=True)  # camera-ready formatting + latex in plots
 
 
-def evaluate_model_on_test_set(model, test_loader, device):
+def evaluate_model_on_test_set(model, test_loader, device, data=None, segment_start_end=None, num_vis=4):
     """Evaluate model performance on the test set.
 
     Args:
         model: Trained reward model (single model or ensemble)
         test_loader: DataLoader for test data
         device: Device to run evaluation on
+        num_vis: Number of top preferences to visualize as videos
 
     Returns:
         Dictionary containing evaluation metrics
     """
+    import io
+    import numpy as np
+    import matplotlib.pyplot as plt
+    import matplotlib.animation as animation
+
     print("\nEvaluating on test set...")
     model.eval()
     test_loss = 0
     test_acc = 0
     test_total = 0
 
+    # For visualization: store the first num_vis examples
+    vis_examples = []
+
     # Check if model is an ensemble
     is_ensemble = hasattr(model, "num_models") and model.num_models > 1
 
     with torch.no_grad():
-        for batch in tqdm(test_loader, desc="Testing"):
+        for batch_idx, batch in enumerate(tqdm(test_loader, desc="Testing")):
             # Move data to device
             batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
             obs1, actions1, obs2, actions2, pref = batch["obs1"], batch["actions1"], batch["obs2"], batch["actions2"], batch["preference"]
@@ -55,14 +64,15 @@ def evaluate_model_on_test_set(model, test_loader, device):
                 return2 = reward2.sum(dim=-1)
                 # Replicate preferences for ensemble models
                 ensemble_pref = pref.unsqueeze(0).repeat(model.num_models, 1)
-
-                import ipdb
-
-                ipdb.set_trace()
+                # For visualization, just use the first model in the ensemble
+                reward1_vis = reward1[0]
+                reward2_vis = reward2[0]
             else:
                 # Standard non-ensemble model
                 return1 = reward1.sum(dim=1)  # Sum over time dimension
                 return2 = reward2.sum(dim=1)
+                reward1_vis = reward1
+                reward2_vis = reward2
 
             # Compute standard loss
             loss = bradley_terry_loss(return1, return2, pref)
@@ -70,15 +80,48 @@ def evaluate_model_on_test_set(model, test_loader, device):
 
             # Get predictions
             pred_pref = torch.where(
-                return1 > return2, torch.ones_like(pref), torch.ones_like(pref) * 2
+                return1 > return2, 
+                torch.ones_like(pref),  # First trajectory preferred
+                torch.where(
+                    return1 < return2,
+                    torch.zeros_like(pref),  # Second trajectory preferred
+                    torch.ones_like(pref) * 0.5  # Equal preference
+                )
             )
 
-
             # Compute accuracy (same for both cases)
-            correct = (pred_pref == pref).sum().item()
+            # For equal preferences (0.5), we consider it correct if the model predicts either 0.5 or if the returns are very close
+            correct = torch.where(
+                pref == 0.5,
+                (pred_pref == 0.5) | (torch.abs(return1 - return2) < 1e-3),  # Equal preference case
+                pred_pref == pref  # Regular preference case
+            ).sum().item()
             test_acc += correct
             test_total += pref.size(0)
 
+            # Collect examples for visualization
+            if len(vis_examples) < num_vis:
+                # For each sample in the batch, up to num_vis
+                for i in range(reward1_vis.shape[0]):
+                    if len(vis_examples) >= num_vis:
+                        break
+                    # Get rewards over time as numpy arrays
+                    r1 = reward1_vis[i].detach().cpu().numpy()
+                    r2 = reward2_vis[i].detach().cpu().numpy()
+                    # Get preference and prediction
+                    gt_pref = float(pref[i].item())
+                    pred = float(pred_pref[i].item())
+                    # Get segment indices from the dataset
+                    seg1 = test_loader.dataset.segment_pairs[batch_idx * test_loader.batch_size + i][0]
+                    seg2 = test_loader.dataset.segment_pairs[batch_idx * test_loader.batch_size + i][1]
+                    vis_examples.append({
+                        "reward1": r1,
+                        "reward2": r2,
+                        "gt_pref": gt_pref,
+                        "pred_pref": pred,
+                        "seg1": seg1,
+                        "seg2": seg2,
+                    })
 
     avg_test_loss = (
         test_loss / len(test_loader) if len(test_loader) > 0 else float("nan")
@@ -91,6 +134,106 @@ def evaluate_model_on_test_set(model, test_loader, device):
     print(
         f"Correctly predicted {test_acc} out of {test_total} preference pairs ({test_accuracy:.2%})"
     )
+
+    # --- Visualization and wandb logging ---
+    if len(vis_examples) > 0 and wandb.run is not None and data is not None and segment_start_end is not None:
+        videos = []
+        for idx, ex in enumerate(vis_examples):
+            r1 = ex["reward1"]
+            r2 = ex["reward2"]
+            gt_pref = ex["gt_pref"]
+            pred_pref = ex["pred_pref"]
+            seg1 = ex["seg1"]
+            seg2 = ex["seg2"]
+
+            # Create a matplotlib animation of the reward curves
+            fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(18, 4))
+            ax1.set_title(f"Test Pair {idx+1}: GT Pref={gt_pref}, Pred={pred_pref}")
+            ax1.set_xlabel("Timestep")
+            ax1.set_ylabel("Reward")
+            ax1.grid(True)
+            line1, = ax1.plot([], [], label="Traj 1", color="blue")
+            line2, = ax1.plot([], [], label="Traj 2", color="red")
+            ax1.legend(loc="upper right")
+
+            # Set up image displays side by side
+            ax2.set_title("Trajectory 1")
+            ax2.axis('off')
+            img1 = ax2.imshow(np.zeros((64, 64, 3)), animated=True)
+
+            ax3.set_title("Trajectory 2")
+            ax3.axis('off')
+            img2 = ax3.imshow(np.zeros((64, 64, 3)), animated=True)
+
+            max_len = max(len(r1), len(r2))
+            ax1.set_xlim(0, max_len-1)
+            min_y = min(np.min(r1), np.min(r2))
+            max_y = max(np.max(r1), np.max(r2))
+            ax1.set_ylim(min_y - 0.1 * abs(min_y), max_y + 0.1 * abs(max_y))
+
+            def init():
+                line1.set_data([], [])
+                line2.set_data([], [])
+                img1.set_data(np.zeros((64, 64, 3)))
+                img2.set_data(np.zeros((64, 64, 3)))
+                return line1, line2, img1, img2
+
+            def animate(t):
+                x = np.arange(0, t+1)
+                y1 = r1[:t+1] if t < len(r1) else r1
+                y2 = r2[:t+1] if t < len(r2) else r2
+                line1.set_data(x[:len(y1)], y1)
+                line2.set_data(x[:len(y2)], y2)
+
+                # Update images if available
+                if "image" in data:
+                    # Get the current frame indices for both trajectories
+                    start1, end1 = segment_start_end[seg1]
+                    start2, end2 = segment_start_end[seg2]
+                    
+                    # Get the current frame for each trajectory
+                    if t < len(r1):
+                        frame1 = data["image"][start1 + t].cpu().numpy()
+                        img1.set_data(frame1)
+                    if t < len(r2):
+                        frame2 = data["image"][start2 + t].cpu().numpy()
+                        img2.set_data(frame2)
+
+                return line1, line2, img1, img2
+
+            frames = max_len
+            ani = animation.FuncAnimation(
+                fig, animate, init_func=init, frames=frames, interval=100, blit=True
+            )
+
+            # Add a text annotation at the end to indicate which trajectory is preferred
+            def add_pref_annotation():
+                if gt_pref == 1:
+                    ax1.annotate("Preferred", xy=(len(r1)-1, r1[-1]), xytext=(len(r1)-1, r1[-1]+0.1),
+                                color="blue", fontsize=12, arrowprops=dict(arrowstyle="->", color="blue"))
+                elif gt_pref == 0:
+                    ax1.annotate("Preferred", xy=(len(r2)-1, r2[-1]), xytext=(len(r2)-1, r2[-1]+0.1),
+                                color="red", fontsize=12, arrowprops=dict(arrowstyle="->", color="red"))
+                else:  # gt_pref == 0.5
+                    ax1.annotate("Equal", xy=(len(r1)-1, (r1[-1] + r2[-1])/2), xytext=(len(r1)-1, (r1[-1] + r2[-1])/2 + 0.1),
+                                color="green", fontsize=12, arrowprops=dict(arrowstyle="->", color="green"))
+            # Save animation to buffer
+            import tempfile
+            with tempfile.NamedTemporaryFile(suffix='.mp4', delete=False) as tmp:
+                ani.save(tmp.name, writer="ffmpeg", fps=10)
+                # Read the temporary file into memory
+                with open(tmp.name, 'rb') as f:
+                    buf = io.BytesIO(f.read())
+            # Clean up the temporary file
+            import os
+            os.unlink(tmp.name)
+            
+            plt.close(fig)
+            buf.seek(0)
+            # Add annotation as a final frame (not possible in animation, so just note in title)
+            videos.append(wandb.Video(buf, caption=f"Test Pair {idx+1}: GT Pref={gt_pref}, Pred={pred_pref}", format="mp4"))
+
+        wandb.log({"test_set_reward_videos": videos})
 
     return {
         "test_loss": avg_test_loss,

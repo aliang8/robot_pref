@@ -117,7 +117,7 @@ def get_gt_preferences(data, segment_indices, pairs):
         pairs (list): List of tuples containing segment indices to compute ground truth preferences.
 
     Returns:
-        list: List of preference labels (1 if first segment preferred, 2 if second segment preferred).
+        list: List of preference labels (1 if first segment preferred, 0 if second segment preferred, 0.5 if equal).
     """
     if "reward" not in data:
         raise ValueError("Dataset does not contain 'reward' key. Can't compute ground truth preferences! ")
@@ -135,8 +135,10 @@ def get_gt_preferences(data, segment_indices, pairs):
         # Determine preference
         if return1 > return2:
             preference_labels.append(1)
-        else:
-            preference_labels.append(2)
+        elif return1 < return2:
+            preference_labels.append(0)
+        else:  # equal
+            preference_labels.append(0.5)
 
     return preference_labels
 
