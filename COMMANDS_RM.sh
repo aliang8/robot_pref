@@ -1,7 +1,7 @@
 # bc
 python train_policy.py --config-name=bc_robomimic \
-    data.env_name=can \
-    data.data_path=/scr2/shared/pref/datasets/robomimic/can/mg_image_dense.pt
+    data.env_name=lift \
+    data.data_path=/scr2/shared/pref/datasets/robomimic/lift/mg_image_dense.pt
 
 # train reward model with active offline learning
 python train_reward_model_active.py \

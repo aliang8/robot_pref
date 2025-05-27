@@ -29,7 +29,7 @@ output:
 training:
   save_model_every: 5
   reward_analysis_every: 5
-  num_epochs: 50
+  num_epochs: 300
   batch_size: 256
   num_workers: 0
   pin_memory: True
