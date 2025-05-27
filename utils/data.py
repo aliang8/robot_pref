@@ -119,6 +119,9 @@ def get_gt_preferences(data, segment_indices, pairs):
     Returns:
         list: List of preference labels (1 if first segment preferred, 2 if second segment preferred).
     """
+    if "reward" not in data:
+        raise ValueError("Dataset does not contain 'reward' key. Can't compute ground truth preferences! ")
+    
     preference_labels = []
 
     for idx1, idx2 in tqdm(pairs):

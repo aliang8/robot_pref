@@ -11,6 +11,10 @@ from omegaconf import DictConfig, OmegaConf
 
 import wandb
 from models import EnsembleRewardModel
+from train_reward_model import (
+    filter_pairs_with_preferences,
+    load_preferences_from_directory,
+)
 from utils.active_query_selection import (
     select_active_pref_query,
 )
@@ -226,18 +230,33 @@ def active_preference_learning(cfg):
 
     # Get all possible segment pairs, sample, and create dataset
     all_segment_pairs = list(itertools.combinations(range(len(segment_start_end)), 2))
-    sampled_segment_pairs = random.sample(all_segment_pairs, cfg.data.subsamples)
-    print(f"Sampled {len(sampled_segment_pairs)} pairs")
-    test_indices = random.sample(range(len(sampled_segment_pairs)), cfg.data.num_test_pairs)
-    test_pairs = [sampled_segment_pairs[i] for i in test_indices]
-    test_preferences = get_gt_preferences(data, segment_start_end, test_pairs)
+
+    # Prepare segment pairs and preferences for test set
+    if hasattr(cfg.data, 'preferences_dir'):
+        print("Loading preferences from files...")
+        preferences, pref_stats = load_preferences_from_directory(cfg.data.preferences_dir)
+        all_segment_pairs, preferences = filter_pairs_with_preferences(all_segment_pairs, preferences)
+
+        # np array to list of tuples
+        all_segment_pairs = [tuple(pair) for pair in all_segment_pairs]
+
+        test_pairs = all_segment_pairs[-cfg.data.num_test_pairs:]
+        test_preferences = preferences[-cfg.data.num_test_pairs:]
+
+        # Updating the preferences that are used for training
+        preferences = preferences[:-cfg.data.num_test_pairs]
+    else:
+        total_samples = cfg.data.subsamples + cfg.data.num_test_pairs
+        print(f"Sampling {cfg.data.subsamples} pairs for training and {cfg.data.num_test_pairs} pairs for testing from {len(all_segment_pairs)} total pairs")
+        all_segment_pairs = random.sample(all_segment_pairs, total_samples)
+        test_pairs = all_segment_pairs[-cfg.data.num_test_pairs:]
+        test_preferences = get_gt_preferences(data, segment_start_end, test_pairs)
+
     test_dataset = PreferenceDataset(data, test_pairs, segment_start_end, test_preferences)
     test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=64, collate_fn=custom_collate)
     print(f"Test dataset: {len(test_dataset)} pairs")
 
-    sampled_indices = list(range(len(sampled_segment_pairs)))
-    remaining_indices = list(set(sampled_indices) - set(test_indices))
-    unlabeled_pairs = [sampled_segment_pairs[i] for i in remaining_indices]
+    unlabeled_pairs = all_segment_pairs[:-cfg.data.num_test_pairs]
     print(f"Unlabeled pairs after test set: {len(unlabeled_pairs)}")
 
     # Create directory for saving
@@ -248,7 +267,6 @@ def active_preference_learning(cfg):
 
     # Prepare path for saving labeled pairs info
     labeled_pairs_info_path = model_dir / "labeled_pairs_info.txt"
-
 
     # Active learning training loop
     num_queries = 0
@@ -273,8 +291,10 @@ def active_preference_learning(cfg):
     # Only add DTW cost tracking if DTW is enabled
     if dtw_enabled:
         metrics["selected_pair_dtw_costs"] = []
-        metrics["augmented_accuracy"] = []
 
+        # TODO: once we have more human annotated prefs, we can compute the augmented accuracy, not enough right now
+        if not hasattr(cfg.data, 'preferences_dir'):
+            metrics["augmented_accuracy"] = []
 
     while num_queries < total_queries:
         iteration += 1
@@ -296,12 +316,19 @@ def active_preference_learning(cfg):
 
         # Remove the selected query pair from unlabeled pairs
         num_queries += 1
+        selected_query_pair_index = candidate_pairs.index(selected_query_pair)
         candidate_pairs.remove(selected_query_pair)
         labeled_pairs.append(selected_query_pair)
         is_augmented_list.append(False)  # Not augmented, original query
 
-        # Get information for the selected query pair
-        selected_query_pref = get_gt_preferences(data, segment_start_end, [selected_query_pair])[0]
+        # Get preference for selected query pair from human or use ground truth
+        if hasattr(cfg.data, 'preferences_dir'):
+            print("Using human preferences for selected query pair...")
+            selected_query_pref = preferences[selected_query_pair_index]
+            preferences = np.delete(preferences, selected_query_pair_index) # Remove the selected query pair preference from the list
+        else:
+            print("Computing ground truth preference for selected query pair...")
+            selected_query_pref = get_gt_preferences(data, segment_start_end, [selected_query_pair])[0]
         labeled_preferences.append(selected_query_pref)
 
         # Add cost for selected query pair if DTW is enabled
@@ -376,12 +403,18 @@ def active_preference_learning(cfg):
             labeled_costs.extend(dtw_augmented_preferences_costs)
             is_augmented_list.extend(dtw_augmented_is_aug)
             print(f"DTW augmented pairs: {len(dtw_augmented_pairs)}")
-            augmented_pref_with_rewards = get_gt_preferences(data, segment_start_end, dtw_augmented_pairs)
-            augmented_acc = (np.array(augmented_pref_with_rewards) == np.array(dtw_augmented_preferences)).mean()
-            print(f"Augmented accuracy: {augmented_acc:.4f}")
-            for dtw_augmented_pair in dtw_augmented_pairs:
-                if dtw_augmented_pair in candidate_pairs:
-                    candidate_pairs.remove(dtw_augmented_pair)
+
+            # TODO: once we have more human annotated prefs, we can compute the augmented accuracy, not enough right now
+            if hasattr(cfg.data, 'preferences_dir'):
+                print("Using human preferences, skipping augmented accuracy calculation.")
+                augmented_acc = None
+            else:
+                augmented_pref_with_rewards = get_gt_preferences(data, segment_start_end, dtw_augmented_pairs)
+                augmented_acc = (np.array(augmented_pref_with_rewards) == np.array(dtw_augmented_preferences)).mean()
+                print(f"Augmented accuracy: {augmented_acc:.4f}")
+                for dtw_augmented_pair in dtw_augmented_pairs:
+                    if dtw_augmented_pair in candidate_pairs:
+                        candidate_pairs.remove(dtw_augmented_pair)
 
         # Save labeled pairs info to file after each iteration
         save_labeled_pairs_info(labeled_pairs, labeled_preferences, segment_returns, labeled_pairs_info_path, is_augmented_list=is_augmented_list)
@@ -442,7 +475,8 @@ def active_preference_learning(cfg):
         if dtw_enabled:
             # Only log DTW costs if enabled
             metrics["selected_pair_dtw_costs"].append(selected_query_pair_cost)
-            metrics["augmented_accuracy"].append(augmented_acc)
+            if "augmented_accuracy" in metrics:
+                metrics["augmented_accuracy"].append(augmented_acc)
         metrics["iterations"].append(iteration)
 
         if wandb.run is not None:

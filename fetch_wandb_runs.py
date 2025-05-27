@@ -124,7 +124,7 @@ def fetch_wandb_runs(
             print(
                 f"Warning: Invalid date format '{after_date}'. Expected format: YYYY-MM-DD"
             )
-
+    
     runs = api.runs(f"{entity}/{project}")
     print(f"Found {len(runs)} total runs")
 
@@ -147,6 +147,10 @@ def fetch_wandb_runs(
                 run_date = run_date.replace(tzinfo=None)
             if run_date < date_filter:
                 include_run = False
+
+        if "algorithm" not in run.config:
+            print(f"Run {run.name} has no algorithm specified, skipping")
+            include_run = False
 
         if include_run:
             filtered_runs.append(run)
@@ -171,8 +175,6 @@ def fetch_wandb_runs(
         }
         if hasattr(run, "user"):
             run_dict["user"] = run.user.username
-
-        
 
         history = None
         try:

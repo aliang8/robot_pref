@@ -13,7 +13,7 @@ data:
   segment_length: 64
   num_segments: 10000
   num_pairs: 5000
-  subsamples: 50000
+  subsamples: 51000
   num_test_pairs: 10000
 
 dtw_augmentation:

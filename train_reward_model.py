@@ -1,18 +1,17 @@
+import glob
 import itertools
+import json
 import os
 import random
 import time
-import json
 from pathlib import Path
 
 import hydra
+import numpy as np
 import pandas as pd
 import torch
-import torch.nn.functional as F
 from omegaconf import DictConfig, OmegaConf
 from tqdm import tqdm
-import glob
-import matplotlib.pyplot as plt
 
 import wandb
 from models.reward_models import RewardModel
@@ -30,6 +29,7 @@ from utils.dataset import (
 from utils.seed import set_seed
 from utils.training import evaluate_model_on_test_set, train_model
 from utils.wandb import log_to_wandb
+
 
 def load_preferences_from_directory(pref_dir):
     """
@@ -291,7 +291,7 @@ def main(cfg: DictConfig):
             normalize_obs=cfg.data.normalize_obs,
             norm_method=cfg.data.norm_method,
             num_workers=cfg.training.num_workers,
-            pin_memory=cfg.training.pin_memory
+            # pin_memory=cfg.training.pin_memory
         )
 
         train_loader = dataloaders["train"]
@@ -356,7 +356,6 @@ def main(cfg: DictConfig):
         seed_metrics.append({
             "seed": current_seed,
             "test_accuracy": test_metrics["test_accuracy"],
-            "test_log_prob": test_metrics["avg_logpdf"],
             "model_path": model_path
         })
 

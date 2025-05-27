@@ -219,16 +219,17 @@ def train_model(
             )
 
             with torch.no_grad():
-                for batch_idx, (obs1, actions1, obs2, actions2, pref) in enumerate(
+                for _, batch in enumerate(
                     val_progress
                 ):
-                    obs1, actions1, obs2, actions2, pref = (
-                        obs1.to(device),
-                        actions1.to(device),
-                        obs2.to(device),
-                        actions2.to(device),
-                        pref.to(device),
-                    )
+                    # Move data to device
+                    batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
+                    obs1, actions1, obs2, actions2, pref, cost = batch["obs1"], batch["actions1"], batch["obs2"], batch["actions2"], batch["preference"], batch["cost"]
+                    images1, images2 = batch["images1"], batch["images2"]
+                    if images1 is not None:
+                        images1 = images1.float().to(device)
+                    if images2 is not None:
+                        images2 = images2.float().to(device)
 
                     # Compute rewards directly
                     reward1 = model(obs1, actions1)

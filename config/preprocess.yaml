@@ -2,7 +2,7 @@ defaults:
   - _self_
 
 data:
-  data_path: "/scr2/shared/pref/datasets/robomimic/can/can_mg_image_dense_balanced.pt"
+  data_path: "/scr/shared/datasets/robot_pref/lift/lift_mg_image_dense.pt"
   segment_length: 32
   use_relative_eef: true
   overwrite: false
