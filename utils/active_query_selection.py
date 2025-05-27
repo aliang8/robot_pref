@@ -53,22 +53,22 @@ def compute_uncertainty_scores(
         reward1 = segment_rewards[seg_idx1]
         reward2 = segment_rewards[seg_idx2]
 
-        reward1 = reward1.sum(dim=1)
-        reward2 = reward2.sum(dim=1)
+        ret1 = reward1.sum(dim=1)
+        ret2 = reward2.sum(dim=1)
 
-        logits = reward1 - reward2
+        logits = ret1 - ret2
 
         if method == "entropy":
             probs = torch.sigmoid(logits)
-            p = torch.clamp(probs, min=1e-8, max=1 - 1e-8)
-            entropy = -p * torch.log(p) - (1 - p) * torch.log(1 - p)
-            score = entropy.mean().item()
+            p = torch.clamp(probs, min=1e-4, max=1 - 1e-4)
+            mean_p = p.mean()  # Average over ensemble
+            entropy = -mean_p * torch.log(mean_p) - (1 - mean_p) * torch.log(1 - mean_p)
+            score = entropy.item()
         elif method == "disagreement":
-            # score = logits.var().item()
-            score = logits.mean(1).var().item()
+            score = logits.var().item()
         else:
             raise ValueError(f"Invalid method: {method}")
-
+        
         uncertainty_scores.append(score)
 
     return uncertainty_scores
@@ -123,18 +123,13 @@ def select_active_pref_query(
         method=uncertainty_method,
     )
 
-    sorted_scores = sorted(uncertainty_scores, reverse=True)
-    print("Top 5 uncertainty scores: ", sorted_scores[:5])
-
     # Sort pairs by uncertainty (highest to lowest)
+    sorted_scores = sorted(uncertainty_scores, reverse=True)
     sorted_indices = np.argsort(uncertainty_scores)[::-1]
+    print(f"Top uncertainty scores: {sorted_scores[:5]} indices: {sorted_indices[:5]}")
     
-    # First, select top uncertain_subsample pairs based on uncertainty
-    if uncertainty_subsample < len(sorted_indices):
-        top_uncertain_indices = sorted_indices[:uncertainty_subsample]
-    else:
-        top_uncertain_indices = sorted_indices
-    
+    # Select top uncertain_subsample pairs based on uncertainty
+    top_uncertain_indices = sorted_indices[:uncertainty_subsample]
     top_uncertain_pairs = [candidate_pairs[i] for i in top_uncertain_indices]
     
     # If DTW matrix is provided, use it to prioritize diverse pairs among the uncertain ones
@@ -169,4 +164,11 @@ def select_active_pref_query(
         
         # Get pairs in order of uncertainty
         all_pairs_ranked = [candidate_pairs[i] for i in top_uncertain_indices]
+
+        print(f"Selected {len(all_pairs_ranked)} pairs based on uncertainty method '{uncertainty_method}'")
+        for idx, pair in enumerate(all_pairs_ranked):
+            i, j = pair
+            print(f"Selected pair {idx+1}/{len(all_pairs_ranked)}: {pair}")
+            print(f"  Uncertainty: {uncertainty_scores[sorted_indices[top_uncertain_indices[idx]]]:.4f}")
+    
         return all_pairs_ranked
