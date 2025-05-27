@@ -452,7 +452,7 @@ def analyze_latent_space(model, test_loader, device, output_path, num_samples=10
     plt.close()
 
 
-@hydra.main(config_path="../config", config_name="skill_vae", version_base=None)
+@hydra.main(config_path="config", config_name="skill_vae", version_base=None)
 def main(cfg: DictConfig):
     # Set random seed
     set_seed(cfg.random_seed)
