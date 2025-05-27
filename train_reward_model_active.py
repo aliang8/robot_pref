@@ -489,8 +489,6 @@ def active_preference_learning(cfg):
                 random_seed=cfg.random_seed
             )
 
-
-
     # Plot active learning metrics
     plot_active_learning_metrics(model_dir, metrics)
 

@@ -2,9 +2,9 @@ defaults:
   - _self_
 
 data:
-  data_path: "/scr2/shared/pref/datasets/robomimic/lift/lift_mg_image_dense.pt"
+  data_path: "/scr2/shared/pref/datasets/robomimic/can/can_mg_image_dense_balanced.pt"
   segment_length: 32
-  use_relative_eef: false
+  use_relative_eef: true
   overwrite: false
 
 image_embedding:
@@ -17,7 +17,7 @@ image_embedding:
 
 dtw:
   enabled: true
-  use_relative_eef: false
-  use_subsequence: true
+  use_relative_eef: true
+  use_subsequence: false
 
 seed: 42 

@@ -29,7 +29,7 @@ training:
   n_epochs: 100
   n_steps_per_epoch: 1000
   eval_interval: 10
-  eval_episodes: 10
+  eval_episodes: 20
   save_interval: 10
 
 evaluation:

@@ -234,21 +234,6 @@ class PreferenceDataset(Dataset):
         }
 
 
-        # item = {
-        #     'obs1': obs1.float(),
-        #     'obs2': obs2.float(),
-        #     'actions1': actions1.float(),
-        #     'actions2': actions2.float(),
-        #     'images1': images1.float() if images1 is not None else None,
-        #     'images2': images2.float() if images2 is not None else None,
-        #     'preference': pref.float(),
-        #     'cost': cost.float() if cost is not None else None
-        # }
-
-        # # Remove keys that are None
-        # item = {k: v for k, v in item.items() if v is not None}
-        # return item
-
 
 def shuffle_preference_dataset(dataset, seed=42):
     """
