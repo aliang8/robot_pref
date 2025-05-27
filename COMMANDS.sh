@@ -143,3 +143,10 @@ python run_reward_policy_pipeline.py
 python train_reward_model.py \
     data.data_path=/scr/shared/datasets/robot_pref/pick_up_green_and_slide_pot_right/pick_up_green_and_slide_pot_right_embedded.pt \
     task=pick_up_green_and_slide_pot_right
+
+# Training Skill VAE for representation learning
+python train_skill_vae.py \
+    data.data_path=/scr/shared/datasets/robot_pref/assembly-v2/assembly-v2.pt \
+    model.latent_dim=32 \
+    data.segment_length=32 \
+    training.num_epochs=100
