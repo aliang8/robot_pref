@@ -1,5 +1,4 @@
 import matplotlib.pyplot as plt
-import numpy as np
 import seaborn as sns
 import torch
 from torch import optim
@@ -30,7 +29,6 @@ def evaluate_model_on_test_set(model, test_loader, device):
     test_loss = 0
     test_acc = 0
     test_total = 0
-    logpdf_values = []
 
     # Check if model is an ensemble
     is_ensemble = hasattr(model, "num_models") and model.num_models > 1
@@ -75,25 +73,20 @@ def evaluate_model_on_test_set(model, test_loader, device):
                 return1 > return2, torch.ones_like(pref), torch.ones_like(pref) * 2
             )
 
-            # Compute logpdf
-            logp = -loss
 
             # Compute accuracy (same for both cases)
             correct = (pred_pref == pref).sum().item()
             test_acc += correct
             test_total += pref.size(0)
 
-            # Save logpdf values
-            logpdf_values.append(logp.mean().item())
 
     avg_test_loss = (
         test_loss / len(test_loader) if len(test_loader) > 0 else float("nan")
     )
     test_accuracy = test_acc / test_total if test_total > 0 else 0
-    avg_logpdf = np.mean(logpdf_values) if logpdf_values else float("nan")
 
     print(
-        f"Test Loss: {avg_test_loss:.4f}, Accuracy: {test_accuracy:.4f}, Avg LogPDF: {avg_logpdf:.4f}"
+        f"Test Loss: {avg_test_loss:.4f}, Accuracy: {test_accuracy:.4f}"
     )
     print(
         f"Correctly predicted {test_acc} out of {test_total} preference pairs ({test_accuracy:.2%})"
@@ -102,7 +95,6 @@ def evaluate_model_on_test_set(model, test_loader, device):
     return {
         "test_loss": avg_test_loss,
         "test_accuracy": test_accuracy,
-        "avg_logpdf": avg_logpdf,
         "num_test_samples": test_total,
     }
 

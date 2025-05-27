@@ -38,50 +38,6 @@ def find_similar_segments_dtw(query_idx, k, distance_matrix):
 
     return similar_indices
 
-def plot_dtw_cost_analysis(labeled_costs, model_dir, iteration, dtw_costs_per_iter):
-    """Plot analysis of DTW costs used for beta scaling.
-    
-    Args:
-        labeled_costs: List of DTW costs for labeled pairs
-        model_dir: Directory to save plots
-        iteration: Current iteration number
-        dtw_costs_per_iter: List of lists containing DTW costs added in each iteration
-    """
-    if not labeled_costs:
-        return
-        
-    # Create figure with 2 subplots
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
-    
-    # Plot 1: Distribution of DTW costs
-    ax1.hist(labeled_costs, bins=30, alpha=0.7, color='blue')
-    ax1.set_xlabel('DTW Cost')
-    ax1.set_ylabel('Frequency')
-    ax1.set_title('Distribution of DTW Costs')
-    ax1.grid(True, alpha=0.3)
-    ax1.spines['top'].set_visible(False)
-    ax1.spines['right'].set_visible(False)
-    
-    # Plot 2: Box plot of costs per iteration
-    iterations = list(range(1, len(dtw_costs_per_iter) + 1))
-    ax2.boxplot(dtw_costs_per_iter, positions=iterations)
-    ax2.set_xlabel('Iteration')
-    ax2.set_ylabel('DTW Cost')
-    ax2.set_title('DTW Costs Per Iteration')
-    ax2.grid(True, alpha=0.3)
-    ax2.spines['top'].set_visible(False)
-    ax2.spines['right'].set_visible(False)
-    
-    plt.tight_layout()
-    
-    # Save plot
-    output_path = model_dir / "dtw_cost_analysis" / f"dtw_costs_iter_{iteration}.png"
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    plt.savefig(output_path, dpi=300, bbox_inches='tight')
-    plt.close()
-    
-    return output_path
-
 def compute_segment_return(data, segment_start_end):
     """Compute the return (sum of rewards) for each segment."""
     rewards = data["reward"]
@@ -112,18 +68,12 @@ def log_queries_to_wandb(
     iteration,
     dtw_augmented_pairs,
     dtw_augmented_prefs,
-    dtw_augmented_costs=None,
-    dtw_augmented_is_aug=None,
-    dtw_augmented_returns=None,
     video_dict=None,
     data=None,
     segment_start_end=None,
-    distance_matrix=None,
 ):
     """
     Log videos of the selected query segments and DTW augmentations.
-    Also logs the DTW costs with respect to the query on the wandb video captions.
-    Additionally, logs the DTW cost of each augmented trajectory with respect to the original selected query.
     """
     # Log selected query
     seg1, seg2 = selected_query
@@ -141,12 +91,6 @@ def log_queries_to_wandb(
         ret1_disp = f"{ret1}"
         ret2_disp = f"{ret2}"
 
-    # Compute DTW cost for the selected query if possible
-    dtw_cost_str = ""
-    if distance_matrix is not None:
-        dtw_cost = distance_matrix[seg1, seg2]
-        dtw_cost_str = f" | DTW cost: {dtw_cost:.4f}"
-
     # Visualize the selected query as videos on wandb if video_dict is provided
     if video_dict is not None:
         seg1_video = video_dict.get("seg1", None)
@@ -158,33 +102,29 @@ def log_queries_to_wandb(
         if seg2_video is not None and seg2_video.shape[-1] == 3:
             seg2_video = seg2_video.transpose(0, 3, 1, 2)
 
-        # Log both videos side by side, and log the returns and preference as a separate wandb log
+        # Log both videos side by side
         if seg1_video is not None and seg2_video is not None:
             wandb.log({
                 f"Selected Query Videos/iteration_{iteration}": [
                     wandb.Video(seg1_video, caption=f"Segment {seg1} (Return: {ret1_disp})", fps=8, format="mp4"),
                     wandb.Video(seg2_video, caption=f"Segment {seg2} (Return: {ret2_disp})", fps=8, format="mp4"),
                 ],
-                f"Selected Query Info/iteration_{iteration}": wandb.Html(
-                    f"<b>Segment {seg1} vs Segment {seg2}</b><br>"
-                    f"Return 1: {ret1_disp}<br>"
-                    f"Return 2: {ret2_disp}<br>"
-                    f"Preference: {selected_pref}<br>"
-                    f"DTW cost: {dtw_cost_str if dtw_cost_str else 'N/A'}"
-                ),
             }, step=iteration)
 
     # --- Log DTW augmented pairs as videos ---
     # Only if data and segment_start_end are provided
     if data is not None and segment_start_end is not None and len(dtw_augmented_pairs) > 0 and "image" in data:
+        videos_to_log = []
         for idx, ((seg1_aug, seg2_aug), pref) in enumerate(zip(dtw_augmented_pairs, dtw_augmented_prefs)):
             seg1_video = get_segment_video(data, segment_start_end, seg1_aug, video_key="image")
             seg2_video = get_segment_video(data, segment_start_end, seg2_aug, video_key="image")
+            
             # Ensure videos are numpy arrays with shape (T, H, W, C)
             if seg1_video is not None and seg1_video.shape[-1] == 3:
                 seg1_video = seg1_video.transpose(0, 3, 1, 2)
             if seg2_video is not None and seg2_video.shape[-1] == 3:
                 seg2_video = seg2_video.transpose(0, 3, 1, 2)
+
             # Indicate preference by asterisk
             r1 = segment_returns[seg1_aug]
             r2 = segment_returns[seg2_aug]
@@ -198,38 +138,17 @@ def log_queries_to_wandb(
                 r1_disp = f"{r1}"
                 r2_disp = f"{r2}"
 
-            # Compute DTW cost for this augmented pair if possible
-            aug_dtw_cost_str = ""
-            if distance_matrix is not None:
-                aug_dtw_cost = distance_matrix[seg1_aug, seg2_aug]
-                aug_dtw_cost_str = f" | DTW cost: {aug_dtw_cost:.4f}"
-
-            # Compute DTW cost of each augmented traj with respect to the original selected query
-            # This means: (aug1, aug2) vs (seg1, seg2)
-            # We'll log both: cost(aug1, seg1), cost(aug2, seg2)
-            aug_vs_query_cost_str = ""
-            if distance_matrix is not None:
-                cost_aug1_vs_query1 = distance_matrix[seg1_aug, seg1]
-                cost_aug2_vs_query2 = distance_matrix[seg2_aug, seg2]
-                aug_vs_query_cost_str = (
-                    f" | DTW(aug1,query1): {cost_aug1_vs_query1:.4f} | DTW(aug2,query2): {cost_aug2_vs_query2:.4f}"
-                )
-
             if seg1_video is not None and seg2_video is not None:
-                wandb.log({
-                    f"DTW Augmented Query Videos/iteration_{iteration}/pair_{idx}": [
-                        wandb.Video(seg1_video, caption=f"Segment {seg1_aug} (Return: {r1_disp})", fps=8, format="mp4"),
-                        wandb.Video(seg2_video, caption=f"Segment {seg2_aug} (Return: {r2_disp})", fps=8, format="mp4"),
-                    ],
-                    f"DTW Augmented Query Info/iteration_{iteration}/pair_{idx}": wandb.Html(
-                        f"<b>Segment {seg1_aug} vs Segment {seg2_aug}</b><br>"
-                        f"Return 1: {r1_disp}<br>"
-                        f"Return 2: {r2_disp}<br>"
-                        f"Preference: {pref}<br>"
-                        f"DTW cost: {aug_dtw_cost_str if aug_dtw_cost_str else 'N/A'}<br>"
-                        f"DTW to original query: {aug_vs_query_cost_str if aug_vs_query_cost_str else 'N/A'}"
-                    ),
-                }, step=iteration)
+                caption = f"Pair {idx}:\nSegment {seg1_aug} (Return: {r1_disp}) vs Segment {seg2_aug} (Return: {r2_disp})"
+                # Combine the two videos side-by-side into one video if desired
+                # Otherwise just log both as separate videos in the list
+                videos_to_log.append(wandb.Video(seg1_video, caption=f"{caption} - First", fps=8, format="mp4"))
+                videos_to_log.append(wandb.Video(seg2_video, caption=f"{caption} - Second", fps=8, format="mp4"))
+
+        if videos_to_log:
+            wandb.log({
+                f"DTW_Augmented_Pairs/iteration_{iteration}": videos_to_log
+            }, step=iteration)
 
 def get_segment_video(data, segment_start_end, seg_idx, video_key="image"):
     """
@@ -330,7 +249,6 @@ def active_preference_learning(cfg):
     # Prepare path for saving labeled pairs info
     labeled_pairs_info_path = model_dir / "labeled_pairs_info.txt"
 
-    
 
     # Active learning training loop
     num_queries = 0
@@ -339,7 +257,6 @@ def active_preference_learning(cfg):
     labeled_costs = []
     labeled_preferences = []
     is_augmented_list = []
-    augmented_accuracy = []
     candidate_pairs = unlabeled_pairs
     iteration = 0
 
@@ -348,22 +265,22 @@ def active_preference_learning(cfg):
         "num_labeled": [],
         "test_accuracy": [],
         "test_loss": [],
-        "avg_logpdf": [],
         "iterations": [],
         "val_losses": [],
         "test_loss_curve": [],
         "num_labeled_curve": [],
-        "dtw_costs_per_iter": [],  # Add this to track DTW costs per iteration
     }
+    # Only add DTW cost tracking if DTW is enabled
+    if dtw_enabled:
+        metrics["selected_pair_dtw_costs"] = []
+        metrics["augmented_accuracy"] = []
+
 
     while num_queries < total_queries:
         iteration += 1
         print(f"\n=== Active Learning Iteration {iteration} ===")
         print(f"Progress: {num_queries}/{total_queries} queries")
         print(f"Candidate pairs: {len(candidate_pairs)}")
-
-        # Track DTW costs for this iteration
-        iteration_dtw_costs = []
 
         if num_queries == 0: # First iteration, randomly select a pair
             selected_query_pair = random.choice(candidate_pairs)
@@ -392,11 +309,8 @@ def active_preference_learning(cfg):
         if dtw_enabled and distance_matrix is not None:
             selected_query_pair_cost = distance_matrix[selected_query_pair[0], selected_query_pair[1]]
             labeled_costs.append(selected_query_pair_cost)
-            iteration_dtw_costs.append(selected_query_pair_cost)
         else:
             labeled_costs.append(None)
-            iteration_dtw_costs.append(None)
-
 
         # --- Visualize the selected query as videos on wandb ---
         video_dict = None
@@ -427,7 +341,6 @@ def active_preference_learning(cfg):
                         dtw_augmented_is_aug.append(True)
                         cost = distance_matrix[sim_idx, j]
                         dtw_augmented_preferences_costs.append(cost)
-                        iteration_dtw_costs.append(cost)
                         dtw_augmented_returns.append((segment_returns[sim_idx], segment_returns[j]))
                 similar_to_j_indices = find_similar_segments_dtw(j, dtw_k_augment, distance_matrix)
                 for sim_idx in similar_to_j_indices:
@@ -437,7 +350,6 @@ def active_preference_learning(cfg):
                         dtw_augmented_is_aug.append(True)
                         cost = distance_matrix[i, sim_idx]
                         dtw_augmented_preferences_costs.append(cost)
-                        iteration_dtw_costs.append(cost)
                         dtw_augmented_returns.append((segment_returns[i], segment_returns[sim_idx]))
             elif selected_query_pref == 2:
                 similar_to_j_indices = find_similar_segments_dtw(j, dtw_k_augment, distance_matrix)
@@ -448,7 +360,6 @@ def active_preference_learning(cfg):
                         dtw_augmented_is_aug.append(True)
                         cost = distance_matrix[i, sim_idx]
                         dtw_augmented_preferences_costs.append(cost)
-                        iteration_dtw_costs.append(cost)
                         dtw_augmented_returns.append((segment_returns[i], segment_returns[sim_idx]))
                 similar_to_i_indices = find_similar_segments_dtw(i, dtw_k_augment, distance_matrix)
                 for sim_idx in similar_to_i_indices:
@@ -458,7 +369,6 @@ def active_preference_learning(cfg):
                         dtw_augmented_is_aug.append(True)
                         cost = distance_matrix[sim_idx, j]
                         dtw_augmented_preferences_costs.append(cost)
-                        iteration_dtw_costs.append(cost)
                         dtw_augmented_returns.append((segment_returns[sim_idx], segment_returns[j]))
 
             labeled_pairs.extend(dtw_augmented_pairs)
@@ -468,14 +378,10 @@ def active_preference_learning(cfg):
             print(f"DTW augmented pairs: {len(dtw_augmented_pairs)}")
             augmented_pref_with_rewards = get_gt_preferences(data, segment_start_end, dtw_augmented_pairs)
             augmented_acc = (np.array(augmented_pref_with_rewards) == np.array(dtw_augmented_preferences)).mean()
-            augmented_accuracy.append(augmented_acc)
             print(f"Augmented accuracy: {augmented_acc:.4f}")
             for dtw_augmented_pair in dtw_augmented_pairs:
                 if dtw_augmented_pair in candidate_pairs:
                     candidate_pairs.remove(dtw_augmented_pair)
-
-        # Store the DTW costs for this iteration
-        metrics["dtw_costs_per_iter"].append(iteration_dtw_costs)
 
         # Save labeled pairs info to file after each iteration
         save_labeled_pairs_info(labeled_pairs, labeled_preferences, segment_returns, labeled_pairs_info_path, is_augmented_list=is_augmented_list)
@@ -489,13 +395,9 @@ def active_preference_learning(cfg):
                 iteration=iteration,
                 dtw_augmented_pairs=dtw_augmented_pairs,
                 dtw_augmented_prefs=dtw_augmented_preferences,
-                dtw_augmented_costs=dtw_augmented_preferences_costs,
-                dtw_augmented_is_aug=dtw_augmented_is_aug,
-                dtw_augmented_returns=dtw_augmented_returns,
                 video_dict=video_dict,  # Pass video_dict for visualization
                 data=data,
                 segment_start_end=segment_start_end,
-                distance_matrix=distance_matrix,  # Pass distance matrix for DTW cost logging
             )
 
         # Create dataset and data loaders
@@ -534,21 +436,26 @@ def active_preference_learning(cfg):
         ensemble = ensemble.to(device)
         print("Evaluating on test set...")
         test_metrics = evaluate_model_on_test_set(ensemble.models[0], test_loader, device)
-        metrics["num_labeled"].append(num_queries)
+        metrics["num_labeled"].append(len(labeled_pairs))
         metrics["test_accuracy"].append(test_metrics["test_accuracy"])
         metrics["test_loss"].append(test_metrics["test_loss"])
-        metrics["avg_logpdf"].append(test_metrics["avg_logpdf"])
+        if dtw_enabled:
+            # Only log DTW costs if enabled
+            metrics["selected_pair_dtw_costs"].append(selected_query_pair_cost)
+            metrics["augmented_accuracy"].append(augmented_acc)
         metrics["iterations"].append(iteration)
 
         if wandb.run is not None:
             # Log test metrics to wandb
-            wandb.log({
+            wandb_log_dict = {
                 "test_accuracy": test_metrics["test_accuracy"],
                 "test_loss": test_metrics["test_loss"],
-                "avg_logpdf": test_metrics["avg_logpdf"],
-                "num_labeled": num_queries,
+                "num_labeled": len(labeled_pairs),
                 "iteration": iteration,
-            }, step=iteration)
+            }
+            if dtw_enabled:
+                wandb_log_dict["selected_pair_dtw_cost"] = selected_query_pair_cost
+            wandb.log(wandb_log_dict, step=iteration)
 
         # Update metrics with new keys if needed
         if "val_losses" in metrics:
@@ -558,7 +465,7 @@ def active_preference_learning(cfg):
             metrics["test_loss_curve"] = []
             metrics["num_labeled_curve"] = []
         metrics["test_loss_curve"].append(test_metrics["test_loss"])
-        metrics["num_labeled_curve"].append(num_queries)
+        metrics["num_labeled_curve"].append(len(labeled_pairs))
 
         if iteration % cfg.training.save_model_every == 0:
             checkpoint_path = model_dir / "checkpoints" / f"checkpoint_iter_{iteration}.pt"
@@ -582,12 +489,10 @@ def active_preference_learning(cfg):
                 random_seed=cfg.random_seed
             )
 
-        # Plot DTW cost analysis
-        if iteration % cfg.training.reward_analysis_every == 0:
-            plot_dtw_cost_analysis(labeled_costs, model_dir, iteration, metrics["dtw_costs_per_iter"])
+
 
     # Plot active learning metrics
-    plot_active_learning_metrics(model_dir, metrics, augmented_accuracy)
+    plot_active_learning_metrics(model_dir, metrics)
 
     # Save config
     config_path = model_dir / "config.yaml"
@@ -604,7 +509,6 @@ def active_preference_learning(cfg):
     return {
         "seed": cfg.random_seed,
         "test_accuracy": test_metrics["test_accuracy"],
-        "test_log_prob": test_metrics["avg_logpdf"],
         "model_path": checkpoint_path,
     }
 

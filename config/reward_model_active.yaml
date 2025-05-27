@@ -13,8 +13,8 @@ data:
   segment_length: 64
   num_segments: 10000
   num_pairs: 5000
-  subsamples: 50000
-  num_test_pairs: 500
+  subsamples: 100000
+  num_test_pairs: 10000
 
 dtw_augmentation:
   enabled: false              # Set to true to enable DTW augmentation

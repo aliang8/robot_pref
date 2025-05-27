@@ -153,17 +153,18 @@ def create_video_grid(video_files, output_path, max_videos=6, fps=30, title=None
     print(f"Created compact video grid with {n_videos} videos at {output_path}")
     return output_path
 
-def plot_active_learning_metrics(model_dir, metrics, augmented_accuracy):
+def plot_active_learning_metrics(model_dir, metrics):
     """
     Plot active learning metrics including test accuracy, loss, and augmented accuracy.
 
     Args:
         model_dir (str): Path to the directory where the plot will be saved.
         metrics (dict): Dictionary containing 'num_labeled', 'test_accuracy', and 'test_loss'.
-        augmented_accuracy (list): List of augmented accuracy values.
     Returns:
         str: Path to the saved plot.
     """
+    augmented_accuracy = metrics.get("augmented_accuracy", [])
+    
     # Create a 1x3 grid (3 plots side by side)
     fig, axs = plt.subplots(
         1, 3, figsize=(18, 6), constrained_layout=False, sharex=True
