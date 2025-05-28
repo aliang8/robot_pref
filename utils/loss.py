@@ -1,7 +1,7 @@
 import torch
 
 
-def bradley_terry_loss(rewards1, rewards2, preferences, cost=None, alpha=3.5, beta_max=8.0):
+def bradley_terry_loss(rewards1, rewards2, preferences, cost=None, alpha=1.0, beta_max=1.0, eps = 1e-6):
     """
     Compute the Bradley-Terry preference learning loss (binary cross-entropy) with optional beta scaling.
 
@@ -10,7 +10,7 @@ def bradley_terry_loss(rewards1, rewards2, preferences, cost=None, alpha=3.5, be
                  Shape can be [batch_size] or [num_models, batch_size]
         rewards2: Predicted rewards for the second segments in each pair
                  Shape can be [batch_size] or [num_models, batch_size]
-        preferences: Labels indicating which segment is preferred (1 or 2)
+        preferences: Labels indicating which segment is preferred (1 = first segment preferred, 0 = second segment preferred, 0.5 = equal)
                     Shape is [batch_size]
         cost: DTW Cost used for beta scaling (optional)
                     
@@ -18,11 +18,9 @@ def bradley_terry_loss(rewards1, rewards2, preferences, cost=None, alpha=3.5, be
         Loss value if rewards are [batch_size]
         Loss tensor of shape [num_models] if rewards are [num_models, batch_size]
     """
-    # Convert preferences to probabilities (1 = first segment preferred, 2 = second segment preferred)
-    if isinstance(preferences, torch.Tensor):
-        prefs = (preferences == 1).float()
-    else:
-        prefs = (torch.tensor(preferences) == 1).float()
+
+    # Convert preferences to probabilities (1 = first segment preferred, 0 = second segment preferred, 0.5 = equal)
+    prefs = preferences.float()
 
     # Optionally use cost to scale beta if provided
     if cost is not None:
@@ -31,14 +29,14 @@ def bradley_terry_loss(rewards1, rewards2, preferences, cost=None, alpha=3.5, be
         beta = 1
 
     # Compute probability that segment1 is preferred over segment2 using the Bradley-Terry model
-    eps = 1e-6
-
     logits = torch.clamp(
         beta * (rewards1 - rewards2), min=-50.0, max=50.0
     )
     pred_probs = torch.sigmoid(logits)
 
-    # Standard binary cross-entropy loss: -(y*log(p) + (1-y)*log(1-p))
+    # For equal preferences (0.5), we want the model to predict 0.5
+    # For preference 1, we want the model to predict close to 1
+    # For preference 0, we want the model to predict close to 0
     bce = -(
         prefs * torch.log(pred_probs + eps)
         + (1 - prefs) * torch.log(1 - pred_probs + eps)

@@ -964,7 +964,7 @@ def create_env(cfg):
 
         if "mw" in cfg.data.data_path or "metaworld" in cfg.data.data_path:
             env_creator = MetaWorldEnvCreator(env_name)
-        elif "robomimic" in cfg.data.data_path:
+        elif "lift" in cfg.data.data_path or "can" in cfg.data.data_path:
             env_creator = RobomimicEnvCreator(env_name)
         else:
             raise ValueError(

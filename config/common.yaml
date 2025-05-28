@@ -12,7 +12,7 @@ data:
 # Training parameters
 training:
   eval_interval: 10
-  eval_episodes: 10
+  eval_episodes: 20
 
 # Evaluation settings
 evaluation:

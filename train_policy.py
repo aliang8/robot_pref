@@ -139,12 +139,6 @@ def main(cfg: DictConfig):
         if use_ground_truth:
             print("Using ground truth rewards instead of reward model predictions.")
 
-        # Get reward scaling options
-        scale_rewards = cfg.data.get("scale_rewards", False)
-        reward_min = cfg.data.get("reward_min", -1.0)
-        reward_max = cfg.data.get("reward_max", 1.0)
-        if scale_rewards:
-            print(f"Will scale rewards to range [{reward_min}, {reward_max}]")
 
         # Create MDP dataset
         print("Creating MDP dataset with rewards...")
@@ -155,27 +149,14 @@ def main(cfg: DictConfig):
             use_ground_truth=use_ground_truth,
             max_segments=cfg.data.max_segments,
             reward_batch_size=cfg.data.reward_batch_size,
-            scale_rewards=scale_rewards,
-            reward_min=reward_min,
-            reward_max=reward_max,
             use_zero_rewards=cfg.data.get("use_zero_rewards", False),
         )
     else:  # BC or other algorithms that don't need a reward model
         # For BC, we can directly use the demonstrations
         print("Creating MDP dataset from demonstrations...")
 
-        # Get reward scaling options (also apply to BC for consistency)
-        scale_rewards = cfg.data.get("scale_rewards", False)
-        reward_min = cfg.data.get("reward_min", -1.0)
-        reward_max = cfg.data.get("reward_max", 1.0)
-        if scale_rewards:
-            print(f"Will scale rewards to range [{reward_min}, {reward_max}]")
-
         dataset = load_dataset(
             data,
-            scale_rewards=scale_rewards,
-            reward_min=reward_min,
-            reward_max=reward_max,
             use_zero_rewards=cfg.data.get("use_zero_rewards", False),
         )
 

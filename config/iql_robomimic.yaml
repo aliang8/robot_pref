@@ -6,7 +6,6 @@ data:
   max_segments: 0
   reward_batch_size: 32
   use_ground_truth: False  # Set to True to use ground truth rewards instead of reward model
-  scale_rewards: False     # Set to True to scale rewards to min/max range
   reward_min: -1.0         # Minimum value for scaled rewards
   reward_max: 1.0          # Maximum value for scaled rewards
   use_zero_rewards: False  # Sanity check mode: use zero rewards for all transitions
@@ -29,7 +28,7 @@ training:
   n_epochs: 100
   n_steps_per_epoch: 1000
   eval_interval: 10
-  eval_episodes: 10
+  eval_episodes: 20
   save_interval: 10
 
 evaluation:

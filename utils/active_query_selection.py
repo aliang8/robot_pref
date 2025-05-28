@@ -1,4 +1,3 @@
-import itertools
 import random
 
 import numpy as np
@@ -79,7 +78,7 @@ def select_active_pref_query(
     segment_start_end, 
     data, 
     uncertainty_method="disagreement", 
-    max_pairs=1, 
+    selection_pairs=1,
     candidate_pairs=None,
     dtw_matrix=None,
     uncertainty_subsample=50  # Number of top uncertain pairs to consider for DTW diversity
@@ -91,7 +90,7 @@ def select_active_pref_query(
         segment_start_end: List of segment start/end indices
         data: Dictionary of state-action data
         uncertainty_method: Method for computing uncertainty ("disagreement", "entropy", or "random")
-        max_pairs: Maximum number of pairs to return
+        selection_pairs: Pairs to select based on uncertainty
         candidate_pairs: List of candidate segment pairs to consider (optional)
         dtw_matrix: Pre-computed DTW distance matrix (optional)
         uncertainty_subsample: Number of top uncertain pairs to consider for DTW-based diversity selection
@@ -99,76 +98,58 @@ def select_active_pref_query(
     Returns:
         List of selected segment pairs
     """
-    if uncertainty_method == "random":
-        # Random selection (baseline)
-        if candidate_pairs is None:
-            all_segment_pairs = list(itertools.combinations(range(len(segment_start_end)), 2))
-            if max_pairs >= len(all_segment_pairs):
-                return all_segment_pairs
-            return random.sample(all_segment_pairs, max_pairs)
-        else:
-            if max_pairs >= len(candidate_pairs):
-                return candidate_pairs
-            return random.sample(candidate_pairs, max_pairs)
 
-    if candidate_pairs is None:
-        candidate_pairs = list(itertools.combinations(range(len(segment_start_end)), 2))
-
-    print(f"Computing uncertainty for {len(candidate_pairs)} candidate pairs...")
-    uncertainty_scores = compute_uncertainty_scores(
+    print(f"Computing uncertainty scores for {len(candidate_pairs)} candidate pairs...")
+    uncertainty_scores = np.array(compute_uncertainty_scores(
         reward_model,
         candidate_pairs,
         segment_start_end,
         data,
         method=uncertainty_method,
-    )
+    ))
 
-    # Sort pairs by uncertainty (highest to lowest)
-    sorted_scores = sorted(uncertainty_scores, reverse=True)
+    # Sort pairs by uncertainty scores
     sorted_indices = np.argsort(uncertainty_scores)[::-1]
-    print(f"Top uncertainty scores: {sorted_scores[:5]} indices: {sorted_indices[:5]}")
-    
-    # Select top uncertain_subsample pairs based on uncertainty
-    top_uncertain_indices = sorted_indices[:uncertainty_subsample]
-    top_uncertain_pairs = [candidate_pairs[i] for i in top_uncertain_indices]
-    
-    # If DTW matrix is provided, use it to prioritize diverse pairs among the uncertain ones
-    if dtw_matrix is not None and len(top_uncertain_pairs) > max_pairs:
-        print(f"Using DTW distance to select diverse pairs from top {len(top_uncertain_pairs)} uncertain pairs")
-        
-        # Calculate DTW distances for each pair
-        dtw_distances = []
-        for pair_idx, (i, j) in enumerate(top_uncertain_pairs):
-            dtw_dist = dtw_matrix[i, j]
-            dtw_distances.append((pair_idx, dtw_dist))
-        
-        # Sort by DTW distance (higher = more dissimilar = better)
-        dtw_distances.sort(key=lambda x: x[1], reverse=True)
-        
-        # Select the pairs with highest DTW distances
-        top_diverse_indices = [dtw_distances[i][0] for i in range(min(max_pairs, len(dtw_distances)))]
-        selected_pairs = [top_uncertain_pairs[i] for i in top_diverse_indices]
-        
-        # Print the selected pair information
-        for idx, pair in enumerate(selected_pairs):
-            i, j = pair
-            print(f"Selected pair {idx+1}/{len(selected_pairs)}: {pair}")
-            print(f"  Uncertainty: {uncertainty_scores[sorted_indices[top_uncertain_indices[top_diverse_indices[idx]]]]:.4f}")
-            print(f"  DTW distance: {dtw_matrix[i, j]:.4f}")
-            
-        return selected_pairs
-    else:
-        # Without DTW matrix, just return top uncertain pairs
-        if max_pairs is not None and max_pairs < len(top_uncertain_indices):
-            top_uncertain_indices = top_uncertain_indices[:max_pairs]
-        
-        # Get pairs in order of uncertainty
-        all_pairs_ranked = [candidate_pairs[i] for i in top_uncertain_indices]
+    top_scores = uncertainty_scores[sorted_indices[:5]]
+    print(f"Top uncertainty scores: {top_scores} indices: {sorted_indices[:5]}")
 
-        print(f"Selected {len(all_pairs_ranked)} pairs based on uncertainty method '{uncertainty_method}'")
-        for idx, pair in enumerate(all_pairs_ranked):
-            i, j = pair
-            print(f"Selected pair {idx+1}/{len(all_pairs_ranked)}: {pair}")
-            print(f"  Uncertainty: {uncertainty_scores[sorted_indices[top_uncertain_indices[idx]]]:.4f}")
+    # TODO: Implement DTW-based diversity selection if dtw_matrix is provided
+    # Select top uncertain_subsample pairs based on uncertainty
+    # top_uncertain_indices = sorted_indices[:uncertainty_subsample]
+    # top_uncertain_pairs = [candidate_pairs[i] for i in top_uncertain_indices]
+    # # If DTW matrix is provided, use it to prioritize diverse pairs among the uncertain ones
+    # if dtw_matrix is not None and len(top_uncertain_pairs) > max_pairs:
+    #     print(f"Using DTW distance to select diverse pairs from top {len(top_uncertain_pairs)} uncertain pairs")
+        
+    #     # Calculate DTW distances for each pair
+    #     dtw_distances = []
+    #     for pair_idx, (i, j) in enumerate(top_uncertain_pairs):
+    #         dtw_dist = dtw_matrix[i, j]
+    #         dtw_distances.append((pair_idx, dtw_dist))
+        
+    #     # Sort by DTW distance (higher = more dissimilar = better)
+    #     dtw_distances.sort(key=lambda x: x[1], reverse=True)
+        
+    #     # Select the pairs with highest DTW distances
+    #     top_diverse_indices = [dtw_distances[i][0] for i in range(min(max_pairs, len(dtw_distances)))]
+    #     selected_pairs = [top_uncertain_pairs[i] for i in top_diverse_indices]
+        
+    #     # Print the selected pair information
+    #     for idx, pair in enumerate(selected_pairs):
+    #         i, j = pair
+    #         print(f"Selected pair {idx+1}/{len(selected_pairs)}: {pair}")
+    #         uncertainty_score = uncertainty_scores[sorted_indices[top_uncertain_indices[top_diverse_indices[idx]]]]
+    #         print(f"  Uncertainty: {uncertainty_score:.4f}")
+    #         print(f"  DTW distance: {dtw_matrix[i, j]:.4f}")
+            
+    #     return selected_pairs, uncertainty_score
+    # else:
+
+    # Select top pairs and their scores
+    selected_pairs = [candidate_pairs[i] for i in sorted_indices[:selection_pairs]]
+    selected_scores = uncertainty_scores[sorted_indices[:selection_pairs]]
+
+    print(f"Selected index: {sorted_indices[:selection_pairs]}, Selected pair: {selected_pairs}, score: {selected_scores}")
+    print(f"Selected {selection_pairs} pairs based on uncertainty method '{uncertainty_method}'")
     
-        return all_pairs_ranked
+    return selected_pairs, selected_scores

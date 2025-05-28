@@ -117,8 +117,11 @@ def get_gt_preferences(data, segment_indices, pairs):
         pairs (list): List of tuples containing segment indices to compute ground truth preferences.
 
     Returns:
-        list: List of preference labels (1 if first segment preferred, 2 if second segment preferred).
+        list: List of preference labels (1 if first segment preferred, 0 if second segment preferred, 0.5 if equal).
     """
+    if "reward" not in data:
+        raise ValueError("Dataset does not contain 'reward' key. Can't compute ground truth preferences! ")
+    
     preference_labels = []
 
     for idx1, idx2 in tqdm(pairs):
@@ -132,8 +135,10 @@ def get_gt_preferences(data, segment_indices, pairs):
         # Determine preference
         if return1 > return2:
             preference_labels.append(1)
-        else:
-            preference_labels.append(2)
+        elif return1 < return2:
+            preference_labels.append(0)
+        else:  # equal
+            preference_labels.append(0.5)
 
     return preference_labels
 
@@ -320,9 +325,6 @@ def load_dataset(
     use_ground_truth=False,
     max_segments=None,
     reward_batch_size=32,
-    scale_rewards=False,
-    reward_min=None,
-    reward_max=None,
     use_zero_rewards=False,
 ):
     """Load and process dataset for either IQL or BC training.
@@ -335,18 +337,11 @@ def load_dataset(
         max_segments: Maximum number of segments to process (optional)
         reward_batch_size: Batch size for reward computation (for IQL)
         scale_rewards: If True, scales rewards to specified min/max range
-        reward_min: Minimum value for scaled rewards (default: -1)
-        reward_max: Maximum value for scaled rewards (default: 1)
         use_zero_rewards: If True, replace all rewards with zeros (sanity check)
 
     Returns:
         d3rlpy MDPDataset with observations, actions, rewards, and terminals
     """
-    # Set default scaling values if not provided
-    if scale_rewards:
-        reward_min = reward_min if reward_min is not None else -1.0
-        reward_max = reward_max if reward_max is not None else 1.0
-        print(f"Scaling rewards to range [{reward_min}, {reward_max}]")
 
     # Extract necessary data
     observations = data["obs"] if "obs" in data else data["state"]
@@ -440,26 +435,6 @@ def load_dataset(
             f"Reward stats after zeroing - Mean: {np.mean(rewards_np):.4f}, Min: {np.min(rewards_np):.4f}, Max: {np.max(rewards_np):.4f}"
         )
 
-    # Scale rewards if requested
-    if scale_rewards:
-        original_min = np.min(rewards_np)
-        original_max = np.max(rewards_np)
-
-        # Avoid division by zero
-        if original_max - original_min > 1e-8:
-            # Scale to [0, 1] first, then to target range
-            rewards_np = (rewards_np - original_min) / (original_max - original_min)
-            rewards_np = rewards_np * (reward_max - reward_min) + reward_min
-            print(
-                f"Scaled rewards from [{original_min:.4f}, {original_max:.4f}] to [{reward_min:.4f}, {reward_max:.4f}]"
-            )
-        else:
-            # If all rewards are the same, set to the middle of the target range
-            middle_value = (reward_max + reward_min) / 2
-            rewards_np = np.ones_like(rewards_np) * middle_value
-            print(
-                f"All rewards have the same value ({original_min:.4f}), setting to {middle_value:.4f}"
-            )
 
     # Create terminals array (True at the end of each episode)
     episode_ends = torch.cat(

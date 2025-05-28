@@ -11,6 +11,10 @@ from omegaconf import DictConfig, OmegaConf
 
 import wandb
 from models import EnsembleRewardModel
+from train_reward_model import (
+    filter_pairs_with_preferences,
+    load_preferences_from_directory,
+)
 from utils.active_query_selection import (
     select_active_pref_query,
 )
@@ -36,51 +40,7 @@ def find_similar_segments_dtw(query_idx, k, distance_matrix):
     distances[query_idx] = float('inf')  # Exclude self
     similar_indices = np.argsort(distances)[:k]
 
-    return similar_indices
-
-def plot_dtw_cost_analysis(labeled_costs, model_dir, iteration, dtw_costs_per_iter):
-    """Plot analysis of DTW costs used for beta scaling.
-    
-    Args:
-        labeled_costs: List of DTW costs for labeled pairs
-        model_dir: Directory to save plots
-        iteration: Current iteration number
-        dtw_costs_per_iter: List of lists containing DTW costs added in each iteration
-    """
-    if not labeled_costs:
-        return
-        
-    # Create figure with 2 subplots
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
-    
-    # Plot 1: Distribution of DTW costs
-    ax1.hist(labeled_costs, bins=30, alpha=0.7, color='blue')
-    ax1.set_xlabel('DTW Cost')
-    ax1.set_ylabel('Frequency')
-    ax1.set_title('Distribution of DTW Costs')
-    ax1.grid(True, alpha=0.3)
-    ax1.spines['top'].set_visible(False)
-    ax1.spines['right'].set_visible(False)
-    
-    # Plot 2: Box plot of costs per iteration
-    iterations = list(range(1, len(dtw_costs_per_iter) + 1))
-    ax2.boxplot(dtw_costs_per_iter, positions=iterations)
-    ax2.set_xlabel('Iteration')
-    ax2.set_ylabel('DTW Cost')
-    ax2.set_title('DTW Costs Per Iteration')
-    ax2.grid(True, alpha=0.3)
-    ax2.spines['top'].set_visible(False)
-    ax2.spines['right'].set_visible(False)
-    
-    plt.tight_layout()
-    
-    # Save plot
-    output_path = model_dir / "dtw_cost_analysis" / f"dtw_costs_iter_{iteration}.png"
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    plt.savefig(output_path, dpi=300, bbox_inches='tight')
-    plt.close()
-    
-    return output_path
+    return similar_indices, distances
 
 def compute_segment_return(data, segment_start_end):
     """Compute the return (sum of rewards) for each segment."""
@@ -112,18 +72,12 @@ def log_queries_to_wandb(
     iteration,
     dtw_augmented_pairs,
     dtw_augmented_prefs,
-    dtw_augmented_costs=None,
-    dtw_augmented_is_aug=None,
-    dtw_augmented_returns=None,
     video_dict=None,
     data=None,
     segment_start_end=None,
-    distance_matrix=None,
 ):
     """
     Log videos of the selected query segments and DTW augmentations.
-    Also logs the DTW costs with respect to the query on the wandb video captions.
-    Additionally, logs the DTW cost of each augmented trajectory with respect to the original selected query.
     """
     # Log selected query
     seg1, seg2 = selected_query
@@ -141,12 +95,6 @@ def log_queries_to_wandb(
         ret1_disp = f"{ret1}"
         ret2_disp = f"{ret2}"
 
-    # Compute DTW cost for the selected query if possible
-    dtw_cost_str = ""
-    if distance_matrix is not None:
-        dtw_cost = distance_matrix[seg1, seg2]
-        dtw_cost_str = f" | DTW cost: {dtw_cost:.4f}"
-
     # Visualize the selected query as videos on wandb if video_dict is provided
     if video_dict is not None:
         seg1_video = video_dict.get("seg1", None)
@@ -158,34 +106,30 @@ def log_queries_to_wandb(
         if seg2_video is not None and seg2_video.shape[-1] == 3:
             seg2_video = seg2_video.transpose(0, 3, 1, 2)
 
-        # Log both videos side by side, and log the returns and preference as a separate wandb log
+        # Log both videos side by side
         if seg1_video is not None and seg2_video is not None:
             wandb.log({
                 f"Selected Query Videos/iteration_{iteration}": [
                     wandb.Video(seg1_video, caption=f"Segment {seg1} (Return: {ret1_disp})", fps=8, format="mp4"),
                     wandb.Video(seg2_video, caption=f"Segment {seg2} (Return: {ret2_disp})", fps=8, format="mp4"),
                 ],
-                f"Selected Query Info/iteration_{iteration}": wandb.Html(
-                    f"<b>Segment {seg1} vs Segment {seg2}</b><br>"
-                    f"Return 1: {ret1_disp}<br>"
-                    f"Return 2: {ret2_disp}<br>"
-                    f"Preference: {selected_pref}<br>"
-                    f"DTW cost: {dtw_cost_str if dtw_cost_str else 'N/A'}"
-                ),
             }, step=iteration)
 
     # --- Log DTW augmented pairs as videos ---
     # Only if data and segment_start_end are provided
     if data is not None and segment_start_end is not None and len(dtw_augmented_pairs) > 0 and "image" in data:
+        dtw_video_logs = []
         for idx, ((seg1_aug, seg2_aug), pref) in enumerate(zip(dtw_augmented_pairs, dtw_augmented_prefs)):
             seg1_video = get_segment_video(data, segment_start_end, seg1_aug, video_key="image")
             seg2_video = get_segment_video(data, segment_start_end, seg2_aug, video_key="image")
-            # Ensure videos are numpy arrays with shape (T, H, W, C)
+            
+            # Ensure videos are numpy arrays with shape (T, C, H, W)
             if seg1_video is not None and seg1_video.shape[-1] == 3:
                 seg1_video = seg1_video.transpose(0, 3, 1, 2)
             if seg2_video is not None and seg2_video.shape[-1] == 3:
                 seg2_video = seg2_video.transpose(0, 3, 1, 2)
-            # Indicate preference by asterisk
+
+            # Format return values with preference
             r1 = segment_returns[seg1_aug]
             r2 = segment_returns[seg2_aug]
             if pref == 1:
@@ -198,38 +142,20 @@ def log_queries_to_wandb(
                 r1_disp = f"{r1}"
                 r2_disp = f"{r2}"
 
-            # Compute DTW cost for this augmented pair if possible
-            aug_dtw_cost_str = ""
-            if distance_matrix is not None:
-                aug_dtw_cost = distance_matrix[seg1_aug, seg2_aug]
-                aug_dtw_cost_str = f" | DTW cost: {aug_dtw_cost:.4f}"
-
-            # Compute DTW cost of each augmented traj with respect to the original selected query
-            # This means: (aug1, aug2) vs (seg1, seg2)
-            # We'll log both: cost(aug1, seg1), cost(aug2, seg2)
-            aug_vs_query_cost_str = ""
-            if distance_matrix is not None:
-                cost_aug1_vs_query1 = distance_matrix[seg1_aug, seg1]
-                cost_aug2_vs_query2 = distance_matrix[seg2_aug, seg2]
-                aug_vs_query_cost_str = (
-                    f" | DTW(aug1,query1): {cost_aug1_vs_query1:.4f} | DTW(aug2,query2): {cost_aug2_vs_query2:.4f}"
+            # Append both videos with clear captions
+            if seg1_video is not None and seg2_video is not None:
+                dtw_video_logs.append(
+                    wandb.Video(seg1_video, caption=f"DTW Pair {idx} - Segment {seg1_aug} (Return: {r1_disp})", fps=8, format="mp4")
+                )
+                dtw_video_logs.append(
+                    wandb.Video(seg2_video, caption=f"DTW Pair {idx} - Segment {seg2_aug} (Return: {r2_disp})", fps=8, format="mp4")
                 )
 
-            if seg1_video is not None and seg2_video is not None:
-                wandb.log({
-                    f"DTW Augmented Query Videos/iteration_{iteration}/pair_{idx}": [
-                        wandb.Video(seg1_video, caption=f"Segment {seg1_aug} (Return: {r1_disp})", fps=8, format="mp4"),
-                        wandb.Video(seg2_video, caption=f"Segment {seg2_aug} (Return: {r2_disp})", fps=8, format="mp4"),
-                    ],
-                    f"DTW Augmented Query Info/iteration_{iteration}/pair_{idx}": wandb.Html(
-                        f"<b>Segment {seg1_aug} vs Segment {seg2_aug}</b><br>"
-                        f"Return 1: {r1_disp}<br>"
-                        f"Return 2: {r2_disp}<br>"
-                        f"Preference: {pref}<br>"
-                        f"DTW cost: {aug_dtw_cost_str if aug_dtw_cost_str else 'N/A'}<br>"
-                        f"DTW to original query: {aug_vs_query_cost_str if aug_vs_query_cost_str else 'N/A'}"
-                    ),
-                }, step=iteration)
+        if dtw_video_logs:
+            # Use a constant key for all iterations to enable slider view
+            wandb.log({
+                "DTW_Augmented_Pairs": dtw_video_logs
+            }, step=iteration)
 
 def get_segment_video(data, segment_start_end, seg_idx, video_key="image"):
     """
@@ -279,46 +205,60 @@ def active_preference_learning(cfg):
     distance_matrix = None
     segment_start_end = None
 
-    if dtw_enabled:
-        dtw_matrix_file = Path(cfg.data.data_path).parent / f"dtw_matrix_{cfg.data.segment_length}.pkl"
-        if not dtw_matrix_file.exists():
-            print(f"DTW matrix file not found at {dtw_matrix_file}")
-            assert False, "DTW matrix file not found. Please run preprocess_dtw_matrix.py"
+    dtw_matrix_file = Path(cfg.data.data_path).parent / f"dtw_matrix_{cfg.data.segment_length}.pkl"
+    if not dtw_matrix_file.exists() and dtw_enabled:
+        print(f"DTW matrix file not found at {dtw_matrix_file}")
+        assert False, "DTW matrix file not found. Please run preprocess_dtw_matrix.py"
+    elif dtw_matrix_file.exists():
+        distance_matrix, segment_start_end = pickle.load(open(dtw_matrix_file, "rb"))
+        print(f"Loaded DTW matrix shape: {distance_matrix.shape}")
+        print(f"Pre-norm DTW matrix mean: {np.nanmean(distance_matrix):.4f}, std: {np.nanstd(distance_matrix):.4f}")
+        # Normalize the distance matrix to [0, 1], taking into account NaNs
+        min_val = np.nanmin(distance_matrix)
+        max_val = np.nanmax(distance_matrix)
+        print(f"DTW matrix min: {min_val:.4f}, max: {max_val:.4f}")
+        if max_val > min_val:
+            distance_matrix = (distance_matrix - min_val) / (max_val - min_val)
         else:
-            distance_matrix, segment_start_end = pickle.load(open(dtw_matrix_file, "rb"))
-            print(f"Loaded DTW matrix shape: {distance_matrix.shape}")
-            print(f"Pre-norm DTW matrix mean: {np.nanmean(distance_matrix):.4f}, std: {np.nanstd(distance_matrix):.4f}")
-            # Normalize the distance matrix to [0, 1], taking into account NaNs
-            min_val = np.nanmin(distance_matrix)
-            max_val = np.nanmax(distance_matrix)
-            print(f"DTW matrix min: {min_val:.4f}, max: {max_val:.4f}")
-            if max_val > min_val:
-                distance_matrix = (distance_matrix - min_val) / (max_val - min_val)
-            else:
-                distance_matrix = np.zeros_like(distance_matrix)  # All values are the same, set to 0
+            distance_matrix = np.zeros_like(distance_matrix)  # All values are the same, set to 0
 
-            # print mean, ignoring NaNs
-            print(f"Post-norm DTW matrix mean: {np.nanmean(distance_matrix):.4f}, std: {np.nanstd(distance_matrix):.4f}")
-    else:
+        # print mean, ignoring NaNs
+        print(f"Post-norm DTW matrix mean: {np.nanmean(distance_matrix):.4f}, std: {np.nanstd(distance_matrix):.4f}")
+    else: # DTW is not enabled or no DTW matrix file exists
         _, segment_start_end = segment_episodes(data, cfg.data.segment_length)
-
+        
     # Compute returns for each segment for logging
     segment_returns = compute_segment_return(data, segment_start_end)
 
     # Get all possible segment pairs, sample, and create dataset
     all_segment_pairs = list(itertools.combinations(range(len(segment_start_end)), 2))
-    sampled_segment_pairs = random.sample(all_segment_pairs, cfg.data.subsamples)
-    print(f"Sampled {len(sampled_segment_pairs)} pairs")
-    test_indices = random.sample(range(len(sampled_segment_pairs)), cfg.data.num_test_pairs)
-    test_pairs = [sampled_segment_pairs[i] for i in test_indices]
-    test_preferences = get_gt_preferences(data, segment_start_end, test_pairs)
+
+    # Prepare segment pairs and preferences for test set
+    if hasattr(cfg.data, 'preferences_dir'):
+        print("Loading preferences from files...")
+        preferences, pref_stats = load_preferences_from_directory(cfg.data.preferences_dir)
+        all_segment_pairs, preferences = filter_pairs_with_preferences(all_segment_pairs, preferences)
+
+        # np array to list of tuples
+        all_segment_pairs = [tuple(pair) for pair in all_segment_pairs]
+
+        test_pairs = all_segment_pairs[-cfg.data.num_test_pairs:]
+        test_preferences = preferences[-cfg.data.num_test_pairs:]
+
+        # Updating the preferences that are used for training
+        preferences = preferences[:-cfg.data.num_test_pairs]
+    else:
+        total_samples = cfg.data.subsamples + cfg.data.num_test_pairs
+        print(f"Sampling {cfg.data.subsamples} pairs for training and {cfg.data.num_test_pairs} pairs for testing from {len(all_segment_pairs)} total pairs")
+        all_segment_pairs = random.sample(all_segment_pairs, total_samples)
+        test_pairs = all_segment_pairs[-cfg.data.num_test_pairs:]
+        test_preferences = get_gt_preferences(data, segment_start_end, test_pairs)
+
     test_dataset = PreferenceDataset(data, test_pairs, segment_start_end, test_preferences)
     test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=64, collate_fn=custom_collate)
     print(f"Test dataset: {len(test_dataset)} pairs")
 
-    sampled_indices = list(range(len(sampled_segment_pairs)))
-    remaining_indices = list(set(sampled_indices) - set(test_indices))
-    unlabeled_pairs = [sampled_segment_pairs[i] for i in remaining_indices]
+    unlabeled_pairs = all_segment_pairs[:-cfg.data.num_test_pairs]
     print(f"Unlabeled pairs after test set: {len(unlabeled_pairs)}")
 
     # Create directory for saving
@@ -330,8 +270,6 @@ def active_preference_learning(cfg):
     # Prepare path for saving labeled pairs info
     labeled_pairs_info_path = model_dir / "labeled_pairs_info.txt"
 
-    
-
     # Active learning training loop
     num_queries = 0
     total_queries = cfg.active_learning.total_queries
@@ -339,7 +277,6 @@ def active_preference_learning(cfg):
     labeled_costs = []
     labeled_preferences = []
     is_augmented_list = []
-    augmented_accuracy = []
     candidate_pairs = unlabeled_pairs
     iteration = 0
 
@@ -348,13 +285,18 @@ def active_preference_learning(cfg):
         "num_labeled": [],
         "test_accuracy": [],
         "test_loss": [],
-        "avg_logpdf": [],
         "iterations": [],
-        "val_losses": [],
         "test_loss_curve": [],
         "num_labeled_curve": [],
-        "dtw_costs_per_iter": [],  # Add this to track DTW costs per iteration
     }
+
+    # Only add DTW cost tracking if DTW is enabled
+    if dtw_enabled:
+        metrics["selected_pair_dtw_costs"] = []
+
+        # TODO: once we have more human annotated prefs, we can compute the augmented accuracy, not enough right now
+        if not hasattr(cfg.data, 'preferences_dir'):
+            metrics["augmented_accuracy"] = []
 
     while num_queries < total_queries:
         iteration += 1
@@ -362,41 +304,57 @@ def active_preference_learning(cfg):
         print(f"Progress: {num_queries}/{total_queries} queries")
         print(f"Candidate pairs: {len(candidate_pairs)}")
 
-        # Track DTW costs for this iteration
-        iteration_dtw_costs = []
-
-        if num_queries == 0: # First iteration, randomly select a pair
+        if num_queries == 0 or cfg.active_learning.uncertainty_method == "random": # First iteration or random
             selected_query_pair = random.choice(candidate_pairs)
         else: # Subsequent iterations, use active sampling
-            selected_query_pair = select_active_pref_query(
-                ensemble,
-                segment_start_end,
-                data,
-                uncertainty_method=cfg.active_learning.uncertainty_method,
-                max_pairs=1,
-                candidate_pairs=candidate_pairs
-            )[0]
+            if cfg.active_learning.uncertainty_method == "random":
+                selected_query_pair = select_active_pref_query(
+                    ensemble,
+                    segment_start_end,
+                    data,
+                    uncertainty_method=cfg.active_learning.uncertainty_method,
+                    selection_pairs=1,
+                    candidate_pairs=candidate_pairs
+                )
+            else:
+                selected_query_pair, top_uncertainty_score = select_active_pref_query(
+                    ensemble,
+                    segment_start_end,
+                    data,
+                    uncertainty_method=cfg.active_learning.uncertainty_method,
+                    selection_pairs=1,
+                    candidate_pairs=candidate_pairs,
+                    dtw_matrix=distance_matrix,
+                )
+
+        if isinstance(selected_query_pair, list):
+            selected_query_pair = selected_query_pair[0]
 
         # Remove the selected query pair from unlabeled pairs
         num_queries += 1
+
+        selected_query_pair_index = candidate_pairs.index(selected_query_pair)
         candidate_pairs.remove(selected_query_pair)
         labeled_pairs.append(selected_query_pair)
         is_augmented_list.append(False)  # Not augmented, original query
 
-        # Get information for the selected query pair
-        selected_query_pref = get_gt_preferences(data, segment_start_end, [selected_query_pair])[0]
+        # Get preference for selected query pair from human or use ground truth
+        if hasattr(cfg.data, 'preferences_dir'):
+            print("Using human preferences for selected query pair...")
+            selected_query_pref = preferences[selected_query_pair_index]
+            preferences = np.delete(preferences, selected_query_pair_index) # Remove the selected query pair preference from the list
+        else:
+            print("Computing ground truth preference for selected query pair...")
+            selected_query_pref = get_gt_preferences(data, segment_start_end, [selected_query_pair])[0]
         labeled_preferences.append(selected_query_pref)
 
         # Add cost for selected query pair if DTW is enabled
         selected_query_pair_cost = None
-        if dtw_enabled and distance_matrix is not None:
-            selected_query_pair_cost = distance_matrix[selected_query_pair[0], selected_query_pair[1]]
-            labeled_costs.append(selected_query_pair_cost)
-            iteration_dtw_costs.append(selected_query_pair_cost)
+        if dtw_enabled:
+            # selected_query_pair_cost = distance_matrix[selected_query_pair[0], selected_query_pair[1]]
+            labeled_costs.append(0)
         else:
             labeled_costs.append(None)
-            iteration_dtw_costs.append(None)
-
 
         # --- Visualize the selected query as videos on wandb ---
         video_dict = None
@@ -410,93 +368,55 @@ def active_preference_learning(cfg):
             if seg1_video is not None and seg2_video is not None:
                 video_dict = {"seg1": seg1_video, "seg2": seg2_video}
 
-        # DTW preference augmentation
+        # Store DTW preference augmentation metrics
         dtw_augmented_pairs = []
         dtw_augmented_preferences = []
-        dtw_augmented_preferences_costs = []
+        dtw_augmented_pair_distances = []
         dtw_augmented_is_aug = []
         dtw_augmented_returns = []
-        if dtw_enabled and distance_matrix is not None:
-            i, j = selected_query_pair
-            if selected_query_pref == 1:
-                similar_to_i_indices = find_similar_segments_dtw(i, dtw_k_augment, distance_matrix)
-                for sim_idx in similar_to_i_indices:
-                    if sim_idx != j:
-                        dtw_augmented_pairs.append((sim_idx, j))
-                        dtw_augmented_preferences.append(1)
-                        dtw_augmented_is_aug.append(True)
-                        cost = distance_matrix[sim_idx, j]
-                        dtw_augmented_preferences_costs.append(cost)
-                        iteration_dtw_costs.append(cost)
-                        dtw_augmented_returns.append((segment_returns[sim_idx], segment_returns[j]))
-                similar_to_j_indices = find_similar_segments_dtw(j, dtw_k_augment, distance_matrix)
-                for sim_idx in similar_to_j_indices:
-                    if sim_idx != i:
-                        dtw_augmented_pairs.append((i, sim_idx))
-                        dtw_augmented_preferences.append(1)
-                        dtw_augmented_is_aug.append(True)
-                        cost = distance_matrix[i, sim_idx]
-                        dtw_augmented_preferences_costs.append(cost)
-                        iteration_dtw_costs.append(cost)
-                        dtw_augmented_returns.append((segment_returns[i], segment_returns[sim_idx]))
-            elif selected_query_pref == 2:
-                similar_to_j_indices = find_similar_segments_dtw(j, dtw_k_augment, distance_matrix)
-                for sim_idx in similar_to_j_indices:
-                    if sim_idx != i:
-                        dtw_augmented_pairs.append((i, sim_idx))
-                        dtw_augmented_preferences.append(2)
-                        dtw_augmented_is_aug.append(True)
-                        cost = distance_matrix[i, sim_idx]
-                        dtw_augmented_preferences_costs.append(cost)
-                        iteration_dtw_costs.append(cost)
-                        dtw_augmented_returns.append((segment_returns[i], segment_returns[sim_idx]))
-                similar_to_i_indices = find_similar_segments_dtw(i, dtw_k_augment, distance_matrix)
-                for sim_idx in similar_to_i_indices:
-                    if sim_idx != j:
-                        dtw_augmented_pairs.append((sim_idx, j))
-                        dtw_augmented_preferences.append(2)
-                        dtw_augmented_is_aug.append(True)
-                        cost = distance_matrix[sim_idx, j]
-                        dtw_augmented_preferences_costs.append(cost)
-                        iteration_dtw_costs.append(cost)
-                        dtw_augmented_returns.append((segment_returns[sim_idx], segment_returns[j]))
 
+        def add_augmented_pair(seg1, seg2, pref, distance):
+            """Helper function to add an augmented pair with all its metadata."""
+            if seg1 != seg2 and seg2 != seg1:  # Avoid duplicates
+                dtw_augmented_pairs.append((seg1, seg2))
+                dtw_augmented_preferences.append(pref)
+                dtw_augmented_is_aug.append(True)
+                dtw_augmented_pair_distances.append(distance)
+                dtw_augmented_returns.append((segment_returns[seg1], segment_returns[seg2]))
+
+        if dtw_enabled:
+            i, j = selected_query_pair
+            pref = selected_query_pref  # 1, 0, or 0.5
+
+            # Get similar segments for both i and j
+            similar_to_i, distances_i = find_similar_segments_dtw(i, dtw_k_augment, distance_matrix)
+            similar_to_j, distances_j = find_similar_segments_dtw(j, dtw_k_augment, distance_matrix)
+
+            # Add augmented pairs for both directions
+            for sim_idx, distance in zip(similar_to_i, distances_i):
+                add_augmented_pair(sim_idx, j, pref, distance)
+            for sim_idx, distance in zip(similar_to_j, distances_j):
+                add_augmented_pair(i, sim_idx, pref, distance)
+            
             labeled_pairs.extend(dtw_augmented_pairs)
             labeled_preferences.extend(dtw_augmented_preferences)
-            labeled_costs.extend(dtw_augmented_preferences_costs)
+            labeled_costs.extend(dtw_augmented_pair_distances)
             is_augmented_list.extend(dtw_augmented_is_aug)
+            
             print(f"DTW augmented pairs: {len(dtw_augmented_pairs)}")
-            augmented_pref_with_rewards = get_gt_preferences(data, segment_start_end, dtw_augmented_pairs)
-            augmented_acc = (np.array(augmented_pref_with_rewards) == np.array(dtw_augmented_preferences)).mean()
-            augmented_accuracy.append(augmented_acc)
-            print(f"Augmented accuracy: {augmented_acc:.4f}")
-            for dtw_augmented_pair in dtw_augmented_pairs:
-                if dtw_augmented_pair in candidate_pairs:
-                    candidate_pairs.remove(dtw_augmented_pair)
 
-        # Store the DTW costs for this iteration
-        metrics["dtw_costs_per_iter"].append(iteration_dtw_costs)
-
-        # Save labeled pairs info to file after each iteration
-        save_labeled_pairs_info(labeled_pairs, labeled_preferences, segment_returns, labeled_pairs_info_path, is_augmented_list=is_augmented_list)
-
-        if wandb.run is not None:
-            # Log queries and augmentations to wandb for this iteration
-            log_queries_to_wandb(
-                selected_query=selected_query_pair,
-                selected_pref=selected_query_pref,
-                segment_returns=segment_returns,
-                iteration=iteration,
-                dtw_augmented_pairs=dtw_augmented_pairs,
-                dtw_augmented_prefs=dtw_augmented_preferences,
-                dtw_augmented_costs=dtw_augmented_preferences_costs,
-                dtw_augmented_is_aug=dtw_augmented_is_aug,
-                dtw_augmented_returns=dtw_augmented_returns,
-                video_dict=video_dict,  # Pass video_dict for visualization
-                data=data,
-                segment_start_end=segment_start_end,
-                distance_matrix=distance_matrix,  # Pass distance matrix for DTW cost logging
-            )
+            # Compute augmented accuracy if using ground truth
+            if not hasattr(cfg.data, 'preferences_dir'):
+                augmented_pref_with_rewards = get_gt_preferences(data, segment_start_end, dtw_augmented_pairs)
+                augmented_acc = (np.array(augmented_pref_with_rewards) == np.array(dtw_augmented_preferences)).mean()
+                print(f"Augmented accuracy: {augmented_acc:.4f}")
+                # Remove augmented pairs from candidate pairs
+                for pair in dtw_augmented_pairs:
+                    if pair in candidate_pairs:
+                        candidate_pairs.remove(pair)
+            else:
+                print("Using human preferences, skipping augmented accuracy calculation.")
+                augmented_acc = None
 
         # Create dataset and data loaders
         ensemble_dataset = PreferenceDataset(
@@ -516,7 +436,8 @@ def active_preference_learning(cfg):
         train_loader = data_loaders['train']
         val_loader = data_loaders['val']
 
-        print("Training new ensemble")
+        # Train the ensemble reward model
+        print("Training ensemble reward model...")
         ensemble = EnsembleRewardModel(state_dim, action_dim, cfg.model.hidden_dims, cfg.active_learning.num_models)
 
         output_path = model_dir / "rm_training" / f"reward_model_training_{iteration}.png"
@@ -533,32 +454,54 @@ def active_preference_learning(cfg):
 
         ensemble = ensemble.to(device)
         print("Evaluating on test set...")
-        test_metrics = evaluate_model_on_test_set(ensemble.models[0], test_loader, device)
-        metrics["num_labeled"].append(num_queries)
+        test_metrics = evaluate_model_on_test_set(ensemble.models[0], test_loader, device, data=data, segment_start_end=segment_start_end)
+        metrics["num_labeled"].append(len(labeled_pairs))
         metrics["test_accuracy"].append(test_metrics["test_accuracy"])
         metrics["test_loss"].append(test_metrics["test_loss"])
-        metrics["avg_logpdf"].append(test_metrics["avg_logpdf"])
+        if dtw_enabled:
+            # Only log DTW costs if enabled
+            metrics["selected_pair_dtw_costs"].append(selected_query_pair_cost)
+            if "augmented_accuracy" in metrics:
+                metrics["augmented_accuracy"].append(augmented_acc)
         metrics["iterations"].append(iteration)
 
+        # Save labeled pairs info to file after each iteration
+        save_labeled_pairs_info(labeled_pairs, labeled_preferences, segment_returns, labeled_pairs_info_path, is_augmented_list=is_augmented_list)
+
         if wandb.run is not None:
+            # Log queries and augmentations to wandb for this iteration
+            log_queries_to_wandb(
+                selected_query=selected_query_pair,
+                selected_pref=selected_query_pref,
+                segment_returns=segment_returns,
+                iteration=iteration,
+                dtw_augmented_pairs=dtw_augmented_pairs,
+                dtw_augmented_prefs=dtw_augmented_preferences,
+                video_dict=video_dict,
+                data=data,
+                segment_start_end=segment_start_end,
+            )
+            
             # Log test metrics to wandb
-            wandb.log({
+            wandb_log_dict = {
                 "test_accuracy": test_metrics["test_accuracy"],
                 "test_loss": test_metrics["test_loss"],
-                "avg_logpdf": test_metrics["avg_logpdf"],
-                "num_labeled": num_queries,
+                "num_labeled": len(labeled_pairs),
                 "iteration": iteration,
-            }, step=iteration)
+            }
 
+            if "augmented_accuracy" in metrics:
+                wandb_log_dict["augmented_accuracy"] = augmented_acc
+            if cfg.active_learning.uncertainty_method in ["disagreement", "entropy"] and iteration > 1:
+                wandb_log_dict["top_uncertainty_score"] = top_uncertainty_score
+            wandb.log(wandb_log_dict, step=iteration)
+            
         # Update metrics with new keys if needed
-        if "val_losses" in metrics:
-            metrics["val_losses"].append(None)  # or actual val_loss if available
-
         if "test_loss_curve" not in metrics:
             metrics["test_loss_curve"] = []
             metrics["num_labeled_curve"] = []
         metrics["test_loss_curve"].append(test_metrics["test_loss"])
-        metrics["num_labeled_curve"].append(num_queries)
+        metrics["num_labeled_curve"].append(len(labeled_pairs))
 
         if iteration % cfg.training.save_model_every == 0:
             checkpoint_path = model_dir / "checkpoints" / f"checkpoint_iter_{iteration}.pt"
@@ -582,12 +525,8 @@ def active_preference_learning(cfg):
                 random_seed=cfg.random_seed
             )
 
-        # Plot DTW cost analysis
-        if iteration % cfg.training.reward_analysis_every == 0:
-            plot_dtw_cost_analysis(labeled_costs, model_dir, iteration, metrics["dtw_costs_per_iter"])
-
     # Plot active learning metrics
-    plot_active_learning_metrics(model_dir, metrics, augmented_accuracy)
+    plot_active_learning_metrics(model_dir, metrics)
 
     # Save config
     config_path = model_dir / "config.yaml"
@@ -604,7 +543,6 @@ def active_preference_learning(cfg):
     return {
         "seed": cfg.random_seed,
         "test_accuracy": test_metrics["test_accuracy"],
-        "test_log_prob": test_metrics["avg_logpdf"],
         "model_path": checkpoint_path,
     }
 

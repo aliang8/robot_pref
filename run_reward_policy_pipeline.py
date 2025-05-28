@@ -43,12 +43,15 @@ REWARD_MODEL_TEMPLATE_ACTIVE = [
 
 # Grid search parameters for active reward model
 ACTIVE_REWARD_MODEL_GRID = {
-    "active_learning.uncertainty_method": ["entropy", "disagreement"],  
-    "active_learning.total_queries": [5],
+    "active_learning.uncertainty_method": ["random"],  
+    "active_learning.total_queries": [10, 25, 50, 100],
     "dtw_augmentation.enabled": [True],
     "dtw_augmentation.use_heuristic_beta": [True],
     "dtw_augmentation.k_augment": [5],
-    "random_seed": [521]
+    "random_seed": [521, 522, 523],
+    "data.segment_length": [32],
+    "task": [TASK],
+    "data.num_test_pairs": [20], # Number of test pairs for reward model evaluation
 }
 
 # Policy training configuration

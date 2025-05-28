@@ -1,10 +1,10 @@
 """Preprocess trajectory data for preference learning."""
 
+import itertools
 import os
 import pickle
-import itertools
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List
 
 import hydra
 import numpy as np
@@ -12,9 +12,8 @@ import torch
 from omegaconf import DictConfig, OmegaConf
 from tqdm import tqdm
 
-import wandb
-from models.image_embedder import ImageEmbedder
 import utils.dtw as dtw
+from models.image_embedder import ImageEmbedder
 from utils.data import load_tensordict, segment_episodes_dynamic
 from utils.seed import set_seed
 
@@ -170,8 +169,11 @@ def main(cfg: DictConfig):
 
     # Compute DTW matrices if enabled
     if cfg.dtw.enabled:
-        # Compute standard DTW matrix
-        dtw_matrix_file = output_dir / f"dtw_matrix_{cfg.data.segment_length}.pkl"
+        if cfg.dtw.use_subsequence:
+            dtw_matrix_file = output_dir / f"sdtw_matrix_{cfg.data.segment_length}.pkl"
+        else:
+            dtw_matrix_file = output_dir / f"dtw_matrix_{cfg.data.segment_length}.pkl"
+
         
         if os.path.exists(dtw_matrix_file) and not cfg.data.overwrite:
             print(f"DTW matrix file already exists: {dtw_matrix_file}")
