@@ -40,7 +40,7 @@ def find_similar_segments_dtw(query_idx, k, distance_matrix):
     distances[query_idx] = float('inf')  # Exclude self
     similar_indices = np.argsort(distances)[:k]
 
-    return similar_indices
+    return similar_indices, distances
 
 def compute_segment_return(data, segment_start_end):
     """Compute the return (sum of rewards) for each segment."""
@@ -351,8 +351,8 @@ def active_preference_learning(cfg):
         # Add cost for selected query pair if DTW is enabled
         selected_query_pair_cost = None
         if dtw_enabled:
-            selected_query_pair_cost = distance_matrix[selected_query_pair[0], selected_query_pair[1]]
-            labeled_costs.append(selected_query_pair_cost)
+            # selected_query_pair_cost = distance_matrix[selected_query_pair[0], selected_query_pair[1]]
+            labeled_costs.append(0)
         else:
             labeled_costs.append(None)
 
@@ -371,18 +371,17 @@ def active_preference_learning(cfg):
         # Store DTW preference augmentation metrics
         dtw_augmented_pairs = []
         dtw_augmented_preferences = []
-        dtw_augmented_pair_costs = []
+        dtw_augmented_pair_distances = []
         dtw_augmented_is_aug = []
         dtw_augmented_returns = []
 
-        def add_augmented_pair(seg1, seg2, pref):
+        def add_augmented_pair(seg1, seg2, pref, distance):
             """Helper function to add an augmented pair with all its metadata."""
             if seg1 != seg2 and seg2 != seg1:  # Avoid duplicates
                 dtw_augmented_pairs.append((seg1, seg2))
                 dtw_augmented_preferences.append(pref)
                 dtw_augmented_is_aug.append(True)
-                cost = distance_matrix[seg1, seg2]
-                dtw_augmented_pair_costs.append(cost)
+                dtw_augmented_pair_distances.append(distance)
                 dtw_augmented_returns.append((segment_returns[seg1], segment_returns[seg2]))
 
         if dtw_enabled:
@@ -390,18 +389,18 @@ def active_preference_learning(cfg):
             pref = selected_query_pref  # 1, 0, or 0.5
 
             # Get similar segments for both i and j
-            similar_to_i = find_similar_segments_dtw(i, dtw_k_augment, distance_matrix)
-            similar_to_j = find_similar_segments_dtw(j, dtw_k_augment, distance_matrix)
+            similar_to_i, distances_i = find_similar_segments_dtw(i, dtw_k_augment, distance_matrix)
+            similar_to_j, distances_j = find_similar_segments_dtw(j, dtw_k_augment, distance_matrix)
 
             # Add augmented pairs for both directions
-            for sim_idx in similar_to_i:
-                add_augmented_pair(sim_idx, j, pref)
-            for sim_idx in similar_to_j:
-                add_augmented_pair(i, sim_idx, pref)
+            for sim_idx, distance in zip(similar_to_i, distances_i):
+                add_augmented_pair(sim_idx, j, pref, distance)
+            for sim_idx, distance in zip(similar_to_j, distances_j):
+                add_augmented_pair(i, sim_idx, pref, distance)
             
             labeled_pairs.extend(dtw_augmented_pairs)
             labeled_preferences.extend(dtw_augmented_preferences)
-            labeled_costs.extend(dtw_augmented_pair_costs)
+            labeled_costs.extend(dtw_augmented_pair_distances)
             is_augmented_list.extend(dtw_augmented_is_aug)
             
             print(f"DTW augmented pairs: {len(dtw_augmented_pairs)}")

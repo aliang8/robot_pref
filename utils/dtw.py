@@ -176,13 +176,8 @@ def get_single_match_subsequence(query: np.ndarray, play: np.ndarray):
     path = compute_optimal_warping_path_subsequence_dtw_21(accumulated_cost_matrix)
     start = path[0, 1]
     if start < 0:
-        # assert start == -1 # TODO: do we need this?
         start = 0
     end = path[-1, 1]
     cost = accumulated_cost_matrix[-1, end]
-
-    end = (
-        end + 1
-    )  # Note that the actual end index is inclusive in this case so +1 to use python : based indexing
 
     return cost, path

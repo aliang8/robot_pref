@@ -1,7 +1,7 @@
 # bc
 python train_policy.py --config-name=bc_robomimic \
-    data.env_name=lift \
-    data.data_path=/scr2/shared/pref/datasets/robomimic/lift/mg_image_dense.pt
+    data.env_name=can \
+    data.data_path=/scr/shared/datasets/robot_pref/can_mh/can_mh.pt
 
 # precompute dtw matrix
 python preprocess_dtw_matrix.py \
