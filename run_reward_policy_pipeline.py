@@ -9,26 +9,29 @@ import select
 import subprocess
 import sys
 from pathlib import Path
+from datetime import datetime
 
 # ============================================================================
 # EDIT THESE TEMPLATE COMMANDS TO CUSTOMIZE THE PIPELINE
 # ============================================================================
 
 # Dataset configuration
-DATASET = "/scr2/shared/pref/datasets/robomimic/can/can_mg_image_dense_balanced.pt"
-ENV_NAME = "can"  # Environment name
+# DATASET = "/scr2/shared/pref/datasets/robomimic/can/can_mg_image_dense_balanced.pt"
+# ENV_NAME = "can"  # Environment name
+
+DATASET = "/scr/shared/datasets/robot_pref/mw-assembly-v2/mw-assembly-v2.pt"
+ENV_NAME = "assembly-v2-goal-observable"  # Environment name
 
 # Reward model training configuration
 REWARD_MODEL_TEMPLATE = [
     "python", "train_reward_model.py",
-    "num_seeds=1",                        
+    "num_seeds=2",                          
     f"data.data_path={DATASET}",
-    "data.num_pairs=100"
 ]
 
 # Grid search parameters for regular reward model
 REWARD_MODEL_GRID = {
-    "data.num_pairs": [100, 500, 1000],
+    "data.num_pairs": [25,50,100],
 }
 
 # Reward model training configuration for active learning
@@ -49,23 +52,77 @@ ACTIVE_REWARD_MODEL_GRID = {
 }
 
 # Policy training configuration
-POLICY_ALGORITHM = "iql_robomimic"  # One of: "iql", "bc"
+POLICY_ALGORITHM = "iql_mw"  # One of: "iql", "bc"
 POLICY_TEMPLATE = [
     "python", "train_policy.py",
     f"--config-name={POLICY_ALGORITHM}",
     f"data.data_path={DATASET}",
     f"data.env_name={ENV_NAME}",
-    "training.n_epochs=125",              # Number of training epochs
+    f"iql.weight_temp=1.0",
+    "training.n_epochs=100",              # Number of training epochs
     "data.use_ground_truth=false",        # Don't use ground truth rewards
     "data.use_zero_rewards=false",        # Don't use zero rewards
 ]
 
 USE_MULTIRUN = True  # Set to True to use multirun
-RANDOM_SEEDS = "521"  # Comma-separated list of seeds to use
+RANDOM_SEEDS = "521,522"  # Comma-separated list of seeds to use
 LAUNCHER = "slurm"  # Launcher for multirun (usually "slurm" on clusters)
 
 # Current pipeline mode
-USE_ACTIVE_LEARNING = True
+USE_ACTIVE_LEARNING = False
+
+# Global variable to store commands log file
+COMMANDS_LOG_FILE = None
+
+def initialize_commands_log():
+    """Initialize the commands log file."""
+    global COMMANDS_LOG_FILE
+    
+    # Create logs directory if it doesn't exist
+    log_dir = "logs"
+    os.makedirs(log_dir, exist_ok=True)
+    
+    # Create timestamped log file
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    dataset_name = Path(DATASET).stem
+    mode = "active" if USE_ACTIVE_LEARNING else "regular"
+    COMMANDS_LOG_FILE = os.path.join(log_dir, f"pipeline_commands_{mode}_{dataset_name}_{timestamp}.txt")
+    
+    # Write header to log file
+    with open(COMMANDS_LOG_FILE, 'w') as f:
+        f.write("=" * 100 + "\n")
+        f.write("ROBOT PREFERENCE LEARNING PIPELINE - COMMANDS LOG\n")
+        f.write("=" * 100 + "\n")
+        f.write(f"Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+        f.write(f"Dataset: {DATASET}\n")
+        f.write(f"Environment: {ENV_NAME}\n")
+        f.write(f"Mode: {'Active Learning' if USE_ACTIVE_LEARNING else 'Regular'}\n")
+        f.write(f"Policy Algorithm: {POLICY_ALGORITHM}\n")
+        f.write(f"Use Multirun: {USE_MULTIRUN}\n")
+        f.write(f"Random Seeds: {RANDOM_SEEDS}\n")
+        f.write("=" * 100 + "\n\n")
+    
+    print(f"Commands will be logged to: {COMMANDS_LOG_FILE}")
+    return COMMANDS_LOG_FILE
+
+def log_command(cmd, description="", section=""):
+    """Log a command to the commands file."""
+    global COMMANDS_LOG_FILE
+    
+    if COMMANDS_LOG_FILE is None:
+        return
+    
+    with open(COMMANDS_LOG_FILE, 'a') as f:
+        if section:
+            f.write(f"\n{'-' * 80}\n")
+            f.write(f"SECTION: {section}\n")
+            f.write(f"{'-' * 80}\n")
+        
+        if description:
+            f.write(f"# {description}\n")
+        
+        f.write(f"# Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+        f.write(f"{' '.join(cmd)}\n\n")
 
 def generate_grid_combinations(grid_params):
     """Generate all combinations of grid parameters, but only use the max value for active_learning.total_queries."""
@@ -159,13 +216,14 @@ def run_with_tqdm_support(cmd):
     return returncode, output
 
 
-def train_reward_model(template, grid_params=None):
+def train_reward_model(template, grid_params=None, combo_num=1, total_combos=1):
     """Train a reward model with specified parameters."""
     # Start with the base template
     cmd = template.copy()
     
     # Add grid parameters if specified
     grid_desc = ""
+    param_desc = ""
     if grid_params:
         for param_name, param_value in grid_params.items():
             # Remove any existing parameter with the same name
@@ -173,6 +231,13 @@ def train_reward_model(template, grid_params=None):
             # Add the new parameter
             cmd.append(f"{param_name}={param_value}")
             grid_desc += f"_{param_name.split('.')[-1]}_{param_value}"
+            param_desc += f"{param_name}={param_value}, "
+        param_desc = param_desc.rstrip(", ")
+
+    # Log the command
+    section_name = f"REWARD MODEL TRAINING - Combination {combo_num}/{total_combos}"
+    description = f"Training reward model with parameters: {param_desc}" if param_desc else "Training reward model with default parameters"
+    log_command(cmd, description, section_name)
 
     # Run reward model training with output capture
     print("\n" + "#" * 100)
@@ -199,6 +264,10 @@ def train_reward_model(template, grid_params=None):
         model_paths.append(model_path)
         model_dir = os.path.dirname(model_path)
 
+    # take unique model paths, take paths and remove spaces 
+    model_paths = [path.replace(" ", "") for path in model_paths]
+    model_paths = list(set(model_paths))
+
     # If nothing matched the first pattern, check the second
     if not model_paths:
         for match in model_saved_pattern_active.finditer(output):
@@ -213,13 +282,14 @@ def train_reward_model(template, grid_params=None):
     
     print("\n" + "-" * 80)
     print(f">> Found model directory: {model_dir}")
+    print(f">> Model paths: {model_paths}")
     print(f">> Found {len(model_paths)} trained reward models")
     print("-" * 80)
     
     return model_dir, model_paths, grid_desc
 
 
-def train_policy(reward_model_path, grid_desc=""):
+def train_policy(reward_model_path, grid_desc="", combo_num=1):
     """Launch policy training in the background without tracking."""
     print("\n" + "*" * 80)
     print("** LAUNCHING POLICY TRAINING IN BACKGROUND **")
@@ -246,6 +316,11 @@ def train_policy(reward_model_path, grid_desc=""):
         cmd.append(f"hydra.job.name={job_name}")
         cmd.append("--multirun")
     
+    # Log the command
+    section_name = f"POLICY TRAINING - Combination {combo_num} (Background)"
+    description = f"Training {POLICY_ALGORITHM} policy with reward model: {os.path.basename(reward_model_path)}"
+    log_command(cmd, description, section_name)
+    
     # Create log file for the background process
     log_dir = "logs"
     os.makedirs(log_dir, exist_ok=True)
@@ -268,6 +343,9 @@ def train_policy(reward_model_path, grid_desc=""):
 
 
 def main():
+    # Initialize commands log file
+    commands_log_path = initialize_commands_log()
+    
     # Choose which reward model template and grid to use
     if USE_ACTIVE_LEARNING:
         template = REWARD_MODEL_TEMPLATE_ACTIVE
@@ -283,6 +361,7 @@ def main():
     print("+" + " " * 98 + "+")
     print(f"+{' PIPELINE STARTING ':^98}+")
     print(f"+{f' Total Combinations: {len(param_combinations)} ':^98}+")
+    print(f"+{f' Commands Log: {os.path.basename(commands_log_path)} ':^98}+")
     print("+" + " " * 98 + "+")
     print("+" * 100)
     
@@ -292,6 +371,14 @@ def main():
         print(f"~ Combo {i+1}: {params}")
     print("~" * 100)
     
+    # Log the parameter combinations to file
+    with open(COMMANDS_LOG_FILE, 'a') as f:
+        f.write("PARAMETER COMBINATIONS:\n")
+        f.write("-" * 50 + "\n")
+        for i, params in enumerate(param_combinations):
+            f.write(f"Combination {i+1}: {params}\n")
+        f.write("\n")
+    
     # Train reward models for each parameter combination
     for i, params in enumerate(param_combinations):
         print("\n" + "=" * 100)
@@ -300,7 +387,7 @@ def main():
         print("=" * 100)
 
         # Train reward model with these parameters
-        _, model_paths, grid_desc = train_reward_model(template, params)
+        _, model_paths, grid_desc = train_reward_model(template, params, i+1, len(param_combinations))
 
         # Run train_policy for model_paths that match any value in ACTIVE_REWARD_MODEL_GRID["active_learning.total_queries"]
         total_queries_list = ACTIVE_REWARD_MODEL_GRID["active_learning.total_queries"]
@@ -313,15 +400,23 @@ def main():
             if match:
                 iter_num = int(match.group(1))
                 if iter_num in total_queries_list:
-                    train_policy(model_path, grid_desc)
+                    train_policy(model_path, grid_desc, i+1)
             else:
                 # If no match, fallback to running all (shouldn't happen)
-                train_policy(model_path, grid_desc)
+                train_policy(model_path, grid_desc, i+1)
+    
+    # Write completion message to log file
+    with open(COMMANDS_LOG_FILE, 'a') as f:
+        f.write("\n" + "=" * 100 + "\n")
+        f.write("PIPELINE COMPLETED SUCCESSFULLY\n")
+        f.write(f"Completion Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+        f.write("=" * 100 + "\n")
     
     print("\n" + "+" * 100)
     print("+" + " " * 98 + "+")
     print(f"+{' PIPELINE COMPLETED SUCCESSFULLY ':^98}+")
     print(f"+{' Policy training processes are running in the background ':^98}+")
+    print(f"+{f' Commands logged to: {os.path.basename(commands_log_path)} ':^98}+")
     print("+" + " " * 98 + "+")
     print("+" * 100)
 

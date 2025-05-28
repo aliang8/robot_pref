@@ -9,6 +9,7 @@ import matplotlib.pyplot as plt
 import pandas as pd
 import seaborn as sns
 from omegaconf import DictConfig, OmegaConf
+from tqdm import tqdm
 
 import wandb
 from wandb.errors import CommError
@@ -130,7 +131,7 @@ def fetch_wandb_runs(
 
     # Filter runs manually
     filtered_runs = []
-    for run in runs:
+    for run in tqdm(runs):
         include_run = True
 
         # Apply user filter if specified

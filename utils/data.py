@@ -473,7 +473,7 @@ def load_dataset(
     # Convert to numpy for d3rlpy
     observations_np = valid_obs.numpy()
     actions_np = valid_actions.numpy()
-
+    
     # Create MDPDataset with the rewards
     dataset = MDPDataset(
         observations=observations_np,
