@@ -21,6 +21,7 @@ dtw_augmentation:
   k_augment: 5                # Number of similar segments to find for each part of a pair
   max_dtw_segments: 5000      # Max segments for computing DTW matrix (null or remove for all).
   use_heuristic_beta: false   # Use heuristic beta for BT Loss
+  use_subsequence: true       # Use subsequence for DTW matrix
 
 output:
   output_dir: results/active_reward_model
@@ -29,7 +30,7 @@ output:
 training:
   save_model_every: 5
   reward_analysis_every: 5
-  num_epochs: 300
+  num_epochs: 200
   batch_size: 256
   num_workers: 0
   pin_memory: True

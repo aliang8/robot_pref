@@ -44,7 +44,7 @@ def evaluate_model_on_test_set(model, test_loader, device, is_distributional=Fal
     is_ensemble = hasattr(model, "num_models") and model.num_models > 1
 
     with torch.no_grad():
-        for batch in tqdm(test_loader, desc="Testing"):
+        for batch_idx, batch in enumerate(tqdm(test_loader, desc="Testing")):
             
             batch = {k: v.to(device) for k, v in batch.items()}
             obs1 = batch["obs1"]

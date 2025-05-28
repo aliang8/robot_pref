@@ -201,11 +201,19 @@ def active_preference_learning(cfg):
     reward_max = rewards.max().item()
     reward_min = rewards.min().item()
 
+    use_human_pref = hasattr(cfg.data, 'preferences_dir') and cfg.data.preferences_dir is not None
+
     # Load the DTW Matrix
     distance_matrix = None
     segment_start_end = None
 
-    dtw_matrix_file = Path(cfg.data.data_path).parent / f"dtw_matrix_{cfg.data.segment_length}.pkl"
+    if cfg.dtw_augmentation.use_subsequence:
+        print("Using S-DTW matrix")
+        dtw_matrix_file = Path(cfg.data.data_path).parent / f"sdtw_matrix_{cfg.data.segment_length}.pkl"
+    else:
+        print("Using DTW matrix")
+        dtw_matrix_file = Path(cfg.data.data_path).parent / f"dtw_matrix_{cfg.data.segment_length}.pkl"
+
     if not dtw_matrix_file.exists() and dtw_enabled:
         print(f"DTW matrix file not found at {dtw_matrix_file}")
         assert False, "DTW matrix file not found. Please run preprocess_dtw_matrix.py"
@@ -234,7 +242,7 @@ def active_preference_learning(cfg):
     all_segment_pairs = list(itertools.combinations(range(len(segment_start_end)), 2))
 
     # Prepare segment pairs and preferences for test set
-    if hasattr(cfg.data, 'preferences_dir'):
+    if use_human_pref:
         print("Loading preferences from files...")
         preferences, pref_stats = load_preferences_from_directory(cfg.data.preferences_dir)
         all_segment_pairs, preferences = filter_pairs_with_preferences(all_segment_pairs, preferences)
@@ -295,7 +303,7 @@ def active_preference_learning(cfg):
         metrics["selected_pair_dtw_costs"] = []
 
         # TODO: once we have more human annotated prefs, we can compute the augmented accuracy, not enough right now
-        if not hasattr(cfg.data, 'preferences_dir'):
+        if not use_human_pref:
             metrics["augmented_accuracy"] = []
 
     while num_queries < total_queries:
@@ -339,7 +347,7 @@ def active_preference_learning(cfg):
         is_augmented_list.append(False)  # Not augmented, original query
 
         # Get preference for selected query pair from human or use ground truth
-        if hasattr(cfg.data, 'preferences_dir'):
+        if use_human_pref:
             print("Using human preferences for selected query pair...")
             selected_query_pref = preferences[selected_query_pair_index]
             preferences = np.delete(preferences, selected_query_pair_index) # Remove the selected query pair preference from the list
@@ -406,7 +414,7 @@ def active_preference_learning(cfg):
             print(f"DTW augmented pairs: {len(dtw_augmented_pairs)}")
 
             # Compute augmented accuracy if using ground truth
-            if not hasattr(cfg.data, 'preferences_dir'):
+            if use_human_pref:
                 augmented_pref_with_rewards = get_gt_preferences(data, segment_start_end, dtw_augmented_pairs)
                 augmented_acc = (np.array(augmented_pref_with_rewards) == np.array(dtw_augmented_preferences)).mean()
                 print(f"Augmented accuracy: {augmented_acc:.4f}")
