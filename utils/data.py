@@ -176,7 +176,7 @@ def segment_episodes(data, segment_length):
     episode_start_indices = {}
     abs_idx = 0
     print(f"Segmenting {len(unique_episodes)} episodes")
-    for episode_idx in unique_episodes:
+    for episode_idx in tqdm(unique_episodes):
         episode_mask = data["episode"] == episode_idx
         episode_len = np.sum(episode_mask.numpy())
         if episode_len != episode_len_gt:

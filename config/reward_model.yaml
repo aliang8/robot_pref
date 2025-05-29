@@ -6,7 +6,7 @@ defaults:
 num_seeds: 3
 
 # task: pick_up_green_and_slide_pot_right
-task: assembly-v2
+task: mw-assembly-v2
 data_dir: /scr/shared/datasets/robot_pref
 
 data:
@@ -14,12 +14,15 @@ data:
   segment_length: 32
   num_segments: 50000
   num_pairs: 1000
+  num_test_pairs: 200  # Number of pairs to hold out for testing
   normalize_obs: false
   norm_method: "standard"
   segment_pairs_path: "${data_dir}/${task}/segment_pairs.npy"  # Optional: path to segment pairs file
   segment_indices_path: "${data_dir}/${task}/segment_start_end_indices.npy"  # Optional: path to segment indices file
   # preferences_dir: "${data_dir}/${task}/preferences"  # Optional: directory containing preference JSON files
   preferences_dir: null
+  # segment_pairs_path: null
+  # segment_indices_path: null
 
   use_images: false
   image_key: "image"

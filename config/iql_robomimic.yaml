@@ -32,7 +32,7 @@ training:
   save_interval: 10
 
 evaluation:
-  record_video: False
+  record_video: True
   parallel_eval: False
 
 output:
