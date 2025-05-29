@@ -37,21 +37,19 @@ REWARD_MODEL_GRID = {
 # Reward model training configuration for active learning
 REWARD_MODEL_TEMPLATE_ACTIVE = [
     "python", "train_reward_model_active.py",
-    "num_seeds=1",                        
+    "num_seeds=2",                        
     f"data.data_path={DATASET}"
 ]
 
 # Grid search parameters for active reward model
 ACTIVE_REWARD_MODEL_GRID = {
-    "active_learning.uncertainty_method": ["random"],  
-    "active_learning.total_queries": [10, 25, 50, 100],
+    "active_learning.uncertainty_method": ["entropy", "disagreement"],  
+    "active_learning.total_queries": [10,25,50],
     "dtw_augmentation.enabled": [True],
-    "dtw_augmentation.use_heuristic_beta": [True],
+    "dtw_augmentation.use_heuristic_beta": [False],
     "dtw_augmentation.k_augment": [5],
     "random_seed": [521, 522, 523],
-    "data.segment_length": [32],
-    "task": [TASK],
-    "data.num_test_pairs": [20], # Number of test pairs for reward model evaluation
+    "data.segment_length": [50],
 }
 
 # Policy training configuration
@@ -72,7 +70,7 @@ RANDOM_SEEDS = "521,522"  # Comma-separated list of seeds to use
 LAUNCHER = "slurm"  # Launcher for multirun (usually "slurm" on clusters)
 
 # Current pipeline mode
-USE_ACTIVE_LEARNING = False
+USE_ACTIVE_LEARNING = True
 
 # Global variable to store commands log file
 COMMANDS_LOG_FILE = None

@@ -145,7 +145,8 @@ def main(cfg: DictConfig):
     
     # Set up input and output paths
     data_path = Path(cfg.data.data_path)
-    output_dir = data_path.parent
+    output_dir = data_path.parent / f"seg_{cfg.data.segment_length}"
+    output_dir.mkdir(parents=True, exist_ok=True)
     print(f"\nOutput directory set to: {output_dir}")
 
     # Load data
@@ -169,10 +170,7 @@ def main(cfg: DictConfig):
 
     # Compute DTW matrices if enabled
     if cfg.dtw.enabled:
-        if cfg.dtw.use_subsequence:
-            dtw_matrix_file = output_dir / f"sdtw_matrix_{cfg.data.segment_length}.pkl"
-        else:
-            dtw_matrix_file = output_dir / f"dtw_matrix_{cfg.data.segment_length}.pkl"
+        dtw_matrix_file = output_dir / f"dtw_matrix_{cfg.data.segment_length}.pkl"
 
         
         if os.path.exists(dtw_matrix_file) and not cfg.data.overwrite:

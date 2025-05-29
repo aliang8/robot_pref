@@ -209,10 +209,10 @@ def active_preference_learning(cfg):
 
     if cfg.dtw_augmentation.use_subsequence:
         print("Using S-DTW matrix")
-        dtw_matrix_file = Path(cfg.data.data_path).parent / f"sdtw_matrix_{cfg.data.segment_length}.pkl"
+        dtw_matrix_file = Path(cfg.data.data_path).parent / f"seg_{cfg.data.segment_length}" / f"sdtw_matrix_{cfg.data.segment_length}.pkl"
     else:
         print("Using DTW matrix")
-        dtw_matrix_file = Path(cfg.data.data_path).parent / f"dtw_matrix_{cfg.data.segment_length}.pkl"
+        dtw_matrix_file = Path(cfg.data.data_path).parent / f"seg_{cfg.data.segment_length}" / f"dtw_matrix_{cfg.data.segment_length}.pkl"
 
     if not dtw_matrix_file.exists() and dtw_enabled:
         print(f"DTW matrix file not found at {dtw_matrix_file}")
