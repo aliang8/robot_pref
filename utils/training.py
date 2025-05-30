@@ -1,4 +1,8 @@
+import io
+
+import matplotlib.animation as animation
 import matplotlib.pyplot as plt
+import numpy as np
 import seaborn as sns
 import torch
 from torch import optim
@@ -25,10 +29,7 @@ def evaluate_model_on_test_set(model, test_loader, device, data=None, segment_st
     Returns:
         Dictionary containing evaluation metrics
     """
-    import io
-    import numpy as np
-    import matplotlib.pyplot as plt
-    import matplotlib.animation as animation
+    
 
     print("\nEvaluating on test set...")
     model.eval()

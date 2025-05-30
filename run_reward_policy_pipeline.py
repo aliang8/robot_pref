@@ -15,9 +15,9 @@ from pathlib import Path
 # ============================================================================
 
 # Dataset configuration
-DATASET = "/scr/shared/datasets/robot_pref/lift_mh_mg_combined/lift_mh_mg_combined.pt"
+DATASET = "/scr/shared/datasets/robot_pref/lift/lift.pt"
 ENV_NAME = "lift"  # Environment name
-TASK = "lift_mh_mg_combined"  # Task name
+TASK = "lift"  # Task name
 
 # Reward model training configuration
 REWARD_MODEL_TEMPLATE = [
@@ -41,16 +41,13 @@ REWARD_MODEL_TEMPLATE_ACTIVE = [
 
 # Grid search parameters for active reward model
 ACTIVE_REWARD_MODEL_GRID = {
-    "active_learning.uncertainty_method": ["random"],  
-    "active_learning.total_queries": [10, 25, 50, 100],
+    "active_learning.uncertainty_method": ["disagreement", "entropy"],  
+    "active_learning.total_queries": [10, 25, 50, 75, 100],
     "dtw_augmentation.enabled": [True, False],
-    "dtw_augmentation.use_heuristic_beta": [False],
-    "dtw_augmentation.k_augment": [5],
-    "random_seed": [521, 522, 523],
+    "random_seed": [42, 43, 44],
     "data.segment_length": [32],
     "task": [TASK],
-    "data.num_test_pairs": [20], # Number of test pairs for reward model evaluation
-    "wandb.use_wandb": [True]
+    "data.num_test_pairs": [1000], # Number of test pairs for reward model evaluation
 }
 
 # Policy training configuration
@@ -66,7 +63,7 @@ POLICY_TEMPLATE = [
 ]
 
 USE_MULTIRUN = True  # Set to True to use multirun
-RANDOM_SEEDS = "521,522,523"  # Comma-separated list of seeds to use
+RANDOM_SEEDS = "42,43,44"  # Comma-separated list of seeds to use
 LAUNCHER = "slurm"  # Launcher for multirun (usually "slurm" on clusters)
 
 # Current pipeline mode

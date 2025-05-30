@@ -2,7 +2,8 @@ active_learning:
   uncertainty_method: "entropy"       # Uncertainty estimation method: "entropy", "disagreement", or "random"
   num_models: 5                       # Number of models to use for uncertainty estimation
   total_queries_per_iteration: 1      # Number of pairs to select in each iteration
-  total_queries: 50                   # Total number of queries to make
+  total_queries: 100                  # Total number of queries to make
+  use_gt_rewards: true               # Use ground truth rewards for preferences
 
 model:
   hidden_dims: [256, 256]
@@ -13,18 +14,19 @@ data:
   segment_length: 64
   num_segments: 10000
   num_pairs: 5000
-  subsamples: 51000
-  num_test_pairs: 10000
+  subsamples: 50000
+  num_test_pairs: 1000
 
 dtw_augmentation:
-  enabled: false              # Set to true to enable DTW augmentation
-  k_augment: 5                # Number of similar segments to find for each part of a pair
-  max_dtw_segments: 5000      # Max segments for computing DTW matrix (null or remove for all).
-  use_heuristic_beta: false   # Use heuristic beta for BT Loss
+  enabled: false                # Set to true to enable DTW augmentation
+  k_augment: 5                  # Number of similar segments to find for each part of a pair
+  max_dtw_segments: 5000        # Max segments for computing DTW matrix (null or remove for all).
+  use_heuristic_beta: false     # Use heuristic beta for BT Loss
+  add_cross_combinations: false # Add cross combinations of similar segments
 
 output:
   output_dir: results/active_reward_model
-  model_dir_name: "DATASET_NAME_active_${active_learning.uncertainty_method}_queries${active_learning.total_queries}_aug${dtw_augmentation.enabled}_k${dtw_augmentation.k_augment}_beta${dtw_augmentation.use_heuristic_beta}_seed${random_seed}"
+  model_dir_name: "DATASET_NAME_active_${active_learning.uncertainty_method}_tq${active_learning.total_queries}_aug${dtw_augmentation.enabled}_beta${dtw_augmentation.use_heuristic_beta}_cross${dtw_augmentation.add_cross_combinations}_seed${random_seed}"
 
 training:
   save_model_every: 5

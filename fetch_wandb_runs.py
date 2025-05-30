@@ -80,6 +80,10 @@ def create_display_name(path):
         if k_match:
             components["num_augment"] = f"k{k_match.group(1)}"
 
+        cross_match = re.search(r"cross([a-zA-Z]+)", parent_dir)
+        if cross_match and cross_match.group(1) == "True":
+            components["cross"] = "CR"
+
         # Build the display string
         if components:
             # Sort components by key to ensure consistent ordering
@@ -214,6 +218,7 @@ def fetch_wandb_runs(
 def save_run_df(run_data, output_dir="run_data"):
     """Convert run data to a pandas DataFrame with relevant metrics."""
     rows = []
+    
     for run in run_data:
         # Basic run information
         row = {
@@ -307,181 +312,186 @@ def plot_reward_model_comparisons(df, output_dir="reward_model_plots"):
     # Get unique datasets and algorithms
     datasets = df_filtered["data.data_path"].unique()
     algorithms = df_filtered["algorithm"].unique()
+
+    # Extract active learning methods from reward model paths
+    methods = set()
+
+    for path in df_filtered["data.reward_model_path"].unique():
+        path = Path(path)
+        parent_dir = path.parent.name if "checkpoints" not in path.parent.name else path.parent.parent.name
+        method_match = re.search(r"active_([a-zA-Z]+)", parent_dir)
+        if method_match:
+            methods.add(method_match.group(1))
+    methods = sorted(list(methods))
+
+    print(f"Found {len(methods)} active learning methods: {methods}")
     print(f"Found {len(datasets)} datasets to plot: {datasets}")
     print(f"Found {len(algorithms)} algorithms to plot: {algorithms}")
 
-    # Loop through each dataset (each separate plot)
+    # Loop through each dataset and method
     for dataset in datasets:
-        # Filter data for this dataset and algorithm
-        filtered_df = df_filtered[
-            (df_filtered["data.data_path"] == dataset)
-            & (df_filtered["algorithm"] == "iql")
-        ].copy()
+        for method in methods:
+            # Filter data for this dataset, method, and algorithm
+            filtered_df = df_filtered[
+                (df_filtered["data.data_path"] == dataset)
+                & (df_filtered["algorithm"] == "iql")
+                & (df_filtered["data.reward_model_path"].str.contains(f"active_{method}", na=False))
+            ].copy()
 
-        # Add 'iter' column based on reward model path
-        filtered_df["iter"] = filtered_df["data.reward_model_path"].apply(extract_iter_from_path)
-
-        # Create a cleaner key from the model path
-        filtered_df.loc[:, "key"] = filtered_df["data.reward_model_path"].apply(
-            lambda path: create_display_name(path) if isinstance(path, str) else path
-        )
-
-        if len(filtered_df) == 0:
-            continue
-
-        # Special case: BC comparison baseline
-        bc_df = df_filtered[
-            (df_filtered["data.data_path"] == dataset)
-            & (df_filtered["algorithm"] == "bc")
-        ].copy()
-
-        if len(bc_df) > 0:
-            bc_df.loc[:, "key"] = "BC"
-            bc_df["iter"] = None  # BC does not have an iter
-
-            # Add BC to filtered_df
-            filtered_df = pd.concat([filtered_df, bc_df])
-
-        # Special case: use_zero_rewards
-        filtered_df.loc[
-            (filtered_df["data.data_path"] == dataset)
-            & (filtered_df["algorithm"] == "iql")
-            & (filtered_df["data.use_zero_rewards"] == True),
-            "key",
-        ] = "Zero"
-
-        # Special case: use_ground_truth
-        filtered_df.loc[
-            (filtered_df["data.data_path"] == dataset)
-            & (filtered_df["algorithm"] == "iql")
-            & (filtered_df["data.use_ground_truth"] == True),
-            "key",
-        ] = "GT"
-
-        # Find all unique iter values (including None for non-iter runs)
-        unique_iters = sorted(filtered_df["iter"].dropna().unique())
-        # If there are no iter values, just plot once (legacy behavior)
-        if not unique_iters:
-            unique_iters = [None]
-
-        print(f"Unique iter values: {unique_iters}")
-        
-        # Create a single figure with 3 columns of subplots
-        num_iters = len(unique_iters)
-        # num_rows = (num_iters + 2) // 3  # Ceiling division to determine rows needed
-        num_rows = 2 # TODO: idk why but only if hardcoded to 2, it works
-        
-        fig, axes = plt.subplots(num_rows, 3, figsize=(18, 6 * num_rows), constrained_layout=True)
-        
-        dataset_name = Path(dataset).name
-        # Add a main title for the entire figure
-        fig.suptitle(f"Reward Model Comparison on {dataset_name}", fontsize=20, y=1.02)
-
-        for i, iter_value in enumerate(unique_iters):
-            # Calculate row and column for current subplot
-            row_idx = i // 3
-            col_idx = i % 3
-
-            # axes is 2D array of shape (num_rows, 3)
-            if row_idx >= axes.shape[0] or col_idx >= axes.shape[1]:
-                # No axis for this subplot, skip
-                continue
-            ax = axes[row_idx, col_idx]
-
-            if iter_value is not None:
-                iter_mask = filtered_df["iter"] == iter_value
-                plot_df = filtered_df[iter_mask | filtered_df["iter"].isna()].copy()
-                iter_str = f"_iter{iter_value}"
-                print(f"Plotting for dataset {dataset} at iter={iter_value} with {len(plot_df)} runs")
-            else:
-                # Plot all runs with iter=None (e.g., BC, GT, Zero, or non-iter reward models)
-                plot_df = filtered_df[filtered_df["iter"].isna()].copy()
-                iter_str = ""
-                print(f"Plotting for dataset {dataset} with no iter (baseline/non-iter) with {len(plot_df)} runs")
-
-            if len(plot_df) == 0:
-                # Hide this axis and continue
-                ax.set_visible(False)
+            if len(filtered_df) == 0:
                 continue
 
-            # Calculate statistics for each reward model
-            metric_column = "top3_avg_eval_success_rate"
-            grouped = plot_df.groupby(["key"])
+            # Add 'iter' column based on reward model path
+            filtered_df["iter"] = filtered_df["data.reward_model_path"].apply(extract_iter_from_path)
 
-            stats_dict = {
-                "mean": grouped[metric_column].mean(),
-                "std": grouped[metric_column].std(),
-                "min": grouped[metric_column].min(),
-                "max": grouped[metric_column].max(),
-                "count": grouped[metric_column].count(),
-                "median": grouped[metric_column].median(),
-            }
-
-            stats = pd.DataFrame(stats_dict).reset_index()
-            stats = stats.sort_values("mean", ascending=True)
-
-            # drop the reward_model/state_action_reward_model.pt
-            stats = stats[stats["key"] != "reward_model/state_action_reward_model.pt"]
-
-            # Create the bar plot
-            sns.barplot(
-                x="key",
-                y="mean",
-                data=stats,
-                palette="viridis",
-                ax=ax
+            # Create a cleaner key from the model path
+            filtered_df.loc[:, "key"] = filtered_df["data.reward_model_path"].apply(
+                lambda path: create_display_name(path) if isinstance(path, str) else path
             )
 
-            # Remove top and right spines
-            ax.spines["top"].set_visible(False)
-            ax.spines["right"].set_visible(False)
+            # Special case: BC comparison baseline
+            bc_df = df_filtered[
+                (df_filtered["data.data_path"] == dataset)
+                & (df_filtered["algorithm"] == "bc")
+            ].copy()
 
-            # Add error bars and data labels
-            for j, row in enumerate(stats.itertuples()):
-                ax.errorbar(
-                    j, row.mean, yerr=row.std, fmt="none", ecolor="black", capsize=5
+            if len(bc_df) > 0:
+                bc_df.loc[:, "key"] = "BC"
+                bc_df["iter"] = None  # BC does not have an iter
+
+                # Add BC to filtered_df
+                filtered_df = pd.concat([filtered_df, bc_df])
+
+            # Special case: use_zero_rewards
+            filtered_df.loc[
+                (filtered_df["data.data_path"] == dataset)
+                & (filtered_df["algorithm"] == "iql")
+                & (filtered_df["data.use_zero_rewards"] == True),
+                "key",
+            ] = "Zero"
+
+            # Special case: use_ground_truth
+            filtered_df.loc[
+                (filtered_df["data.data_path"] == dataset)
+                & (filtered_df["algorithm"] == "iql")
+                & (filtered_df["data.use_ground_truth"] == True),
+                "key",
+            ] = "GT"
+
+            # Find all unique iter values (including None for non-iter runs)
+            unique_iters = sorted(filtered_df["iter"].dropna().unique())
+            # If there are no iter values, just plot once (legacy behavior)
+            if not unique_iters:
+                unique_iters = [None]
+
+            print(f"Unique iter values for {method}: {unique_iters}")
+            
+            # Create a single figure with 3 columns of subplots
+            num_iters = len(unique_iters)
+            num_rows = 2  # Fixed number of rows
+            
+            fig, axes = plt.subplots(num_rows, 3, figsize=(18, 6 * num_rows), constrained_layout=True)
+            
+            dataset_name = Path(dataset).name
+            # Add a main title for the entire figure
+            fig.suptitle(f"Reward Model Comparison on {dataset_name} ({method})", fontsize=20, y=1.02)
+
+            for i, iter_value in enumerate(unique_iters):
+                # Calculate row and column for current subplot
+                row_idx = i // 3
+                col_idx = i % 3
+
+                # axes is 2D array of shape (num_rows, 3)
+                if row_idx >= axes.shape[0] or col_idx >= axes.shape[1]:
+                    # No axis for this subplot, skip
+                    continue
+                ax = axes[row_idx, col_idx]
+
+                if iter_value is not None:
+                    iter_mask = filtered_df["iter"] == iter_value
+                    plot_df = filtered_df[iter_mask | filtered_df["iter"].isna()].copy()
+                    iter_str = f"_iter{iter_value}"
+                    print(f"Plotting for dataset {dataset} at iter={iter_value} with {len(plot_df)} runs")
+                else:
+                    # Plot all runs with iter=None (e.g., BC, GT, Zero, or non-iter reward models)
+                    plot_df = filtered_df[filtered_df["iter"].isna()].copy()
+                    iter_str = ""
+                    print(f"Plotting for dataset {dataset} with no iter (baseline/non-iter) with {len(plot_df)} runs")
+
+                if len(plot_df) == 0:
+                    # Hide this axis and continue
+                    ax.set_visible(False)
+                    continue
+
+                # Calculate statistics for each reward model
+                metric_column = "top3_avg_eval_success_rate"
+                grouped = plot_df.groupby(["key"])
+
+                stats_dict = {
+                    "mean": grouped[metric_column].mean(),
+                    "std": grouped[metric_column].std(),
+                    "min": grouped[metric_column].min(),
+                    "max": grouped[metric_column].max(),
+                    "count": grouped[metric_column].count(),
+                    "median": grouped[metric_column].median(),
+                }
+
+                stats = pd.DataFrame(stats_dict).reset_index()
+                stats = stats.sort_values("mean", ascending=True)
+
+                # drop the reward_model/state_action_reward_model.pt
+                stats = stats[stats["key"] != "reward_model/state_action_reward_model.pt"]
+
+                # Create the bar plot
+                sns.barplot(
+                    x="key",
+                    y="mean",
+                    data=stats,
+                    palette="viridis",
+                    ax=ax
                 )
-                ax.text(
-                    j,
-                    row.mean + 0.02,
-                    f"{row.mean:.3f}±{row.std:.3f}\nn={row.count}",
-                    ha="center",
-                    va="bottom",
-                    fontsize=9,
-                )
 
-            # Set subplot title
-            if iter_value is not None:
-                ax.set_title(f"Iteration {iter_value}", fontsize=14)
-            else:
-                ax.set_title("No Iteration (Baselines)", fontsize=14)
-                
-            ax.set_ylabel("Success Rate")
-            ax.set_xlabel("Reward Model")
-            ax.tick_params(axis='x', labelsize=8)
-            plt.setp(ax.get_xticklabels(), rotation=45)
+                # Remove top and right spines
+                ax.spines["top"].set_visible(False)
+                ax.spines["right"].set_visible(False)
 
-            # Set y-axis limits
-            max_value = stats["mean"].max() + stats["std"].max()
-            ax.set_ylim(0, min(1.0, max_value * 1.2))
+                # Add error bars and data labels
+                for j, row in enumerate(stats.itertuples()):
+                    ax.errorbar(
+                        j, row.mean, yerr=row.std, fmt="none", ecolor="black", capsize=5
+                    )
+                    ax.text(
+                        j,
+                        row.mean + 0.02,
+                        f"{row.mean:.3f}±{row.std:.3f}\nn={row.count}",
+                        ha="center",
+                        va="bottom",
+                        fontsize=9,
+                    )
 
-        # # Hide any unused subplots
-        # for i in range(len(unique_iters), num_rows * 3):
-        #     row_idx = i // 3
-        #     col_idx = i % 3
-        #     if num_rows == 1:
-        #         axes[col_idx].set_visible(False)
-        #     else:
-        #         axes[row_idx, col_idx].set_visible(False)
+                # Set subplot title
+                if iter_value is not None:
+                    ax.set_title(f"Iteration {iter_value}", fontsize=14)
+                else:
+                    ax.set_title("No Iteration (Baselines)", fontsize=14)
+                    
+                ax.set_ylabel("Success Rate")
+                ax.set_xlabel("Reward Model")
+                ax.tick_params(axis='x', labelsize=8)
+                plt.setp(ax.get_xticklabels(), rotation=45)
 
-        # Save the figure
-        output_path = os.path.join(
-            output_dir,
-            f"{dataset_name}_rm_analysis_combined.png",
-        )
-        plt.savefig(output_path, dpi=300, bbox_inches="tight")
-        print(f"Saved combined reward model comparison plot to {output_path}")
-        plt.close()
+                # Set y-axis limits
+                max_value = stats["mean"].max() + stats["std"].max()
+                ax.set_ylim(0, min(1.0, max_value * 1.2))
+
+            # Save the figure
+            output_path = os.path.join(
+                output_dir,
+                f"{dataset_name}_{method}_rm_plot.png",
+            )
+            plt.savefig(output_path, dpi=300, bbox_inches="tight")
+            print(f"Saved combined reward model comparison plot to {output_path}")
+            plt.close()
 
     return output_dir
 
