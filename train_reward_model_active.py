@@ -88,16 +88,16 @@ def log_queries_to_wandb(
     ret1 = segment_returns[seg1]
     ret2 = segment_returns[seg2]
 
-    # Indicate preference by adding asterisk to the preferred return
+    # Format captions with consistent format
     if selected_pref == 1:
-        ret1_disp = f"{ret1}*"
-        ret2_disp = f"{ret2}"
+        ret1_disp = f"Seg {seg1} {{Return: {ret1}}} ⭐ PREFERRED ⭐"
+        ret2_disp = f"Seg {seg2} {{Return: {ret2}}}"
     elif selected_pref == 0:
-        ret1_disp = f"{ret1}"
-        ret2_disp = f"{ret2}*"
+        ret1_disp = f"Seg {seg1} {{Return: {ret1}}}"
+        ret2_disp = f"Seg {seg2} {{Return: {ret2}}} ⭐ PREFERRED ⭐"
     else:
-        ret1_disp = f"{ret1}"
-        ret2_disp = f"{ret2}"
+        ret1_disp = f"Seg {seg1} {{Return: {ret1}}} (EQUAL)"
+        ret2_disp = f"Seg {seg2} {{Return: {ret2}}} (EQUAL)"
 
     # Visualize the selected query as videos on wandb if video_dict is provided
     if video_dict is not None:
@@ -114,8 +114,8 @@ def log_queries_to_wandb(
         if seg1_video is not None and seg2_video is not None:
             wandb.log({
                 f"Selected Query Videos/iteration_{iteration}": [
-                    wandb.Video(seg1_video, caption=f"Segment {seg1} (Return: {ret1_disp})", fps=8, format="mp4"),
-                    wandb.Video(seg2_video, caption=f"Segment {seg2} (Return: {ret2_disp})", fps=8, format="mp4"),
+                    wandb.Video(seg1_video, caption=ret1_disp, fps=8, format="mp4"),
+                    wandb.Video(seg2_video, caption=ret2_disp, fps=8, format="mp4"),
                 ],
             }, step=iteration)
 
@@ -133,24 +133,26 @@ def log_queries_to_wandb(
             if seg2_video is not None and seg2_video.shape[-1] == 3:
                 seg2_video = seg2_video.transpose(0, 3, 1, 2)
 
-            # Format preference information
+            # Format preference information with consistent format
+            ret1_aug = segment_returns[seg1_aug]
+            ret2_aug = segment_returns[seg2_aug]
             if pref == 1:
-                pref1_disp = "(preferred)"
-                pref2_disp = ""
-            elif pref == 2:
-                pref1_disp = ""
-                pref2_disp = "(preferred)"
+                pref1_disp = f"Seg {seg1_aug}, Return: {ret1_aug}, DTW Dist: {dist:.4f} ⭐ PREFERRED ⭐"
+                pref2_disp = f"Seg {seg2_aug}, Return: {ret2_aug}, DTW Dist: {dist:.4f}"
+            elif pref == 0:
+                pref1_disp = f"Seg {seg1_aug}, Return: {ret1_aug}, DTW Dist: {dist:.4f}"
+                pref2_disp = f"Seg {seg2_aug}, Return: {ret2_aug}, DTW Dist: {dist:.4f} ⭐ PREFERRED ⭐"
             else:
-                pref1_disp = "(equal)"
-                pref2_disp = "(equal)"
+                pref1_disp = f"Seg {seg1_aug}, Return: {ret1_aug}, DTW Dist: {dist:.4f} (EQUAL)"
+                pref2_disp = f"Seg {seg2_aug}, Return: {ret2_aug}, DTW Dist: {dist:.4f} (EQUAL)"
 
             # Append both videos with clear captions
             if seg1_video is not None and seg2_video is not None:
                 dtw_video_logs.append(
-                    wandb.Video(seg1_video, caption=f"AG Pair {idx} - Segment {seg1_aug} {pref1_disp} (DTW Dist: {dist:.4f})", fps=8, format="mp4")
+                    wandb.Video(seg1_video, caption=pref1_disp, fps=8, format="mp4")
                 )
                 dtw_video_logs.append(
-                    wandb.Video(seg2_video, caption=f"AG Pair {idx} - Segment {seg2_aug} {pref2_disp} (DTW Dist: {dist:.4f})", fps=8, format="mp4")
+                    wandb.Video(seg2_video, caption=pref2_disp, fps=8, format="mp4")
                 )
 
         if dtw_video_logs:
