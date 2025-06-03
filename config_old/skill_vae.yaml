@@ -1,0 +1,56 @@
+# Skill VAE Configuration
+
+model:
+  latent_dim: 32          # Dimensionality of latent skill space
+  hidden_dim: 1024         # Hidden dimension for LSTM and MLPs
+  num_layers: 2           # Number of LSTM layers
+  lr: 1e-4               # Learning rate
+  beta: 1e-5              # Weight for KL divergence term in VAE loss
+  alpha: 1e-6             # Weight for temporal predictability loss
+
+data:
+  data_path: "/scr/shared/clam/datasets/metaworld/assembly-v2/buffer_assembly-v2_clean.pt"
+  segment_length: 32      # Length of sub-trajectories (H in paper)
+  max_temporal_diff: 50  # Maximum temporal difference between sub-trajectory pairs
+  obs_key: "obs"         # Key for observations in data
+  action_key: "action"   # Key for actions in data
+  normalize_obs: false    # Whether to normalize observations
+  norm_method: "min_max" # Normalization method: "min_max" or "z_score"
+
+training:
+  num_epochs: 100        # Number of training epochs
+  batch_size: 64         # Batch size
+  num_workers: 4         # Number of data loading workers
+  pin_memory: true       # Pin memory for faster GPU transfer
+  gradient_clip: 1.0     # Gradient clipping value
+  
+  # Data split ratios
+  train_ratio: 0.8
+  val_ratio: 0.1
+  
+  # Evaluation and saving
+  eval_every: 10         # Evaluate every N epochs
+  save_every: 25         # Save model every N epochs
+  
+  # Early stopping
+  patience: 20           # Early stopping patience
+  min_delta: 1e-4       # Minimum improvement for early stopping
+
+output:
+  output_dir: "results/skill_vae"
+  model_dir_name: "DATASET_NAME_skill_vae_latent${model.latent_dim}_seg${data.segment_length}_seed${random_seed}"
+  save_reconstructions: true    # Save reconstruction visualizations
+  save_latent_analysis: true    # Save latent space analysis plots
+
+wandb:
+  use_wandb: false       # Whether to use Weights & Biases logging
+  project: "robot_pref_skills"
+  entity: "clvr"
+  name: null             # Will be auto-generated if null
+  tags: ["skill_vae", "representation_learning"]
+  notes: "Training skill VAE with temporal predictability"
+
+random_seed: 42
+
+defaults:
+  - _self_ 

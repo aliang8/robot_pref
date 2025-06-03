@@ -12,10 +12,13 @@ import pandas as pd
 import torch
 from omegaconf import DictConfig, OmegaConf
 from tqdm import tqdm
+import glob
+import matplotlib.pyplot as plt
+import numpy as np
 
 import wandb
-from models.reward_models import RewardModel
-from utils.analyze_rewards import analyze_rewards
+from models.reward_models import RewardModel, DistributionalRewardModel
+from utils.analyze_rewards import analyze_rewards, plot_preference_return_analysis
 from utils.data import (
     get_gt_preferences,
     load_tensordict,
@@ -25,9 +28,10 @@ from utils.data import (
 from utils.dataset import (
     PreferenceDataset,
     create_data_loaders,
+    custom_collate,
 )
 from utils.seed import set_seed
-from utils.training import evaluate_model_on_test_set, train_model
+from utils.training import evaluate_model_on_test_set, train_model, train_distributional_model
 from utils.wandb import log_to_wandb
 
 
@@ -231,21 +235,22 @@ def main(cfg: DictConfig):
         print(f"Loaded data with {len(observations)} observations")
 
         # Load segments and preferences if paths are provided
-        if hasattr(cfg.data, 'segment_pairs_path') and hasattr(cfg.data, 'segment_indices_path'):
+        if hasattr(cfg.data, 'segment_pairs_path') and hasattr(cfg.data, 'segment_indices_path') and cfg.data.segment_pairs_path is not None and cfg.data.segment_indices_path is not None:
             print("Loading segments from files...")
             all_segment_pairs, segment_indices = load_segments_from_files(
                 cfg.data.segment_pairs_path,
                 cfg.data.segment_indices_path
             )
+            all_segment_pairs = all_segment_pairs.tolist()
         else:
             print("Generating segments from data...")
             segments, segment_indices = segment_episodes(data_cpu, cfg.data.segment_length)
             all_segment_pairs = list(itertools.combinations(range(len(segment_indices)), 2))
-            random.seed(current_seed)
-            all_segment_pairs = random.sample(all_segment_pairs, cfg.data.num_pairs)
+
+        # all_segment_pairs = random.sample(all_segment_pairs, cfg.data.num_pairs)
 
         # Load preferences if path is provided
-        if hasattr(cfg.data, 'preferences_dir'):
+        if hasattr(cfg.data, 'preferences_dir') and cfg.data.preferences_dir is not None:
             print("Loading preferences from files...")
             preferences, pref_stats = load_preferences_from_directory(cfg.data.preferences_dir)
             all_segment_pairs, preferences = filter_pairs_with_preferences(all_segment_pairs, preferences)
@@ -266,12 +271,54 @@ def main(cfg: DictConfig):
         for k, v in data_cpu.items():
             print(f"{k}: {v.shape}")
         
-        # Create dataset with loaded/filtered data
-        preference_dataset = PreferenceDataset(
+        # Hold out test pairs first (similar to active learning script)
+        num_test_pairs = cfg.data.get('num_test_pairs', 200)
+        print(f"Holding out {num_test_pairs} pairs for testing...")
+        
+        all_segment_pair_indices = list(range(len(all_segment_pairs)))
+        test_pair_indices = random.sample(all_segment_pair_indices, num_test_pairs)
+
+        # Get test pairs and preferences
+        test_pairs = [all_segment_pairs[i] for i in test_pair_indices]
+        test_preferences = [preferences[i] for i in test_pair_indices]
+
+        # Use remaining pairs for training/validation
+        train_val_pair_indices = [i for i in all_segment_pair_indices if i not in test_pair_indices]
+        train_val_pair_indices = random.sample(train_val_pair_indices, cfg.data.num_pairs)
+        train_val_pairs = [all_segment_pairs[i] for i in train_val_pair_indices]
+        train_val_preferences = [preferences[i] for i in train_val_pair_indices]
+        
+        print(f"Train/Val pairs: {len(train_val_pairs)}, Test pairs: {len(test_pairs)}")
+        
+        # Create test dataset manually
+        test_dataset = PreferenceDataset(
             data_cpu, 
-            all_segment_pairs, 
+            test_pairs, 
             segment_indices, 
-            preferences,
+            test_preferences,
+            normalize_obs=cfg.data.normalize_obs,
+            norm_method=cfg.data.norm_method,
+            use_images=cfg.data.use_images,
+            image_key=cfg.data.image_key,
+            obs_key=cfg.data.obs_key,
+            action_key=cfg.data.action_key,
+            use_image_embeddings=cfg.data.use_image_embeddings
+        )
+        
+        test_loader = torch.utils.data.DataLoader(
+            test_dataset, 
+            batch_size=cfg.training.batch_size, 
+            shuffle=False,
+            num_workers=cfg.training.num_workers,
+            collate_fn=custom_collate
+        )
+        
+        # Create train/val dataset with remaining pairs
+        train_val_dataset = PreferenceDataset(
+            data_cpu, 
+            train_val_pairs, 
+            segment_indices, 
+            train_val_preferences,
             normalize_obs=cfg.data.normalize_obs,
             norm_method=cfg.data.norm_method,
             use_images=cfg.data.use_images,
@@ -281,11 +328,11 @@ def main(cfg: DictConfig):
             use_image_embeddings=cfg.data.use_image_embeddings
         )
 
-        # Create data loaders
+        # Create data loaders for train/val split only (no test split)
         dataloaders = create_data_loaders(
-            preference_dataset,
-            train_ratio=0.8,  
-            val_ratio=0.1,  
+            train_val_dataset,
+            train_ratio=0.9,  # 90% of remaining data for training
+            val_ratio=0.1,    # 10% of remaining data for validation
             batch_size=cfg.training.batch_size,
             seed=current_seed,
             normalize_obs=cfg.data.normalize_obs,
@@ -296,21 +343,35 @@ def main(cfg: DictConfig):
 
         train_loader = dataloaders["train"]
         val_loader = dataloaders["val"]
-        test_loader = dataloaders["test"]
+        # test_loader is already created above
 
-        # Initialize reward model
-        model = RewardModel(
-            state_dim, 
-            action_dim, 
-            hidden_dims=cfg.model.hidden_dims,
-            use_images=cfg.data.use_images,
-            image_model=cfg.model.image_model,
-            embedding_dim=cfg.model.embedding_dim,
-            use_image_embeddings=cfg.data.use_image_embeddings,
-            device=device
-        )
+        # Initialize reward model (regular or distributional)
+        if cfg.model.is_distributional:
+            print("Initializing distributional reward model...")
+            model = DistributionalRewardModel(
+                state_dim, 
+                action_dim, 
+                hidden_dims=cfg.model.hidden_dims,
+                use_images=cfg.data.use_images,
+                image_model=cfg.model.image_model,
+                embedding_dim=cfg.model.embedding_dim,
+                use_image_embeddings=cfg.data.use_image_embeddings,
+                device=device
+            )
+        else:
+            print("Initializing regular reward model...")
+            model = RewardModel(
+                state_dim, 
+                action_dim, 
+                hidden_dims=cfg.model.hidden_dims,
+                use_images=cfg.data.use_images,
+                image_model=cfg.model.image_model,
+                embedding_dim=cfg.model.embedding_dim,
+                use_image_embeddings=cfg.data.use_image_embeddings,
+                device=device
+            )
+        
         model = model.to(device)
-        print(f"Reward model: {model}")
         print(f"Total parameters: {sum(p.numel() for p in model.parameters())}")
 
         start_time = time.time()
@@ -323,17 +384,41 @@ def main(cfg: DictConfig):
 
         training_curve_path = os.path.join(model_dir, f"training_curve_{current_seed}.png")
 
-        print("\nTraining reward model...")
-        model, *_ = train_model(
-            model,
-            train_loader,
-            val_loader,
-            device,
-            num_epochs=cfg.training.num_epochs,
-            lr=cfg.model.lr,
-            wandb_run=wandb_run,
-            output_path=training_curve_path,
-        )
+        print(f"\nTraining {'distributional' if cfg.model.is_distributional else 'regular'} reward model...")
+        
+        if cfg.model.is_distributional:
+            # Use distributional training function with additional parameters
+            lambda_weight = cfg.model.get("lambda_weight", 1.0)
+            alpha_reg = cfg.model.get("alpha_reg", 0.1)
+            eta = cfg.model.get("eta", 1.0)
+            num_samples = cfg.model.get("num_samples", 5)
+            
+            model, *_ = train_distributional_model(
+                model,
+                train_loader,
+                val_loader,
+                device,
+                num_epochs=cfg.training.num_epochs,
+                lr=cfg.model.lr,
+                wandb_run=wandb_run,
+                output_path=training_curve_path,
+                lambda_weight=lambda_weight,
+                alpha_reg=alpha_reg,
+                eta=eta,
+                num_samples=num_samples,
+            )
+        else:
+            # Use regular training function
+            model, *_ = train_model(
+                model,
+                train_loader,
+                val_loader,
+                device,
+                num_epochs=cfg.training.num_epochs,
+                lr=cfg.model.lr,
+                wandb_run=wandb_run,
+                output_path=training_curve_path,
+            )
 
         training_time = time.time() - start_time
         hours, remainder = divmod(training_time, 3600)
@@ -342,7 +427,7 @@ def main(cfg: DictConfig):
         print(f"\nTraining completed in {int(hours)}h {int(minutes)}m {int(seconds)}s")
 
         # Evaluate on test set
-        test_metrics = evaluate_model_on_test_set(model, test_loader, device)
+        test_metrics = evaluate_model_on_test_set(model, test_loader, device, is_distributional=cfg.model.is_distributional, num_vis=0)
         test_metrics["seed"] = current_seed
         all_test_metrics.append(test_metrics)
         
@@ -356,7 +441,7 @@ def main(cfg: DictConfig):
         seed_metrics.append({
             "seed": current_seed,
             "test_accuracy": test_metrics["test_accuracy"],
-            "model_path": model_path
+            "model_path": model_path,
         })
 
         # Run reward analysis
@@ -375,7 +460,19 @@ def main(cfg: DictConfig):
             output_file=os.path.join(model_dir, f"reward_grid_{current_seed}.png"),
             wandb_run=wandb_run,
             reward_max=reward_max,
-            reward_min=reward_min
+            reward_min=reward_min,
+            is_distributional=cfg.model.is_distributional
+        )
+        
+        # Add preference return analysis plot
+        plot_preference_return_analysis(
+            model=model,
+            test_loader=test_loader,
+            data=data_cpu,
+            segment_indices=segment_indices,
+            output_file=os.path.join(model_dir, f"preference_return_analysis_{current_seed}.png"),
+            wandb_run=wandb_run,
+            is_distributional=cfg.model.is_distributional
         )
 
     if len(seed_metrics) > 0:
@@ -398,7 +495,7 @@ def main(cfg: DictConfig):
             f.write(f"Test LogPDF: {log_prob_mean:.4f} ± {log_prob_std:.4f}\n")
             f.write("=" * 50 + "\n")
         
-    print("\nReward model training complete!")
+    print(f"\n{'distributional' if cfg.model.is_distributional else 'regular'} reward model training complete!")
     print("Model saved to: ", model_path)
 
 if __name__ == "__main__":

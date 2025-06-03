@@ -5,7 +5,8 @@ defaults:
 # Number of models to train with different seeds
 num_seeds: 3
 
-task: pick_up_green_and_slide_pot_right
+# task: pick_up_green_and_slide_pot_right
+task: mw-assembly-v2
 data_dir: /scr/shared/datasets/robot_pref
 
 data:
@@ -13,11 +14,15 @@ data:
   segment_length: 32
   num_segments: 50000
   num_pairs: 1000
-  normalize_obs: true
+  num_test_pairs: 200  # Number of pairs to hold out for testing
+  normalize_obs: false
   norm_method: "standard"
   segment_pairs_path: "${data_dir}/${task}/segment_pairs.npy"  # Optional: path to segment pairs file
   segment_indices_path: "${data_dir}/${task}/segment_start_end_indices.npy"  # Optional: path to segment indices file
-  preferences_dir: "${data_dir}/${task}/preferences"  # Optional: directory containing preference JSON files
+  # preferences_dir: "${data_dir}/${task}/preferences"  # Optional: directory containing preference JSON files
+  preferences_dir: null
+  # segment_pairs_path: null
+  # segment_indices_path: null
 
   use_images: false
   image_key: "image"
@@ -29,10 +34,17 @@ data:
   preferences_data_path: null
 
 model:
+  is_distributional: false  # Set to true for distributional reward model
   hidden_dims: [256, 256]
   image_model: "resnet50"
   embedding_dim: 256
   lr: 0.0003
+  
+  # Distributional-specific parameters (used when is_distributional=true)
+  lambda_weight: 1.0    # Weight for stochastic term in Bradley-Terry loss
+  alpha_reg: 0.001        # Weight for regularization loss
+  eta: 10.0              # Minimum entropy level for regularization
+  num_samples: 5        # Number of samples for approximating expectation
 
 training:
   batch_size: 32
@@ -46,7 +58,7 @@ hardware:
 
 output:
   output_dir: results/reward_model
-  model_dir_name: "DATASET_NAME_model_seg${data.segment_length}_epochs${training.num_epochs}_pairs${data.num_pairs}_seed${random_seed}"
+  model_dir_name: "DATASET_NAME_model_seg${data.segment_length}_epochs${training.num_epochs}_pairs${data.num_pairs}_seed${random_seed}_d${model.is_distributional}"
   
 wandb:
   use_wandb: false

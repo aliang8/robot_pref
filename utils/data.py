@@ -1,6 +1,6 @@
 import numpy as np
 import torch
-from d3rlpy.datasets import MDPDataset
+# from d3rlpy.datasets import MDPDataset
 from tqdm import tqdm
 
 
@@ -176,7 +176,7 @@ def segment_episodes(data, segment_length):
     episode_start_indices = {}
     abs_idx = 0
     print(f"Segmenting {len(unique_episodes)} episodes")
-    for episode_idx in unique_episodes:
+    for episode_idx in tqdm(unique_episodes):
         episode_mask = data["episode"] == episode_idx
         episode_len = np.sum(episode_mask.numpy())
         if episode_len != episode_len_gt:
@@ -448,7 +448,7 @@ def load_dataset(
     # Convert to numpy for d3rlpy
     observations_np = valid_obs.numpy()
     actions_np = valid_actions.numpy()
-
+    
     # Create MDPDataset with the rewards
     dataset = MDPDataset(
         observations=observations_np,

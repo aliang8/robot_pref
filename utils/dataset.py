@@ -222,16 +222,25 @@ class PreferenceDataset(Dataset):
         else:
             cost = None
 
-        return {
+        # Build return dictionary with required fields
+        return_dict = {
             'obs1': obs1.float(),
             'obs2': obs2.float(),
             'actions1': actions1.float(),
             'actions2': actions2.float(),
-            'images1': images1.float() if images1 is not None else None,
-            'images2': images2.float() if images2 is not None else None,
             'preference': pref.float(),
-            'cost': cost.float() if cost is not None else None
         }
+
+        # Only add images if they exist
+        if images1 is not None and images2 is not None:
+            return_dict['images1'] = images1.float()
+            return_dict['images2'] = images2.float()
+
+        # Only add cost if it exists
+        if cost is not None:
+            return_dict['cost'] = cost.float()
+
+        return return_dict
 
 
 

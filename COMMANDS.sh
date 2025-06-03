@@ -122,12 +122,18 @@ python train_policy.py \
 
 # train reward model with active
 python train_reward_model_active.py \
-    data.data_path=/scr/aliang80/robot_pref/dataset_mw/buffer_assembly-v2_balanced.pt \
+    data.data_path=/scr/shared/datasets/robot_pref/assembly-v2/assembly-v2.pt \
     active_learning.uncertainty_method=entropy \
     active_learning.total_queries=50 \
     dtw_augmentation.enabled=true \
     hydra/launcher=slurm \
     --multirun
+
+python train_reward_model.py \
+    data.data_path=/scr/shared/datasets/robot_pref/assembly-v2/assembly-v2.pt \
+    data.num_pairs=100 \
+    model.is_distributional=true
+
 
 python run_reward_policy_pipeline.py 
 
@@ -137,3 +143,10 @@ python run_reward_policy_pipeline.py
 python train_reward_model.py \
     data.data_path=/scr/shared/datasets/robot_pref/pick_up_green_and_slide_pot_right/pick_up_green_and_slide_pot_right_embedded.pt \
     task=pick_up_green_and_slide_pot_right
+
+# Training Skill VAE for representation learning
+python train_skill_vae.py \
+    data.data_path=/scr/shared/datasets/robot_pref/assembly-v2/assembly-v2.pt \
+    model.latent_dim=32 \
+    data.segment_length=32 \
+    training.num_epochs=100
