@@ -111,16 +111,39 @@ def collect_simple_pairwise_feedback(dataset, traj_total, config):
     # Generate new segment indices and feedback
     multiple_ranked_list = []
     segment_indices = []  # Track all segment indices used
+    used_pairs = set()  # Track used pairs to avoid duplicates
     print(f"Collecting {config.feedback_num} independent pairwise feedback samples")
-    
+
     for i in range(config.feedback_num):
-        # Get two random trajectory segments
-        idx_1 = get_indices(traj_total, config)
-        idx_2 = get_indices(traj_total, config) 
+        max_attempts = 50  # Prevent infinite loop
+        attempts = 0
         
-        # Extract starting indices and calculate segment rewards
-        idx_st_1 = idx_1[0][0]
-        idx_st_2 = idx_2[0][0]
+        while attempts < max_attempts:
+            # Get two random trajectory segments
+            idx_1 = get_indices(traj_total, config)
+            idx_2 = get_indices(traj_total, config) 
+            
+            # Extract starting indices
+            idx_st_1 = idx_1[0][0]
+            idx_st_2 = idx_2[0][0]
+            
+            # Create a pair key (order-independent to catch (A,B) and (B,A) as same)
+            pair_key = tuple(sorted([idx_st_1, idx_st_2]))
+            
+            # Check if this is a valid new pair
+            if (idx_st_1 != idx_st_2 and  # Don't compare segment with itself
+                pair_key not in used_pairs):  # Don't use duplicate pairs
+                # Valid pair found
+                used_pairs.add(pair_key)
+                break
+                
+            attempts += 1
+        
+        if attempts >= max_attempts:
+            print(f"Warning: Could not find unique pair after {max_attempts} attempts for sample {i+1}")
+            # Use the last generated pair anyway to avoid infinite loop
+        
+        # Calculate segment rewards
         reward_1 = np.round(np.sum(dataset["rewards"][idx_1], axis=1), 2).item()
         reward_2 = np.round(np.sum(dataset["rewards"][idx_2], axis=1), 2).item()
         
@@ -167,12 +190,13 @@ def collect_simple_pairwise_feedback(dataset, traj_total, config):
     
     # Remove duplicates from segment indices
     segment_indices = list(set(segment_indices))
-    
+
     # Save segment indices for future use
     save_segment_indices(segment_indices, segment_indices_path, config)
     
     print(f"Completed collection of {len(multiple_ranked_list)} pairwise feedback samples")
     print(f"Used {len(segment_indices)} unique segment indices")
+    print(f"Generated {len(used_pairs)} unique segment pairs")
     return multiple_ranked_list, segment_indices
 
 
@@ -313,31 +337,56 @@ def generate_feedback_from_indices(dataset, segment_indices: List[int], config):
     return multiple_ranked_list
 
 
-def collect_dtw_augmentations(dataset, traj_total, config, obs_act_1, obs_act_2, labels, segment_indices, use_relative_eef=True):
+def collect_dtw_augmentations(dataset, traj_total, config, use_relative_eef=True):
     """
-    Collect DTW-guided augmentations using precomputed or cached DTW distance matrix.
-    Uses segment indices from feedback collection to create segments and compute/load DTW matrix.
+    Collect DTW-guided augmentations using a large independent sample of segments.
+    Samples 10k segments independently, computes DTW matrix, then selects diverse pairs for augmentation.
     
     Args:
         dataset: The dataset containing observations, actions, rewards
         traj_total: Total number of trajectories 
         config: Configuration object
-        obs_act_1: Existing first segments [N, segment_size, obs+act_dim] (for compatibility)
-        obs_act_2: Existing second segments [N, segment_size, obs+act_dim] (for compatibility)
-        labels: Existing preference labels [N, 2] (for compatibility)
-        segment_indices: List of segment starting indices from feedback collection
         use_relative_eef: Whether to use relative EEF positions for DTW
         
     Returns:
-        tuple: (multiple_ranked_list, dtw_matrix, used_segment_indices)
+        tuple: (multiple_ranked_list, dtw_matrix, dtw_segment_indices)
     """
-    print(f"Collecting DTW augmentations using segment indices from feedback collection")
+    print(f"Collecting DTW augmentations using independent segment sampling")
     
-    # Step 1: Create segments from provided segment indices
-    print(f"Creating segments from {len(segment_indices)} indices...")
-    segments = []
+    # Step 1: Sample segments independently for DTW matrix (much larger pool)
+    dtw_sample_size = getattr(config, 'dtw_subsample_size', 10000)
+    print(f"Sampling {dtw_sample_size} segments independently for DTW matrix...")
     
-    for idx_st in tqdm(segment_indices, desc="Creating segments"):
+    # Set random seed for reproducible DTW segment selection
+    if hasattr(config, 'seed'):
+        np.random.seed(config.seed + 1000)  # Different seed than feedback collection
+        random.seed(config.seed + 1000)
+        print(f"Set DTW random seed to {config.seed + 1000} for reproducible DTW segment selection")
+    
+    dtw_segments = []
+    dtw_segment_indices = []
+    used_indices = set()  # Track used segment indices to avoid duplicates
+    
+    for i in tqdm(range(dtw_sample_size), desc="Sampling DTW segments"):
+        max_attempts = 100  # Prevent infinite loop
+        attempts = 0
+        
+        while attempts < max_attempts:
+            # Get random trajectory segment using same logic as feedback collection
+            idx = get_indices(traj_total, config)
+            idx_st = idx[0][0]
+            
+            # Avoid duplicate segments
+            if idx_st not in used_indices:
+                used_indices.add(idx_st)
+                break
+                
+            attempts += 1
+        
+        if attempts >= max_attempts:
+            print(f"Warning: Could not find unique segment after {max_attempts} attempts for DTW sample {i+1}")
+            # Use the last generated segment anyway
+        
         # Create segment indices
         segment_idx = [j for j in range(idx_st, idx_st + config.segment_size)]
         
@@ -349,16 +398,19 @@ def collect_dtw_augmentations(dataset, traj_total, config, obs_act_1, obs_act_2,
             "obs": torch.from_numpy(obs).float(),
             "start_idx": idx_st
         }
-        segments.append(segment)
+        dtw_segments.append(segment)
+        dtw_segment_indices.append(idx_st)
 
-    # Step 2: Load or compute DTW distance matrix
+    print(f"Sampled {len(dtw_segments)} unique segments for DTW matrix")
+
+    # Step 2: Load or compute DTW distance matrix from independent segments
     dtw_matrix_path = getattr(config, 'dtw_matrix_path', 'dtw_matrix_cache.pkl')
-    dtw_matrix = load_or_compute_dtw_matrix(segments, use_relative_eef, dtw_matrix_path, config)
+    dtw_matrix = load_or_compute_dtw_matrix(dtw_segments, use_relative_eef, dtw_matrix_path, config)
     
     # Step 3: Select diverse pairs from DTW matrix for augmentation
-    print(f"Selecting {config.dtw_augmentation_size} pairs for augmentation...")
+    print(f"Selecting {config.dtw_augmentation_size} pairs for augmentation from DTW matrix...")
     
-    n_segments = len(segments)
+    n_segments = len(dtw_segments)
     
     # Get upper triangle indices and their DTW distances
     upper_triangle_indices = []
@@ -377,7 +429,7 @@ def collect_dtw_augmentations(dataset, traj_total, config, obs_act_1, obs_act_2,
     n_pairs = min(config.dtw_augmentation_size, len(upper_triangle_indices))
     
     # Select pairs from different distance ranges for diversity
-    # 30% from low distances, 40% from medium, 30% from high
+    # 30% from low distances (similar segments), 40% from medium, 30% from high (dissimilar segments)
     n_low = int(0.3 * n_pairs)
     n_medium = int(0.4 * n_pairs) 
     n_high = n_pairs - n_low - n_medium
@@ -400,14 +452,15 @@ def collect_dtw_augmentations(dataset, traj_total, config, obs_act_1, obs_act_2,
     
     print(f"Selected {len(selected_pairs)} pairs with DTW distances ranging from "
           f"{min(selected_distances):.3f} to {max(selected_distances):.3f}")
+    print(f"Distance distribution - Low: {n_low}, Medium: {n_medium}, High: {n_high}")
     
     # Step 4: Create preference labels for selected pairs
     multiple_ranked_list = []
     
     for i, j in tqdm(selected_pairs, desc="Creating preference labels"):
-        # Get the actual segment starting indices
-        idx_st_1 = segment_indices[i]
-        idx_st_2 = segment_indices[j]
+        # Get the actual segment starting indices from DTW segments
+        idx_st_1 = dtw_segment_indices[i]
+        idx_st_2 = dtw_segment_indices[j]
         
         # Create segment index lists
         idx_1 = [[k for k in range(idx_st_1, idx_st_1 + config.segment_size)]]
@@ -452,11 +505,11 @@ def collect_dtw_augmentations(dataset, traj_total, config, obs_act_1, obs_act_2,
         multiple_ranked_list.append(single_ranked_list)
     
     print(f"Completed DTW augmentation collection:")
-    print(f"  - Used {len(segment_indices)} segments from feedback collection")
+    print(f"  - Sampled {len(dtw_segments)} independent segments for DTW matrix")
     print(f"  - DTW matrix shape: {dtw_matrix.shape[0]}x{dtw_matrix.shape[1]}")
-    print(f"  - Created {len(multiple_ranked_list)} preference comparisons")
+    print(f"  - Created {len(multiple_ranked_list)} preference comparisons from DTW-guided selection")
     
-    return multiple_ranked_list, dtw_matrix, segment_indices
+    return multiple_ranked_list, dtw_matrix, dtw_segment_indices
 
 
 def load_or_compute_dtw_matrix(segments: List[Dict], use_relative_eef: bool, dtw_matrix_path: str, config) -> np.ndarray:
@@ -475,9 +528,10 @@ def load_or_compute_dtw_matrix(segments: List[Dict], use_relative_eef: bool, dtw
     # Create cache metadata for validation
     cache_metadata = {
         'n_segments': len(segments),
-        'segment_indices': [seg['start_idx'] for seg in segments],
+        'dtw_sample_size': getattr(config, 'dtw_subsample_size', 10000),
         'use_relative_eef': use_relative_eef,
-        'segment_size': config.segment_size
+        'segment_size': config.segment_size,
+        'seed': getattr(config, 'seed', None)
     }
     
     # Check if cache file exists
@@ -488,18 +542,22 @@ def load_or_compute_dtw_matrix(segments: List[Dict], use_relative_eef: bool, dtw
                 cached_data = pickle.load(f)
                 
             # Validate cache metadata
-            if (cached_data['metadata']['n_segments'] == cache_metadata['n_segments'] and
-                cached_data['metadata']['segment_indices'] == cache_metadata['segment_indices'] and
-                cached_data['metadata']['use_relative_eef'] == cache_metadata['use_relative_eef'] and
-                cached_data['metadata']['segment_size'] == cache_metadata['segment_size']):
+            cached_meta = cached_data['metadata']
+            if (cached_meta['n_segments'] == cache_metadata['n_segments'] and
+                cached_meta.get('dtw_sample_size', 10000) == cache_metadata['dtw_sample_size'] and
+                cached_meta['use_relative_eef'] == cache_metadata['use_relative_eef'] and
+                cached_meta['segment_size'] == cache_metadata['segment_size'] and
+                cached_meta.get('seed', None) == cache_metadata['seed']):
                 
-                print("Cache validation successful - using cached DTW matrix")
+                print("DTW matrix cache validation successful - using cached DTW matrix")
                 return cached_data['dtw_matrix']
             else:
-                print("Cache validation failed - recomputing DTW matrix")
+                print("DTW matrix cache validation failed - recomputing DTW matrix")
+                print(f"  Cache meta: {cached_meta}")
+                print(f"  Current meta: {cache_metadata}")
                 
         except Exception as e:
-            print(f"Error loading cache: {e} - recomputing DTW matrix")
+            print(f"Error loading DTW matrix cache: {e} - recomputing DTW matrix")
     
     # Compute DTW matrix
     print(f"Computing DTW matrix for {len(segments)} segments...")
