@@ -5,8 +5,8 @@ feedback_num=500    # total feedback number (we use 500, 1000 feedback in the pa
 q_budget=1        # query budget (we use 100 in the paper)
                     # Setting q_budget=1 is equivalent to independent pairwise sampling.
 feedback_type=RLT   # ["RLT", "SeqRank"]: RLT means ranked list
-model_type=BT       # ["BT", "linear_BT"]: BT means exponential bradley-terry model, and linear_BT use linear score function
-epochs=300          # we use 300 epochs in the paper, but more epochs (e.g., 5000) can be used for better performance
+model_type=linear_BT       # ["BT", "linear_BT"]: BT means exponential bradley-terry model, and linear_BT use linear score function
+epochs=1000          # we use 300 epochs in the paper, but more epochs (e.g., 5000) can be used for better performance
 activation=tanh     # final activation function of the reward model (use tanh for bounded reward)
 seed=10             # random seed
 threshold=0.5       # Thresholds for determining tie labels (eqaully preferred pairs)
@@ -25,7 +25,7 @@ dtw_subsample_size=5000
 dtw_augmentation_size=2000
 acquisition_threshold_low=0.25
 acquisition_threshold_high=0.75
-dtw_augment_before_training=False
+dtw_augment_before_training=True
 
 # Reward model learning
 CUDA_VISIBLE_DEVICES=0 python3 learn_reward.py --config=configs/reward.yaml --env=$env --human=$human \

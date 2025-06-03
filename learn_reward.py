@@ -46,12 +46,10 @@ class TrainConfig:
     # DTW augmentations
     use_dtw_augmentations: bool = False
     dtw_augment_before_training: bool = False  # If True: augment first then train, If False: train then augment
-    dtw_subsample_size: int = 5000
-    dtw_augmentation_size: int = 2000
-    dtw_k_similar: int = 5  # Number of similar segments to find for each anchor
-    dtw_batch_size: int = 100  # Batch size for FastDTW processing
-    acquisition_threshold_low: float = 0.25  # 25th percentile
-    acquisition_threshold_high: float = 0.75  # 75th percentile
+    dtw_subsample_size: int = 10000  # Number of segments to sample for DTW matrix
+    dtw_augmentation_size: int = 2000  # Number of augmentation pairs to create from DTW matrix
+    acquisition_threshold_low: float = 0.25  # 25th percentile for acquisition filtering
+    acquisition_threshold_high: float = 0.75  # 75th percentile for acquisition filtering
     # Cache paths for reproducibility
     segment_indices_path: Optional[str] = None  # Path to save/load segment indices
     dtw_matrix_path: Optional[str] = None  # Path to save/load DTW matrix
@@ -94,10 +92,8 @@ class TrainConfig:
             "dtw_mode": "before" if self.dtw_augment_before_training else "after",
             "dtw_subsample": f"{self.dtw_subsample_size//1000}k",
             "dtw_augmentation": self.dtw_augmentation_size,
-            "dtw_k_similar": self.dtw_k_similar,
-            "dtw_batch_size": self.dtw_batch_size,
             "acquisition_thresholds": f"{self.acquisition_threshold_low}-{self.acquisition_threshold_high}",
-            "dtw_settings": f"{int(self.use_dtw_augmentations)}-{int(self.dtw_augment_before_training)}-{self.dtw_subsample_size//1000}k-{self.dtw_augmentation_size}-K{self.dtw_k_similar}-B{self.dtw_batch_size}"
+            "dtw_settings": f"{int(self.use_dtw_augmentations)}-{int(self.dtw_augment_before_training)}-{self.dtw_subsample_size//1000}k-{self.dtw_augmentation_size}-A{self.acquisition_threshold_low}-{self.acquisition_threshold_high}"
         }
         
         # Use custom parameters if specified, otherwise use default structure
@@ -130,8 +126,7 @@ class TrainConfig:
                 ["e", self.epochs],
                 ["n", self.noise],
                 # DTW augmentation settings (only if enabled)
-                ["dtw", f"{int(self.use_dtw_augmentations)}-{int(self.dtw_augment_before_training)}-{self.dtw_subsample_size//1000}k-{self.dtw_augmentation_size}-K{self.dtw_k_similar}-B{self.dtw_batch_size}"] if self.use_dtw_augmentations else None,
-                ["acq", f"{self.acquisition_threshold_low}-{self.acquisition_threshold_high}"] if self.use_dtw_augmentations and not self.dtw_augment_before_training else None,
+                ["dtw", f"{int(self.use_dtw_augmentations)}-{int(self.dtw_augment_before_training)}-{self.dtw_subsample_size//1000}k-{self.dtw_augmentation_size}-A{self.acquisition_threshold_low}-{self.acquisition_threshold_high}"] if self.use_dtw_augmentations else None,
                 # Seed (always last)
                 ["s", self.seed]
             ]
@@ -161,10 +156,6 @@ class TrainConfig:
                     f"sub_{self.dtw_subsample_size//1000}k",
                     f"aug_{self.dtw_augmentation_size}"
                 ])
-                
-                # Add acquisition thresholds only for post-training augmentation
-                if not self.dtw_augment_before_training:
-                    checkpoint_components.append(f"acq_{self.acquisition_threshold_low}-{self.acquisition_threshold_high}")
             
             checkpoint_components.append(f"s_{self.seed}")
         
@@ -286,14 +277,10 @@ def train(config: TrainConfig):
         print("\nStrategy: DTW augmentations BEFORE training...")
         
         # Collect DTW augmentations
-        dtw_multiple_ranked_list, dtw_matrix, subsample_indices = collect_dtw_augmentations(
+        dtw_multiple_ranked_list, dtw_matrix, dtw_segment_indices = collect_dtw_augmentations(
             dataset, 
             traj_total, 
             config,
-            obs_act_1,
-            obs_act_2,
-            labels,
-            segment_indices,
             use_relative_eef=True
         )
         
@@ -358,7 +345,7 @@ def train(config: TrainConfig):
             # Save DTW matrix for analysis
             if config.checkpoints_path:
                 np.save(os.path.join(config.checkpoints_path, "dtw_matrix.npy"), dtw_matrix)
-                np.save(os.path.join(config.checkpoints_path, "subsample_indices.npy"), subsample_indices)
+                np.save(os.path.join(config.checkpoints_path, "dtw_segment_indices.npy"), dtw_segment_indices)
                 print(f"Saved DTW analysis data to {config.checkpoints_path}")
         else:
             print("No DTW augmentations generated, using original data")
@@ -380,14 +367,10 @@ def train(config: TrainConfig):
             print("\nStage 2: DTW augmentations with acquisition filtering...")
             
             # Collect DTW augmentations
-            dtw_multiple_ranked_list, dtw_matrix, subsample_indices = collect_dtw_augmentations(
+            dtw_multiple_ranked_list, dtw_matrix, dtw_segment_indices = collect_dtw_augmentations(
                 dataset, 
                 traj_total, 
                 config,
-                obs_act_1,
-                obs_act_2,
-                labels,
-                segment_indices,
                 use_relative_eef=True
             )
             
@@ -472,7 +455,7 @@ def train(config: TrainConfig):
                 if config.checkpoints_path:
                     np.save(os.path.join(config.checkpoints_path, "dtw_matrix.npy"), dtw_matrix)
                     np.save(os.path.join(config.checkpoints_path, "acquisition_scores.npy"), acquisition_scores)
-                    np.save(os.path.join(config.checkpoints_path, "subsample_indices.npy"), subsample_indices)
+                    np.save(os.path.join(config.checkpoints_path, "dtw_segment_indices.npy"), dtw_segment_indices)
                     print(f"Saved DTW analysis data to {config.checkpoints_path}")
             else:
                 print("No DTW augmentations generated, using original model")
@@ -507,6 +490,16 @@ def train(config: TrainConfig):
             random_seed=config.seed
         )
         print(f"Reward analysis saved to: {reward_grid_path}")
+        
+        # only compute returns for the original data
+        obs_act_1 = np.concatenate(
+            (dataset["observations"][idx_1], dataset["actions"][idx_1]), axis=-1
+        )
+        obs_act_2 = np.concatenate(
+            (dataset["observations"][idx_2], dataset["actions"][idx_2]), axis=-1
+        )
+        return_1 = dataset["rewards"][idx_1].sum(axis=1)
+        return_2 = dataset["rewards"][idx_2].sum(axis=1)
         
         # Generate preference return analysis plot
         preference_return_path = os.path.join(config.checkpoints_path, f"preference_return_analysis_seed_{config.seed}.png")
