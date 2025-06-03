@@ -13,7 +13,7 @@ import uuid
 from dataclasses import asdict, dataclass
 
 import reward_utils
-from reward_utils import collect_feedback, collect_human_feedback, consist_test_dataset
+from reward_utils import collect_feedback, collect_human_feedback, consist_test_dataset, collect_dtw_augmentations, compute_acquisition_scores, filter_augmentations_by_acquisition, collect_simple_pairwise_feedback
 from models.reward_model import RewardModel
 from utils.analyze_rewards_legacy import analyze_rewards_legacy, create_episodes_from_dataset, plot_preference_return_analysis_legacy, plot_segment_return_scatter_analysis_legacy
 
@@ -43,6 +43,18 @@ class TrainConfig:
     model_type: str = "BT"
     noise: float = 0.0
     human: bool = False
+    # DTW augmentations
+    use_dtw_augmentations: bool = False
+    dtw_augment_before_training: bool = False  # If True: augment first then train, If False: train then augment
+    dtw_subsample_size: int = 5000
+    dtw_augmentation_size: int = 2000
+    dtw_k_similar: int = 5  # Number of similar segments to find for each anchor
+    dtw_batch_size: int = 100  # Batch size for FastDTW processing
+    acquisition_threshold_low: float = 0.25  # 25th percentile
+    acquisition_threshold_high: float = 0.75  # 75th percentile
+    # Cache paths for reproducibility
+    segment_indices_path: Optional[str] = None  # Path to save/load segment indices
+    dtw_matrix_path: Optional[str] = None  # Path to save/load DTW matrix
     # MLP
     epochs: int = int(1e3)
     batch_size: int = 256
@@ -55,10 +67,109 @@ class TrainConfig:
     project: str = "Reward Learning"
     group: str = "Reward learning"
     name: str = "Reward"
+    
+    # Custom checkpoint naming (optional override)
+    custom_checkpoint_params: Optional[List[str]] = None  # e.g., ["env", "data_quality", "dtw_settings"]
 
     def __post_init__(self):
-        self.group = f"{self.env}_data_{self.data_quality}_fn_{self.feedback_num}_qb_{self.q_budget}_ft_{self.feedback_type}_m_{self.model_type}_e_{self.epochs}_n_{self.noise}"
-        checkpoints_name = f"{self.name}/{self.env}/data_{self.data_quality}/fn_{self.feedback_num}/qb_{self.q_budget}/ft_{self.feedback_type}/m_{self.model_type}/n_{self.noise}/e_{self.epochs}/s_{self.seed}"
+        # Set up cache paths if checkpoints_path is available
+        if self.checkpoints_path is not None:
+            if self.segment_indices_path is None:
+                self.segment_indices_path = os.path.join(self.checkpoints_path, "segment_indices_cache.pkl")
+            if self.dtw_matrix_path is None:
+                self.dtw_matrix_path = os.path.join(self.checkpoints_path, "dtw_matrix_cache.pkl")
+        
+        # Define all available parameter mappings for flexible naming
+        param_mappings = {
+            "env": self.env,
+            "data_quality": self.data_quality,
+            "feedback_num": self.feedback_num,
+            "q_budget": self.q_budget,
+            "feedback_type": self.feedback_type,
+            "model_type": self.model_type,
+            "epochs": self.epochs,
+            "noise": self.noise,
+            "seed": self.seed,
+            "dtw_enabled": int(self.use_dtw_augmentations),
+            "dtw_mode": "before" if self.dtw_augment_before_training else "after",
+            "dtw_subsample": f"{self.dtw_subsample_size//1000}k",
+            "dtw_augmentation": self.dtw_augmentation_size,
+            "dtw_k_similar": self.dtw_k_similar,
+            "dtw_batch_size": self.dtw_batch_size,
+            "acquisition_thresholds": f"{self.acquisition_threshold_low}-{self.acquisition_threshold_high}",
+            "dtw_settings": f"{int(self.use_dtw_augmentations)}-{int(self.dtw_augment_before_training)}-{self.dtw_subsample_size//1000}k-{self.dtw_augmentation_size}-K{self.dtw_k_similar}-B{self.dtw_batch_size}"
+        }
+        
+        # Use custom parameters if specified, otherwise use default structure
+        if self.custom_checkpoint_params:
+            # Build group string from custom parameters
+            group_parts = []
+            checkpoint_parts = []
+            
+            for param_name in self.custom_checkpoint_params:
+                if param_name in param_mappings:
+                    value = param_mappings[param_name]
+                    group_parts.append(f"{param_name}_{value}")
+                    checkpoint_parts.append(f"{param_name}_{value}")
+                else:
+                    print(f"Warning: Unknown parameter '{param_name}' in custom_checkpoint_params")
+            
+            self.group = "_".join(group_parts)
+            checkpoint_components = [self.name] + checkpoint_parts
+            
+        else:
+            # Default checkpoint parameter groups for flexible naming
+            checkpoint_params = [
+                # Environment and data
+                ["env", self.env],
+                ["data", self.data_quality], 
+                ["fn", self.feedback_num],
+                ["qb", self.q_budget],
+                ["ft", self.feedback_type],
+                ["m", self.model_type],
+                ["e", self.epochs],
+                ["n", self.noise],
+                # DTW augmentation settings (only if enabled)
+                ["dtw", f"{int(self.use_dtw_augmentations)}-{int(self.dtw_augment_before_training)}-{self.dtw_subsample_size//1000}k-{self.dtw_augmentation_size}-K{self.dtw_k_similar}-B{self.dtw_batch_size}"] if self.use_dtw_augmentations else None,
+                ["acq", f"{self.acquisition_threshold_low}-{self.acquisition_threshold_high}"] if self.use_dtw_augmentations and not self.dtw_augment_before_training else None,
+                # Seed (always last)
+                ["s", self.seed]
+            ]
+            
+            # Filter out None entries and build group string
+            active_params = [param for param in checkpoint_params if param is not None]
+            self.group = "_".join([f"{param[0]}_{param[1]}" for param in active_params])
+            
+            # Build checkpoint path components
+            checkpoint_components = [
+                f"{self.name}",
+                f"{self.env}",
+                f"data_{self.data_quality}",
+                f"fn_{self.feedback_num}",
+                f"qb_{self.q_budget}",
+                f"ft_{self.feedback_type}",
+                f"m_{self.model_type}",
+                f"n_{self.noise}",
+                f"e_{self.epochs}"
+            ]
+            
+            # Add DTW components if enabled
+            if self.use_dtw_augmentations:
+                dtw_mode = "before" if self.dtw_augment_before_training else "after"
+                checkpoint_components.extend([
+                    f"dtw_{dtw_mode}",
+                    f"sub_{self.dtw_subsample_size//1000}k",
+                    f"aug_{self.dtw_augmentation_size}"
+                ])
+                
+                # Add acquisition thresholds only for post-training augmentation
+                if not self.dtw_augment_before_training:
+                    checkpoint_components.append(f"acq_{self.acquisition_threshold_low}-{self.acquisition_threshold_high}")
+            
+            checkpoint_components.append(f"s_{self.seed}")
+        
+        checkpoints_name = "/".join(checkpoint_components)
+        
         if self.checkpoints_path is not None:
             self.checkpoints_path = os.path.join(
                 self.checkpoints_path, checkpoints_name
@@ -114,10 +225,11 @@ def train(config: TrainConfig):
     )
 
     assert config.q_budget >= 1
-    if config.human == False:
-        multiple_ranked_list = collect_feedback(dataset, traj_total, config)
-    elif config.human == True:
-        multiple_ranked_list = collect_human_feedback(dataset, config)
+    # if config.human == False:
+    #     multiple_ranked_list = collect_feedback(dataset, traj_total, config)
+    # elif config.human == True:
+    #     multiple_ranked_list = collect_human_feedback(dataset, config)
+    multiple_ranked_list, segment_indices = collect_simple_pairwise_feedback(dataset, traj_total, config)
 
     idx_st_1 = []
     idx_st_2 = []
@@ -169,7 +281,203 @@ def train(config: TrainConfig):
         test_obs_act_1, test_obs_act_2, test_labels, test_binary_labels
     )
 
-    reward_model.train_model()
+    # DTW Augmentation Strategy
+    if config.use_dtw_augmentations and config.dtw_augment_before_training:
+        print("\nStrategy: DTW augmentations BEFORE training...")
+        
+        # Collect DTW augmentations
+        dtw_multiple_ranked_list, dtw_matrix, subsample_indices = collect_dtw_augmentations(
+            dataset, 
+            traj_total, 
+            config,
+            obs_act_1,
+            obs_act_2,
+            labels,
+            segment_indices,
+            use_relative_eef=True
+        )
+        
+        # Extract augmentation data in the same format as original training data
+        dtw_idx_st_1 = []
+        dtw_idx_st_2 = []
+        dtw_labels = []
+        
+        # Process DTW ranking lists to extract pairs
+        for single_ranked_list in dtw_multiple_ranked_list:
+            dtw_sub_index_set = []
+            for i, group in enumerate(single_ranked_list):
+                for tup in group:
+                    dtw_sub_index_set.append((tup[0], i, tup[1]))
+            for i in range(len(dtw_sub_index_set)):
+                for j in range(i + 1, len(dtw_sub_index_set)):
+                    dtw_idx_st_1.append(dtw_sub_index_set[i][0])
+                    dtw_idx_st_2.append(dtw_sub_index_set[j][0])
+                    if dtw_sub_index_set[i][1] < dtw_sub_index_set[j][1]:
+                        dtw_labels.append([0, 1])
+                    else:
+                        dtw_labels.append([0.5, 0.5])
+        
+        if len(dtw_idx_st_1) > 0:
+            dtw_labels = np.array(dtw_labels)
+            dtw_idx_1 = [[j for j in range(i, i + config.segment_size)] for i in dtw_idx_st_1]
+            dtw_idx_2 = [[j for j in range(i, i + config.segment_size)] for i in dtw_idx_st_2]
+            dtw_obs_act_1 = np.concatenate(
+                (dataset["observations"][dtw_idx_1], dataset["actions"][dtw_idx_1]), axis=-1
+            )
+            dtw_obs_act_2 = np.concatenate(
+                (dataset["observations"][dtw_idx_2], dataset["actions"][dtw_idx_2]), axis=-1
+            )
+            dtw_return_1 = dataset["rewards"][dtw_idx_1].sum(axis=1)
+            dtw_return_2 = dataset["rewards"][dtw_idx_2].sum(axis=1)
+            
+            # Combine original data with ALL DTW augmentations (no acquisition filtering)
+            print("Combining original data with DTW augmentations...")
+            combined_obs_act_1 = np.concatenate([obs_act_1, dtw_obs_act_1], axis=0)
+            combined_obs_act_2 = np.concatenate([obs_act_2, dtw_obs_act_2], axis=0)  
+            combined_labels = np.concatenate([labels, dtw_labels], axis=0)
+            combined_multiple_ranked_list = multiple_ranked_list + dtw_multiple_ranked_list
+            combined_return_1 = np.concatenate([return_1, dtw_return_1], axis=0)
+            combined_return_2 = np.concatenate([return_2, dtw_return_2], axis=0)
+            
+            print(f"Combined dataset sizes:")
+            print(f"  Original: {len(obs_act_1)} pairs")
+            print(f"  DTW augmentations: {len(dtw_obs_act_1)} pairs")
+            print(f"  Combined: {len(combined_obs_act_1)} pairs")
+            
+            # Create reward model with combined data from the start
+            print("Training reward model with augmented data...")
+            reward_model = RewardModel(config, combined_obs_act_1, combined_obs_act_2, combined_labels, dimension)
+            reward_model.save_test_dataset(
+                test_obs_act_1, test_obs_act_2, test_labels, test_binary_labels
+            )
+            
+            # Update variables for analysis
+            obs_act_1, obs_act_2, labels = combined_obs_act_1, combined_obs_act_2, combined_labels
+            return_1, return_2 = combined_return_1, combined_return_2
+            
+            # Save DTW matrix for analysis
+            if config.checkpoints_path:
+                np.save(os.path.join(config.checkpoints_path, "dtw_matrix.npy"), dtw_matrix)
+                np.save(os.path.join(config.checkpoints_path, "subsample_indices.npy"), subsample_indices)
+                print(f"Saved DTW analysis data to {config.checkpoints_path}")
+        else:
+            print("No DTW augmentations generated, using original data")
+        
+        # Train the model (either original or augmented)
+        print("Training reward model...")
+        reward_model.train_model()
+        
+    else:
+        # Original approach: Train first, then optionally augment
+        print("\nStrategy: Training FIRST, then optional DTW augmentations...")
+        
+        # Stage 1: Initial training
+        print("Stage 1: Initial reward model training...")
+        reward_model.train_model()
+        
+        # Stage 2: DTW augmentations with acquisition filtering (if enabled)
+        if config.use_dtw_augmentations:
+            print("\nStage 2: DTW augmentations with acquisition filtering...")
+            
+            # Collect DTW augmentations
+            dtw_multiple_ranked_list, dtw_matrix, subsample_indices = collect_dtw_augmentations(
+                dataset, 
+                traj_total, 
+                config,
+                obs_act_1,
+                obs_act_2,
+                labels,
+                segment_indices,
+                use_relative_eef=True
+            )
+            
+            # Extract augmentation data in the same format as original training data
+            dtw_idx_st_1 = []
+            dtw_idx_st_2 = []
+            dtw_labels = []
+            
+            # Process DTW ranking lists to extract pairs
+            for single_ranked_list in dtw_multiple_ranked_list:
+                dtw_sub_index_set = []
+                for i, group in enumerate(single_ranked_list):
+                    for tup in group:
+                        dtw_sub_index_set.append((tup[0], i, tup[1]))
+                for i in range(len(dtw_sub_index_set)):
+                    for j in range(i + 1, len(dtw_sub_index_set)):
+                        dtw_idx_st_1.append(dtw_sub_index_set[i][0])
+                        dtw_idx_st_2.append(dtw_sub_index_set[j][0])
+                        if dtw_sub_index_set[i][1] < dtw_sub_index_set[j][1]:
+                            dtw_labels.append([0, 1])
+                        else:
+                            dtw_labels.append([0.5, 0.5])
+            
+            if len(dtw_idx_st_1) > 0:
+                dtw_labels = np.array(dtw_labels)
+                dtw_idx_1 = [[j for j in range(i, i + config.segment_size)] for i in dtw_idx_st_1]
+                dtw_idx_2 = [[j for j in range(i, i + config.segment_size)] for i in dtw_idx_st_2]
+                dtw_obs_act_1 = np.concatenate(
+                    (dataset["observations"][dtw_idx_1], dataset["actions"][dtw_idx_1]), axis=-1
+                )
+                dtw_obs_act_2 = np.concatenate(
+                    (dataset["observations"][dtw_idx_2], dataset["actions"][dtw_idx_2]), axis=-1
+                )
+                dtw_return_1 = dataset["rewards"][dtw_idx_1].sum(axis=1)
+                dtw_return_2 = dataset["rewards"][dtw_idx_2].sum(axis=1)
+                
+                # Compute acquisition scores for DTW augmentations
+                print("Computing acquisition scores for DTW augmentations...")
+                acquisition_scores = compute_acquisition_scores(
+                    reward_model, dtw_obs_act_1, dtw_obs_act_2, dtw_labels, config
+                )
+                
+                # Filter augmentations based on acquisition scores
+                print("Filtering DTW augmentations based on acquisition scores...")
+                filtered_dtw_ranked_list, filtered_dtw_obs_act_1, filtered_dtw_obs_act_2, filtered_dtw_labels = filter_augmentations_by_acquisition(
+                    dtw_multiple_ranked_list,
+                    dtw_obs_act_1,
+                    dtw_obs_act_2, 
+                    dtw_labels,
+                    acquisition_scores,
+                    threshold_low=config.acquisition_threshold_low,
+                    threshold_high=config.acquisition_threshold_high
+                )
+                
+                # Combine original data with filtered augmentations
+                print("Combining original data with filtered DTW augmentations...")
+                combined_obs_act_1 = np.concatenate([obs_act_1, filtered_dtw_obs_act_1], axis=0)
+                combined_obs_act_2 = np.concatenate([obs_act_2, filtered_dtw_obs_act_2], axis=0)  
+                combined_labels = np.concatenate([labels, filtered_dtw_labels], axis=0)
+                combined_multiple_ranked_list = multiple_ranked_list + filtered_dtw_ranked_list
+                
+                print(f"Combined dataset sizes:")
+                print(f"  Original: {len(obs_act_1)} pairs")
+                print(f"  DTW augmentations: {len(filtered_dtw_obs_act_1)} pairs")
+                print(f"  Combined: {len(combined_obs_act_1)} pairs")
+                
+                # Create new reward model with combined data
+                print("Retraining reward model with augmented data...")
+                combined_reward_model = RewardModel(config, combined_obs_act_1, combined_obs_act_2, combined_labels, dimension)
+                combined_reward_model.save_test_dataset(
+                    test_obs_act_1, test_obs_act_2, test_labels, test_binary_labels
+                )
+                combined_reward_model.train_model()
+                
+                # Use the combined model for final results
+                reward_model = combined_reward_model
+                obs_act_1, obs_act_2, labels = combined_obs_act_1, combined_obs_act_2, combined_labels
+                return_1 = np.concatenate([return_1, dtw_return_1[acquisition_scores >= np.percentile(acquisition_scores, config.acquisition_threshold_low * 100)]], axis=0)
+                return_2 = np.concatenate([return_2, dtw_return_2[acquisition_scores >= np.percentile(acquisition_scores, config.acquisition_threshold_low * 100)]], axis=0)
+                
+                # Save DTW matrix and acquisition scores for analysis
+                if config.checkpoints_path:
+                    np.save(os.path.join(config.checkpoints_path, "dtw_matrix.npy"), dtw_matrix)
+                    np.save(os.path.join(config.checkpoints_path, "acquisition_scores.npy"), acquisition_scores)
+                    np.save(os.path.join(config.checkpoints_path, "subsample_indices.npy"), subsample_indices)
+                    print(f"Saved DTW analysis data to {config.checkpoints_path}")
+            else:
+                print("No DTW augmentations generated, using original model")
+
+    # Save final model
     reward_model.save_model(config.checkpoints_path)
     
     # Run reward analysis using the legacy-compatible functions
