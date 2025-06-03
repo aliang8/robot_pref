@@ -27,7 +27,7 @@ lr: 0.001
 max_timesteps: 250000
 model_type: BT
 n_episodes: 50
-name: seed_10_66217b51
+name: seed_10_07f2a2d2
 noise: 0.0
 normalize: true
 normalize_reward: true
