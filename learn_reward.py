@@ -13,7 +13,7 @@ import uuid
 from dataclasses import asdict, dataclass
 
 import reward_utils
-from reward_utils import collect_feedback, collect_human_feedback, consist_test_dataset, collect_dtw_augmentations, compute_acquisition_scores, filter_augmentations_by_acquisition, collect_simple_pairwise_feedback, analyze_dtw_augmentation_quality
+from reward_utils import collect_feedback, collect_human_feedback, consist_test_dataset, collect_dtw_augmentations, compute_acquisition_scores, filter_augmentations_by_acquisition, collect_simple_pairwise_feedback, analyze_dtw_augmentation_quality, compare_baseline_vs_augmented_performance, display_preference_label_stats, plot_baseline_vs_augmented_scatter_analysis, plot_individual_test_example_deltas
 from models.reward_model import RewardModel
 from utils.analyze_rewards_legacy import analyze_rewards_legacy, create_episodes_from_dataset, plot_preference_return_analysis_legacy, plot_segment_return_scatter_analysis_legacy
 
@@ -32,25 +32,28 @@ class TrainConfig:
     checkpoints_path: Optional[str] = None  # checkpoints path
     load_model: str = ""  # Model load file name, "" doesn't load
     # preference learning
-    feedback_num: int = 1000
+    feedback_num: int = 100
     data_quality: float = 5.0  # Replay buffer size (data_quality * 100000)
     segment_size: int = 25
     normalize: bool = True
     threshold: float = 0.0
     data_aug: str = "none"
-    q_budget: int = 10000
+    q_budget: int = 1
     feedback_type: str = "RLT"
     model_type: str = "BT"
     noise: float = 0.0
     human: bool = False
+    use_relative_eef: bool = False
     # DTW augmentations
     use_dtw_augmentations: bool = False
     dtw_augment_before_training: bool = False  # If True: augment first then train, If False: train then augment
     dtw_subsample_size: int = 10000  # Number of segments to sample for DTW matrix
     dtw_augmentation_size: int = 2000  # Number of augmentation pairs to create from DTW matrix
     dtw_k_augment: int = 5  # Number of similar segments to find for each original preference pair
+    dtw_preference_ratios: List[float] = None  # Ratios for [seg1_better, seg2_better, equal_pref] sampling. None = use all available
     acquisition_threshold_low: float = 0.25  # 25th percentile for acquisition filtering
     acquisition_threshold_high: float = 0.75  # 75th percentile for acquisition filtering
+    acquisition_method: str = "entropy"  # "entropy", "disagreement", "combined", "variance"
     # Cache paths for reproducibility
     segment_indices_path: Optional[str] = None  # Path to save/load segment indices
     dtw_matrix_path: Optional[str] = None  # Path to save/load DTW matrix
@@ -62,6 +65,8 @@ class TrainConfig:
     hidden_sizes: int = 128
     ensemble_num: int = 3
     ensemble_method: str = "mean"
+    # Class weighting for preference balancing
+    use_class_weights: bool = False  # Apply inverse frequency weighting to balance preference types
     # Wandb logging
     project: str = "Reward Learning"
     group: str = "Reward learning"
@@ -71,6 +76,17 @@ class TrainConfig:
     custom_checkpoint_params: Optional[List[str]] = None  # e.g., ["env", "data_quality", "dtw_settings"]
 
     def __post_init__(self):
+        # Set default equal ratios for DTW preference sampling if not specified
+        if self.dtw_preference_ratios is None:
+            self.dtw_preference_ratios = [0.0, 1.0, 0.0]  # [seg1_better, seg2_better, equal_pref]
+            
+        # Validate ratios sum to 1.0
+        if self.dtw_preference_ratios is not None:
+            ratio_sum = sum(self.dtw_preference_ratios)
+            if abs(ratio_sum - 1.0) > 1e-6:
+                print(f"Warning: DTW preference ratios sum to {ratio_sum:.6f}, normalizing to sum to 1.0")
+                self.dtw_preference_ratios = [r / ratio_sum for r in self.dtw_preference_ratios]
+        
         # Set up cache paths if checkpoints_path is available
         if self.checkpoints_path is not None:
             if self.segment_indices_path is None:
@@ -93,8 +109,9 @@ class TrainConfig:
             "dtw_mode": "before" if self.dtw_augment_before_training else "after",
             "dtw_subsample": f"{self.dtw_subsample_size//1000}k",
             "dtw_augmentation": self.dtw_augmentation_size,
+            "dtw_ratios": f"{self.dtw_preference_ratios[0]:.2f}-{self.dtw_preference_ratios[1]:.2f}-{self.dtw_preference_ratios[2]:.2f}",
             "acquisition_thresholds": f"{self.acquisition_threshold_low}-{self.acquisition_threshold_high}",
-            "dtw_settings": f"{int(self.use_dtw_augmentations)}-{int(self.dtw_augment_before_training)}-{self.dtw_subsample_size//1000}k-{self.dtw_augmentation_size}-A{self.acquisition_threshold_low}-{self.acquisition_threshold_high}"
+            "dtw_settings": f"{int(self.use_dtw_augmentations)}-{int(self.dtw_augment_before_training)}-{self.dtw_subsample_size//1000}k-{self.dtw_augmentation_size}-R{self.dtw_preference_ratios[0]:.2f}-{self.dtw_preference_ratios[1]:.2f}-{self.dtw_preference_ratios[2]:.2f}-A{self.acquisition_threshold_low}-{self.acquisition_threshold_high}"
         }
         
         # Use custom parameters if specified, otherwise use default structure
@@ -126,8 +143,9 @@ class TrainConfig:
                 ["m", self.model_type],
                 ["e", self.epochs],
                 ["n", self.noise],
+                ["th", self.threshold],
                 # DTW augmentation settings (only if enabled)
-                ["dtw", f"{int(self.use_dtw_augmentations)}-{int(self.dtw_augment_before_training)}-{self.dtw_subsample_size//1000}k-{self.dtw_augmentation_size}-A{self.acquisition_threshold_low}-{self.acquisition_threshold_high}"] if self.use_dtw_augmentations else None,
+                ["dtw", f"{int(self.use_dtw_augmentations)}-{int(self.dtw_augment_before_training)}-{self.dtw_subsample_size//1000}k-{self.dtw_augmentation_size}-R{self.dtw_preference_ratios[0]:.2f}-{self.dtw_preference_ratios[1]:.2f}-{self.dtw_preference_ratios[2]:.2f}-A{self.acquisition_threshold_low}-{self.acquisition_threshold_high}"] if self.use_dtw_augmentations else None,
                 # Seed (always last)
                 ["s", self.seed]
             ]
@@ -146,7 +164,8 @@ class TrainConfig:
                 f"ft_{self.feedback_type}",
                 f"m_{self.model_type}",
                 f"n_{self.noise}",
-                f"e_{self.epochs}"
+                f"e_{self.epochs}",
+                f"th_{self.threshold}"
             ]
             
             # Add DTW components if enabled
@@ -271,7 +290,7 @@ def train(config: TrainConfig):
     # elif config.human == True:
     #     multiple_ranked_list = collect_human_feedback(dataset, config)
     multiple_ranked_list, segment_indices = collect_simple_pairwise_feedback(dataset, traj_total, config)
-
+    
     idx_st_1 = []
     idx_st_2 = []
     labels = []
@@ -300,6 +319,9 @@ def train(config: TrainConfig):
     )
     return_1 = dataset["rewards"][idx_1].sum(axis=1)
     return_2 = dataset["rewards"][idx_2].sum(axis=1)
+
+    # Display stats about the original preference labels
+    display_preference_label_stats(labels, return_1, return_2, config, title="Original Preference Labels")
     
     # test query set (for debug the training, not used for training)
     test_feedback_num = 5000
@@ -312,6 +334,20 @@ def train(config: TrainConfig):
             threshold=config.threshold,
         )
     )
+    
+    # Compute test ground truth returns by recreating the test indices
+    # (using same logic as consist_test_dataset)
+    np.random.seed(config.seed)  # Use same seed as test dataset creation
+    test_traj_idx = np.random.choice(traj_total, 2 * test_feedback_num, replace=True)
+    test_idx = [
+        500 * i + np.random.randint(0, 500 - config.segment_size) for i in test_traj_idx
+    ]
+    test_idx_st_1 = test_idx[:test_feedback_num]
+    test_idx_st_2 = test_idx[test_feedback_num:]
+    test_idx_1 = [[j for j in range(i, i + config.segment_size)] for i in test_idx_st_1]
+    test_idx_2 = [[j for j in range(i, i + config.segment_size)] for i in test_idx_st_2]
+    test_gt_return_1 = dataset["rewards"][test_idx_1].sum(axis=1)
+    test_gt_return_2 = dataset["rewards"][test_idx_2].sum(axis=1)
 
     wandb_init(asdict(config))
 
@@ -326,6 +362,14 @@ def train(config: TrainConfig):
     if config.use_dtw_augmentations and config.dtw_augment_before_training:
         print("\nStrategy: DTW augmentations BEFORE training...")
         
+        # First, train a baseline model on original data only for comparison
+        print("Step 1: Training baseline model on original data only...")
+        baseline_reward_model = RewardModel(config, obs_act_1, obs_act_2, labels, dimension)
+        baseline_reward_model.save_test_dataset(
+            test_obs_act_1, test_obs_act_2, test_labels, test_binary_labels
+        )
+        baseline_reward_model.train_model()
+        
         # Prepare original preference pairs for DTW augmentation
         original_pairs = list(zip(idx_st_1, idx_st_2))
         original_preferences = labels.tolist()
@@ -337,8 +381,12 @@ def train(config: TrainConfig):
             config,
             original_pairs,
             original_preferences,
+<<<<<<< HEAD
             use_relative_eef=True,
             use_goal_pos=True,
+=======
+            use_relative_eef=config.use_relative_eef
+>>>>>>> origin/anthony
         )
         
         # Extract augmentation data in the same format as original training data
@@ -360,7 +408,7 @@ def train(config: TrainConfig):
                         dtw_labels.append([0, 1])
                     else:
                         dtw_labels.append([0.5, 0.5])
-        
+
         if len(dtw_idx_st_1) > 0:
             dtw_labels = np.array(dtw_labels)
             dtw_idx_1 = [[j for j in range(i, i + config.segment_size)] for i in dtw_idx_st_1]
@@ -374,8 +422,11 @@ def train(config: TrainConfig):
             dtw_return_1 = dataset["rewards"][dtw_idx_1].sum(axis=1)
             dtw_return_2 = dataset["rewards"][dtw_idx_2].sum(axis=1)
             
+            # Display stats about DTW augmentation labels
+            display_preference_label_stats(dtw_labels, dtw_return_1, dtw_return_2, config, title="DTW Augmentation Labels")
+            
             # Combine original data with ALL DTW augmentations (no acquisition filtering)
-            print("Combining original data with DTW augmentations...")
+            print("Step 2: Combining original data with DTW augmentations...")
             combined_obs_act_1 = np.concatenate([obs_act_1, dtw_obs_act_1], axis=0)
             combined_obs_act_2 = np.concatenate([obs_act_2, dtw_obs_act_2], axis=0)  
             combined_labels = np.concatenate([labels, dtw_labels], axis=0)
@@ -383,13 +434,16 @@ def train(config: TrainConfig):
             combined_return_1 = np.concatenate([return_1, dtw_return_1], axis=0)
             combined_return_2 = np.concatenate([return_2, dtw_return_2], axis=0)
             
+            # Display stats about combined dataset
+            display_preference_label_stats(combined_labels, combined_return_1, combined_return_2, config, title="Combined (Original + DTW) Labels")
+            
             print(f"Combined dataset sizes:")
             print(f"  Original: {len(obs_act_1)} pairs")
             print(f"  DTW augmentations: {len(dtw_obs_act_1)} pairs")
             print(f"  Combined: {len(combined_obs_act_1)} pairs")
             
             # Create reward model with combined data from the start
-            print("Training reward model with augmented data...")
+            print("Step 3: Training augmented reward model with combined data...")
             reward_model = RewardModel(config, combined_obs_act_1, combined_obs_act_2, combined_labels, dimension)
             reward_model.save_test_dataset(
                 test_obs_act_1, test_obs_act_2, test_labels, test_binary_labels
@@ -405,18 +459,53 @@ def train(config: TrainConfig):
                 np.save(os.path.join(config.checkpoints_path, "dtw_segment_indices.npy"), candidate_segment_indices)
                 print(f"Saved DTW analysis data to {config.checkpoints_path}")
         else:
-            print("No DTW augmentations generated, using original data")
+            print("No DTW augmentations generated, using baseline model as final model")
+            reward_model = baseline_reward_model
         
-        # Train the model (either original or augmented)
-        print("Training reward model...")
+        # Train the augmented model
+        print("Training augmented reward model...")
         reward_model.train_model()
+        
+        # Step 4: Compare baseline vs augmented model performance
+        if len(dtw_idx_st_1) > 0:
+            print("Step 4: Comparing baseline vs augmented model performance...")
+            comparison_path = os.path.join(config.checkpoints_path, f"baseline_vs_augmented_comparison_seed_{config.seed}.png") if config.checkpoints_path else None
+            comparison_results = compare_baseline_vs_augmented_performance(
+                baseline_reward_model=baseline_reward_model,
+                augmented_reward_model=reward_model,
+                test_obs_act_1=test_obs_act_1,
+                test_obs_act_2=test_obs_act_2,
+                test_labels=test_labels,
+                test_binary_labels=test_binary_labels,
+                test_gt_return_1=test_gt_return_1,
+                test_gt_return_2=test_gt_return_2,
+                config=config,
+                output_path=comparison_path,
+                wandb_run=wandb.run if wandb.run else None
+            )
+            
+            # Create individual test example deltas chart
+            print("Creating individual test example deltas chart...")
+            deltas_chart_path = os.path.join(config.checkpoints_path, f"individual_test_deltas_seed_{config.seed}.png") if config.checkpoints_path else None
+            deltas_results = plot_individual_test_example_deltas(
+                baseline_reward_model=baseline_reward_model,
+                augmented_reward_model=reward_model,
+                test_obs_act_1=test_obs_act_1,
+                test_obs_act_2=test_obs_act_2,
+                test_gt_return_1=test_gt_return_1,
+                test_gt_return_2=test_gt_return_2,
+                output_file=deltas_chart_path,
+                max_examples=200,  # Show more examples in dedicated chart
+                wandb_run=wandb.run if wandb.run else None,
+                random_seed=config.seed
+            )
         
         # Analyze DTW augmentation quality if DTW was used
         if config.use_dtw_augmentations and len(dtw_multiple_ranked_list) > 0:
-            print("Analyzing DTW augmentation quality...")
+            print("Step 5: Analyzing DTW augmentation quality...")
             dtw_analysis_path = os.path.join(config.checkpoints_path, f"dtw_augmentation_analysis_seed_{config.seed}.png") if config.checkpoints_path else None
             analyze_dtw_augmentation_quality(
-                reward_model=reward_model,
+                reward_model=baseline_reward_model,
                 dtw_obs_act_1=dtw_obs_act_1,
                 dtw_obs_act_2=dtw_obs_act_2,
                 dtw_labels=dtw_labels,
@@ -427,14 +516,46 @@ def train(config: TrainConfig):
                 output_path=dtw_analysis_path,
                 wandb_run=wandb.run if wandb.run else None
             )
-        
+            
+            # Step 6: Create baseline vs augmented scatter analysis 
+            print("Step 6: Creating baseline vs augmented scatter analysis...")
+            scatter_comparison_path = os.path.join(config.checkpoints_path, f"baseline_vs_augmented_scatter_seed_{config.seed}.png") if config.checkpoints_path else None
+            
+            # Use original data for fair comparison (both models see same data)
+            # Combine both segments from pairs into individual segments
+            original_obs_act_1 = np.concatenate(
+                (dataset["observations"][idx_1], dataset["actions"][idx_1]), axis=-1
+            )
+            original_obs_act_2 = np.concatenate(
+                (dataset["observations"][idx_2], dataset["actions"][idx_2]), axis=-1
+            )
+            original_return_1 = dataset["rewards"][idx_1].sum(axis=1)
+            original_return_2 = dataset["rewards"][idx_2].sum(axis=1)
+            
+            # Combine both segments and returns into single arrays
+            all_segments = np.concatenate([original_obs_act_1, original_obs_act_2], axis=0)
+            all_returns = np.concatenate([original_return_1, original_return_2], axis=0)
+            
+            scatter_results = plot_baseline_vs_augmented_scatter_analysis(
+                baseline_reward_model=baseline_reward_model,
+                augmented_reward_model=reward_model,
+                obs_act_segments=all_segments,
+                gt_returns=all_returns,
+                segment_size=config.segment_size,
+                output_file=scatter_comparison_path,
+                max_samples=5000,
+                wandb_run=wandb.run if wandb.run else None,
+                random_seed=config.seed
+            )
+
     else:
         # Original approach: Train first, then optionally augment
         print("\nStrategy: Training FIRST, then optional DTW augmentations...")
         
-        # Stage 1: Initial training
-        print("Stage 1: Initial reward model training...")
+        # Stage 1: Initial training (this serves as our baseline)
+        print("Stage 1: Initial reward model training (baseline)...")
         reward_model.train_model()
+        baseline_reward_model = reward_model  # Keep reference to baseline
         
         # Stage 2: DTW augmentations with acquisition filtering (if enabled)
         if config.use_dtw_augmentations:
@@ -451,7 +572,7 @@ def train(config: TrainConfig):
                 config,
                 original_pairs,
                 original_preferences,
-                use_relative_eef=True
+                use_relative_eef=config.use_relative_eef
             )
             
             # Extract augmentation data in the same format as original training data
@@ -487,6 +608,9 @@ def train(config: TrainConfig):
                 dtw_return_1 = dataset["rewards"][dtw_idx_1].sum(axis=1)
                 dtw_return_2 = dataset["rewards"][dtw_idx_2].sum(axis=1)
                 
+                # Display stats about DTW augmentation labels
+                display_preference_label_stats(dtw_labels, dtw_return_1, dtw_return_2, config, title="DTW Augmentation Labels")
+                
                 # Compute acquisition scores for DTW augmentations
                 print("Computing acquisition scores for DTW augmentations...")
                 acquisition_scores = compute_acquisition_scores(
@@ -505,12 +629,25 @@ def train(config: TrainConfig):
                     threshold_high=config.acquisition_threshold_high
                 )
                 
+                # Display stats about filtered DTW augmentation labels
+                if len(filtered_dtw_obs_act_1) > 0:
+                    # Compute returns for filtered augmentations
+                    filtered_dtw_return_1 = dtw_return_1[acquisition_scores >= np.percentile(acquisition_scores, config.acquisition_threshold_low * 100)]
+                    filtered_dtw_return_2 = dtw_return_2[acquisition_scores >= np.percentile(acquisition_scores, config.acquisition_threshold_low * 100)]
+                    display_preference_label_stats(filtered_dtw_labels, filtered_dtw_return_1, filtered_dtw_return_2, config, title="Filtered DTW Augmentation Labels")
+                
                 # Combine original data with filtered augmentations
                 print("Combining original data with filtered DTW augmentations...")
                 combined_obs_act_1 = np.concatenate([obs_act_1, filtered_dtw_obs_act_1], axis=0)
                 combined_obs_act_2 = np.concatenate([obs_act_2, filtered_dtw_obs_act_2], axis=0)  
                 combined_labels = np.concatenate([labels, filtered_dtw_labels], axis=0)
                 combined_multiple_ranked_list = multiple_ranked_list + filtered_dtw_ranked_list
+                
+                # Display stats about combined dataset
+                if len(filtered_dtw_obs_act_1) > 0:
+                    combined_return_1 = np.concatenate([return_1, filtered_dtw_return_1], axis=0)
+                    combined_return_2 = np.concatenate([return_2, filtered_dtw_return_2], axis=0)
+                    display_preference_label_stats(combined_labels, combined_return_1, combined_return_2, config, title="Combined (Original + Filtered DTW) Labels")
                 
                 print(f"Combined dataset sizes:")
                 print(f"  Original: {len(obs_act_1)} pairs")
@@ -524,6 +661,39 @@ def train(config: TrainConfig):
                     test_obs_act_1, test_obs_act_2, test_labels, test_binary_labels
                 )
                 combined_reward_model.train_model()
+                
+                # Compare baseline vs augmented model performance
+                print("Comparing baseline vs augmented model performance...")
+                comparison_path = os.path.join(config.checkpoints_path, f"baseline_vs_augmented_comparison_seed_{config.seed}.png") if config.checkpoints_path else None
+                comparison_results = compare_baseline_vs_augmented_performance(
+                    baseline_reward_model=baseline_reward_model,
+                    augmented_reward_model=combined_reward_model,
+                    test_obs_act_1=test_obs_act_1,
+                    test_obs_act_2=test_obs_act_2,
+                    test_labels=test_labels,
+                    test_binary_labels=test_binary_labels,
+                    test_gt_return_1=test_gt_return_1,
+                    test_gt_return_2=test_gt_return_2,
+                    config=config,
+                    output_path=comparison_path,
+                    wandb_run=wandb.run if wandb.run else None
+                )
+                
+                # Create individual test example deltas chart
+                print("Creating individual test example deltas chart...")
+                deltas_chart_path = os.path.join(config.checkpoints_path, f"individual_test_deltas_seed_{config.seed}.png") if config.checkpoints_path else None
+                deltas_results = plot_individual_test_example_deltas(
+                    baseline_reward_model=baseline_reward_model,
+                    augmented_reward_model=combined_reward_model,
+                    test_obs_act_1=test_obs_act_1,
+                    test_obs_act_2=test_obs_act_2,
+                    test_gt_return_1=test_gt_return_1,
+                    test_gt_return_2=test_gt_return_2,
+                    output_file=deltas_chart_path,
+                    max_examples=200,  # Show more examples in dedicated chart
+                    wandb_run=wandb.run if wandb.run else None,
+                    random_seed=config.seed
+                )
                 
                 # Use the combined model for final results
                 reward_model = combined_reward_model
@@ -553,8 +723,39 @@ def train(config: TrainConfig):
                     np.save(os.path.join(config.checkpoints_path, "acquisition_scores.npy"), acquisition_scores)
                     np.save(os.path.join(config.checkpoints_path, "dtw_segment_indices.npy"), candidate_segment_indices)
                     print(f"Saved DTW analysis data to {config.checkpoints_path}")
+                
+                # Create baseline vs augmented scatter analysis
+                print("Creating baseline vs augmented scatter analysis...")
+                scatter_comparison_path = os.path.join(config.checkpoints_path, f"baseline_vs_augmented_scatter_seed_{config.seed}.png") if config.checkpoints_path else None
+                
+                # Use original data for fair comparison (both models see same data)
+                # Combine both segments from pairs into individual segments
+                original_obs_act_1 = np.concatenate(
+                    (dataset["observations"][idx_1], dataset["actions"][idx_1]), axis=-1
+                )
+                original_obs_act_2 = np.concatenate(
+                    (dataset["observations"][idx_2], dataset["actions"][idx_2]), axis=-1
+                )
+                original_return_1 = dataset["rewards"][idx_1].sum(axis=1)
+                original_return_2 = dataset["rewards"][idx_2].sum(axis=1)
+                
+                # Combine both segments and returns into single arrays
+                all_segments = np.concatenate([original_obs_act_1, original_obs_act_2], axis=0)
+                all_returns = np.concatenate([original_return_1, original_return_2], axis=0)
+                
+                scatter_results = plot_baseline_vs_augmented_scatter_analysis(
+                    baseline_reward_model=baseline_reward_model,
+                    augmented_reward_model=combined_reward_model,
+                    obs_act_segments=all_segments,
+                    gt_returns=all_returns,
+                    segment_size=config.segment_size,
+                    output_file=scatter_comparison_path,
+                    max_samples=5000,
+                    wandb_run=wandb.run if wandb.run else None,
+                    random_seed=config.seed
+                )
             else:
-                print("No DTW augmentations generated, using original model")
+                print("No DTW augmentations generated, using baseline model")
 
     # Save final model
     reward_model.save_model(config.checkpoints_path)
@@ -611,22 +812,6 @@ def train(config: TrainConfig):
             wandb_run=wandb.run if wandb.run else None
         )
         print(f"Preference return analysis saved to: {preference_return_path}")
-        
-        # Generate reward scatter analysis plot
-        scatter_analysis_path = os.path.join(config.checkpoints_path, f"segment_return_scatter_analysis_seed_{config.seed}.png")
-        plot_segment_return_scatter_analysis_legacy(
-            reward_model=reward_model,
-            obs_act_1=obs_act_1,
-            obs_act_2=obs_act_2,
-            gt_return_1=return_1,
-            gt_return_2=return_2,
-            segment_size=config.segment_size,
-            output_file=scatter_analysis_path,
-            max_samples=5000,
-            wandb_run=wandb.run if wandb.run else None,
-            random_seed=config.seed
-        )
-        print(f"Segment return scatter analysis saved to: {scatter_analysis_path}")
 
     # After collecting feedback and before training
     if "images" in dataset:

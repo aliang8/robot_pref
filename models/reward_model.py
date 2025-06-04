@@ -41,6 +41,49 @@ class RewardModel:
         self.net = None
         self.ensemble_model = None
         self.feedback_type = config.feedback_type
+        
+        # Calculate class weights based on preference distribution
+        self.use_class_weights = getattr(config, 'use_class_weights', True)
+        if self.use_class_weights:
+            self.class_weights = self._calculate_class_weights()
+            print(f"Class weights calculated: {self.class_weights}")
+        else:
+            self.class_weights = None
+            print("Class weighting disabled")
+    
+    def _calculate_class_weights(self):
+        """Calculate inverse frequency class weights for preference types."""
+        # Count preference types
+        seg1_better_count = 0
+        seg2_better_count = 0
+        equal_pref_count = 0
+        
+        for label in self.labels:
+            if np.array_equal(label, [1, 0]):  # Segment 1 better
+                seg1_better_count += 1
+            elif np.array_equal(label, [0, 1]):  # Segment 2 better
+                seg2_better_count += 1
+            elif np.array_equal(label, [0.5, 0.5]):  # Equal preference
+                equal_pref_count += 1
+        
+        total_samples = len(self.labels)
+        num_classes = 3
+        
+        # Calculate class weights (inverse frequency)
+        seg1_better_weight = total_samples / (num_classes * seg1_better_count) if seg1_better_count > 0 else 0.0
+        seg2_better_weight = total_samples / (num_classes * seg2_better_count) if seg2_better_count > 0 else 0.0
+        equal_pref_weight = total_samples / (num_classes * equal_pref_count) if equal_pref_count > 0 else 0.0
+        
+        print(f"Training data preference distribution:")
+        print(f"  Segment 1 better: {seg1_better_count} ({seg1_better_count/total_samples*100:.1f}%) - weight: {seg1_better_weight:.3f}")
+        print(f"  Segment 2 better: {seg2_better_count} ({seg2_better_count/total_samples*100:.1f}%) - weight: {seg2_better_weight:.3f}")
+        print(f"  Equal preference: {equal_pref_count} ({equal_pref_count/total_samples*100:.1f}%) - weight: {equal_pref_weight:.3f}")
+        
+        return {
+            'seg1_better': seg1_better_weight,
+            'seg2_better': seg2_better_weight,
+            'equal_pref': equal_pref_weight
+        }
 
     def save_test_dataset(
         self,
@@ -103,17 +146,50 @@ class RewardModel:
         elif self.ensemble_method == "uwo":
             return torch.mean(pred, dim=1) - 5 * torch.std(pred, dim=1)
 
-    def BT_loss(self, pred_hat, label):
+    def BT_loss(self, pred_hat, label, apply_class_weights=True):
         # https://pytorch.org/docs/stable/generated/torch.nn.LogSoftmax.html#torch.nn.LogSoftmax
         logprobs = F.log_softmax(pred_hat, dim=1)
-        return -(label * logprobs).sum()
+        losses = -(label * logprobs).sum(dim=1)  # Per-sample losses
+        
+        if apply_class_weights and self.use_class_weights and self.class_weights is not None:
+            # Apply class weights based on preference type using vectorized operations
+            # Create boolean masks for each preference type
+            seg1_better_mask = (label[:, 0] == 1.0) & (label[:, 1] == 0.0)
+            seg2_better_mask = (label[:, 0] == 0.0) & (label[:, 1] == 1.0)
+            equal_pref_mask = (label[:, 0] == 0.5) & (label[:, 1] == 0.5)
+            
+            # Apply weights using vectorized operations
+            weights = torch.ones_like(losses)
+            weights[seg1_better_mask] = self.class_weights['seg1_better']
+            weights[seg2_better_mask] = self.class_weights['seg2_better']
+            weights[equal_pref_mask] = self.class_weights['equal_pref']
+            
+            losses = losses * weights
+        
+        return losses.sum()
 
-    def linear_BT_loss(self, pred_hat, label):
+    def linear_BT_loss(self, pred_hat, label, apply_class_weights=True):
         pred_hat += self.segment_size + 1e-5
         pred_prob = pred_hat / torch.sum(pred_hat, dim=1, keepdim=True)
         # label and pred_hat cross entropy loss
-        loss = -torch.sum(label * torch.log(pred_prob), dim=1)
-        return torch.sum(loss)
+        losses = -torch.sum(label * torch.log(pred_prob), dim=1)  # Per-sample losses
+        
+        if apply_class_weights and self.use_class_weights and self.class_weights is not None:
+            # Apply class weights based on preference type using vectorized operations
+            # Create boolean masks for each preference type
+            seg1_better_mask = (label[:, 0] == 1.0) & (label[:, 1] == 0.0)
+            seg2_better_mask = (label[:, 0] == 0.0) & (label[:, 1] == 1.0)
+            equal_pref_mask = (label[:, 0] == 0.5) & (label[:, 1] == 0.5)
+            
+            # Apply weights using vectorized operations
+            weights = torch.ones_like(losses)
+            weights[seg1_better_mask] = self.class_weights['seg1_better']
+            weights[seg2_better_mask] = self.class_weights['seg2_better']
+            weights[equal_pref_mask] = self.class_weights['equal_pref']
+            
+            losses = losses * weights
+        
+        return torch.sum(losses)
 
     def save_model(self, path):
         for member in range(self.ensemble_num):
@@ -169,7 +245,7 @@ class RewardModel:
                 eval_acc += torch.sum(
                     pred_labels == torch.argmax(binary_labels_batch, dim=-1)
                 ).item()
-                eval_loss += self.loss(pred_hat, labels_batch).item()
+                eval_loss += self.loss(pred_hat, labels_batch, apply_class_weights=False).item()
         eval_loss /= obs_act_1.shape[0]
         eval_acc /= float(obs_act_1.shape[0])
         wandb.log({name + "/loss": eval_loss, name + "/acc": eval_acc}, step=epoch)
