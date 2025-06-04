@@ -13,7 +13,7 @@ import uuid
 from dataclasses import asdict, dataclass
 
 import reward_utils
-from reward_utils import collect_feedback, collect_human_feedback, consist_test_dataset, collect_dtw_augmentations, compute_acquisition_scores, filter_augmentations_by_acquisition, collect_simple_pairwise_feedback, analyze_dtw_augmentation_quality
+from reward_utils import collect_feedback, collect_human_feedback, consist_test_dataset, collect_dtw_augmentations, compute_acquisition_scores, filter_augmentations_by_acquisition, collect_simple_pairwise_feedback, analyze_dtw_augmentation_quality, compare_baseline_vs_augmented_performance, display_preference_label_stats
 from models.reward_model import RewardModel
 from utils.analyze_rewards_legacy import analyze_rewards_legacy, create_episodes_from_dataset, plot_preference_return_analysis_legacy, plot_segment_return_scatter_analysis_legacy
 
@@ -32,17 +32,18 @@ class TrainConfig:
     checkpoints_path: Optional[str] = None  # checkpoints path
     load_model: str = ""  # Model load file name, "" doesn't load
     # preference learning
-    feedback_num: int = 1000
+    feedback_num: int = 100
     data_quality: float = 5.0  # Replay buffer size (data_quality * 100000)
     segment_size: int = 25
     normalize: bool = True
     threshold: float = 0.0
     data_aug: str = "none"
-    q_budget: int = 10000
+    q_budget: int = 1
     feedback_type: str = "RLT"
     model_type: str = "BT"
     noise: float = 0.0
     human: bool = False
+    use_relative_eef: bool = False
     # DTW augmentations
     use_dtw_augmentations: bool = False
     dtw_augment_before_training: bool = False  # If True: augment first then train, If False: train then augment
@@ -51,6 +52,7 @@ class TrainConfig:
     dtw_k_augment: int = 5  # Number of similar segments to find for each original preference pair
     acquisition_threshold_low: float = 0.25  # 25th percentile for acquisition filtering
     acquisition_threshold_high: float = 0.75  # 75th percentile for acquisition filtering
+    acquisition_method: str = "entropy"  # "entropy", "disagreement", "combined", "variance"
     # Cache paths for reproducibility
     segment_indices_path: Optional[str] = None  # Path to save/load segment indices
     dtw_matrix_path: Optional[str] = None  # Path to save/load DTW matrix
@@ -222,7 +224,7 @@ def train(config: TrainConfig):
     # elif config.human == True:
     #     multiple_ranked_list = collect_human_feedback(dataset, config)
     multiple_ranked_list, segment_indices = collect_simple_pairwise_feedback(dataset, traj_total, config)
-
+    
     idx_st_1 = []
     idx_st_2 = []
     labels = []
@@ -251,6 +253,9 @@ def train(config: TrainConfig):
     )
     return_1 = dataset["rewards"][idx_1].sum(axis=1)
     return_2 = dataset["rewards"][idx_2].sum(axis=1)
+
+    # Display stats about the original preference labels
+    display_preference_label_stats(labels, return_1, return_2, config, title="Original Preference Labels")
     
     # test query set (for debug the training, not used for training)
     test_feedback_num = 5000
@@ -277,6 +282,14 @@ def train(config: TrainConfig):
     if config.use_dtw_augmentations and config.dtw_augment_before_training:
         print("\nStrategy: DTW augmentations BEFORE training...")
         
+        # First, train a baseline model on original data only for comparison
+        print("Step 1: Training baseline model on original data only...")
+        baseline_reward_model = RewardModel(config, obs_act_1, obs_act_2, labels, dimension)
+        baseline_reward_model.save_test_dataset(
+            test_obs_act_1, test_obs_act_2, test_labels, test_binary_labels
+        )
+        baseline_reward_model.train_model()
+        
         # Prepare original preference pairs for DTW augmentation
         original_pairs = list(zip(idx_st_1, idx_st_2))
         original_preferences = labels.tolist()
@@ -288,7 +301,7 @@ def train(config: TrainConfig):
             config,
             original_pairs,
             original_preferences,
-            use_relative_eef=True
+            use_relative_eef=config.use_relative_eef
         )
         
         # Extract augmentation data in the same format as original training data
@@ -310,7 +323,7 @@ def train(config: TrainConfig):
                         dtw_labels.append([0, 1])
                     else:
                         dtw_labels.append([0.5, 0.5])
-        
+
         if len(dtw_idx_st_1) > 0:
             dtw_labels = np.array(dtw_labels)
             dtw_idx_1 = [[j for j in range(i, i + config.segment_size)] for i in dtw_idx_st_1]
@@ -324,8 +337,11 @@ def train(config: TrainConfig):
             dtw_return_1 = dataset["rewards"][dtw_idx_1].sum(axis=1)
             dtw_return_2 = dataset["rewards"][dtw_idx_2].sum(axis=1)
             
+            # Display stats about DTW augmentation labels
+            display_preference_label_stats(dtw_labels, dtw_return_1, dtw_return_2, config, title="DTW Augmentation Labels")
+            
             # Combine original data with ALL DTW augmentations (no acquisition filtering)
-            print("Combining original data with DTW augmentations...")
+            print("Step 2: Combining original data with DTW augmentations...")
             combined_obs_act_1 = np.concatenate([obs_act_1, dtw_obs_act_1], axis=0)
             combined_obs_act_2 = np.concatenate([obs_act_2, dtw_obs_act_2], axis=0)  
             combined_labels = np.concatenate([labels, dtw_labels], axis=0)
@@ -339,7 +355,7 @@ def train(config: TrainConfig):
             print(f"  Combined: {len(combined_obs_act_1)} pairs")
             
             # Create reward model with combined data from the start
-            print("Training reward model with augmented data...")
+            print("Step 3: Training augmented reward model with combined data...")
             reward_model = RewardModel(config, combined_obs_act_1, combined_obs_act_2, combined_labels, dimension)
             reward_model.save_test_dataset(
                 test_obs_act_1, test_obs_act_2, test_labels, test_binary_labels
@@ -355,15 +371,32 @@ def train(config: TrainConfig):
                 np.save(os.path.join(config.checkpoints_path, "dtw_segment_indices.npy"), candidate_segment_indices)
                 print(f"Saved DTW analysis data to {config.checkpoints_path}")
         else:
-            print("No DTW augmentations generated, using original data")
+            print("No DTW augmentations generated, using baseline model as final model")
+            reward_model = baseline_reward_model
         
-        # Train the model (either original or augmented)
-        print("Training reward model...")
+        # Train the augmented model
+        print("Training augmented reward model...")
         reward_model.train_model()
+        
+        # Step 4: Compare baseline vs augmented model performance
+        if len(dtw_idx_st_1) > 0:
+            print("Step 4: Comparing baseline vs augmented model performance...")
+            comparison_path = os.path.join(config.checkpoints_path, f"baseline_vs_augmented_comparison_seed_{config.seed}.png") if config.checkpoints_path else None
+            comparison_results = compare_baseline_vs_augmented_performance(
+                baseline_reward_model=baseline_reward_model,
+                augmented_reward_model=reward_model,
+                test_obs_act_1=test_obs_act_1,
+                test_obs_act_2=test_obs_act_2,
+                test_labels=test_labels,
+                test_binary_labels=test_binary_labels,
+                config=config,
+                output_path=comparison_path,
+                wandb_run=wandb.run if wandb.run else None
+            )
         
         # Analyze DTW augmentation quality if DTW was used
         if config.use_dtw_augmentations and len(dtw_multiple_ranked_list) > 0:
-            print("Analyzing DTW augmentation quality...")
+            print("Step 5: Analyzing DTW augmentation quality...")
             dtw_analysis_path = os.path.join(config.checkpoints_path, f"dtw_augmentation_analysis_seed_{config.seed}.png") if config.checkpoints_path else None
             analyze_dtw_augmentation_quality(
                 reward_model=reward_model,
@@ -377,14 +410,15 @@ def train(config: TrainConfig):
                 output_path=dtw_analysis_path,
                 wandb_run=wandb.run if wandb.run else None
             )
-        
+
     else:
         # Original approach: Train first, then optionally augment
         print("\nStrategy: Training FIRST, then optional DTW augmentations...")
         
-        # Stage 1: Initial training
-        print("Stage 1: Initial reward model training...")
+        # Stage 1: Initial training (this serves as our baseline)
+        print("Stage 1: Initial reward model training (baseline)...")
         reward_model.train_model()
+        baseline_reward_model = reward_model  # Keep reference to baseline
         
         # Stage 2: DTW augmentations with acquisition filtering (if enabled)
         if config.use_dtw_augmentations:
@@ -401,7 +435,7 @@ def train(config: TrainConfig):
                 config,
                 original_pairs,
                 original_preferences,
-                use_relative_eef=True
+                use_relative_eef=config.use_relative_eef
             )
             
             # Extract augmentation data in the same format as original training data
@@ -436,6 +470,9 @@ def train(config: TrainConfig):
                 )
                 dtw_return_1 = dataset["rewards"][dtw_idx_1].sum(axis=1)
                 dtw_return_2 = dataset["rewards"][dtw_idx_2].sum(axis=1)
+                
+                # Display stats about DTW augmentation labels
+                display_preference_label_stats(dtw_labels, dtw_return_1, dtw_return_2, config, title="DTW Augmentation Labels")
                 
                 # Compute acquisition scores for DTW augmentations
                 print("Computing acquisition scores for DTW augmentations...")
@@ -475,6 +512,21 @@ def train(config: TrainConfig):
                 )
                 combined_reward_model.train_model()
                 
+                # Compare baseline vs augmented model performance
+                print("Comparing baseline vs augmented model performance...")
+                comparison_path = os.path.join(config.checkpoints_path, f"baseline_vs_augmented_comparison_seed_{config.seed}.png") if config.checkpoints_path else None
+                comparison_results = compare_baseline_vs_augmented_performance(
+                    baseline_reward_model=baseline_reward_model,
+                    augmented_reward_model=combined_reward_model,
+                    test_obs_act_1=test_obs_act_1,
+                    test_obs_act_2=test_obs_act_2,
+                    test_labels=test_labels,
+                    test_binary_labels=test_binary_labels,
+                    config=config,
+                    output_path=comparison_path,
+                    wandb_run=wandb.run if wandb.run else None
+                )
+                
                 # Use the combined model for final results
                 reward_model = combined_reward_model
                 obs_act_1, obs_act_2, labels = combined_obs_act_1, combined_obs_act_2, combined_labels
@@ -504,7 +556,7 @@ def train(config: TrainConfig):
                     np.save(os.path.join(config.checkpoints_path, "dtw_segment_indices.npy"), candidate_segment_indices)
                     print(f"Saved DTW analysis data to {config.checkpoints_path}")
             else:
-                print("No DTW augmentations generated, using original model")
+                print("No DTW augmentations generated, using baseline model")
 
     # Save final model
     reward_model.save_model(config.checkpoints_path)

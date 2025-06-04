@@ -1,7 +1,7 @@
 env=metaworld_sweep-v2   # ["metaworld_button-press-topdown-v2", "dmc_cheetah-run"]: env name
 data_quality=1.0    # data quality. 
                     # The lower the quality, the more random policy data, and the higher the quality, the more expert policy data. (maximum is 10.0)
-feedback_num=500    # total feedback number (we use 500, 1000 feedback in the paper)
+feedback_num=100    # total feedback number (we use 500, 1000 feedback in the paper)
 q_budget=1        # query budget (we use 100 in the paper)
                     # Setting q_budget=1 is equivalent to independent pairwise sampling.
 feedback_type=RLT   # ["RLT", "SeqRank"]: RLT means ranked list
