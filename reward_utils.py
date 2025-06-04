@@ -983,6 +983,95 @@ def obtain_labels(dataset, idx_1, idx_2, segment_size=25, threshold=0.5, noise=0
     return labels
 
 
+def get_reward_model_predictions(reward_model, seg1, seg2, return_ensemble_predictions=False, debug=False):
+    """
+    Unified function to get predictions from any type of reward model.
+    
+    Args:
+        reward_model: RewardModel instance
+        seg1: First segment tensor [segment_size, obs+act_dim]
+        seg2: Second segment tensor [segment_size, obs+act_dim]
+        return_ensemble_predictions: If True, return individual ensemble predictions
+        debug: If True, print debug information
+        
+    Returns:
+        If return_ensemble_predictions=False:
+            tuple: (pred_return_1, pred_return_2) - scalar returns
+        If return_ensemble_predictions=True:
+            tuple: (ensemble_returns_1, ensemble_returns_2) - list of ensemble member returns
+    """
+    if debug:
+        print(f"    Model type: {type(reward_model)}")
+        print(f"    Has ensemble_model attr: {hasattr(reward_model, 'ensemble_model')}")
+        if hasattr(reward_model, 'ensemble_model'):
+            print(f"    ensemble_model value: {reward_model.ensemble_model}")
+            print(f"    ensemble_model is None: {reward_model.ensemble_model is None}")
+        print(f"    Has net attr: {hasattr(reward_model, 'net')}")
+        if hasattr(reward_model, 'net'):
+            print(f"    net value: {reward_model.net}")
+        print(f"    Has single_model_forward: {hasattr(reward_model, 'single_model_forward')}")
+        print(f"    Has ensemble_model_forward: {hasattr(reward_model, 'ensemble_model_forward')}")
+    
+    # Set model to eval mode
+    if hasattr(reward_model, 'model') and reward_model.model is not None:
+        reward_model.model.eval()
+    elif hasattr(reward_model, 'ensemble_model') and reward_model.ensemble_model is not None:
+        for member in reward_model.ensemble_model:
+            member.eval()
+    elif hasattr(reward_model, 'net') and reward_model.net is not None:
+        reward_model.net.eval()
+    
+    # Move segments to device
+    seg1 = seg1.to(reward_model.device)
+    seg2 = seg2.to(reward_model.device)
+    
+    # Get predictions based on model type
+    if hasattr(reward_model, 'ensemble_model') and reward_model.ensemble_model is not None and len(reward_model.ensemble_model) > 0:
+        # Ensemble model - get predictions from each member
+        ensemble_returns_1 = []
+        ensemble_returns_2 = []
+        
+        for member_idx in range(len(reward_model.ensemble_model)):
+            member_rewards_1 = reward_model.ensemble_model[member_idx](seg1)
+            member_rewards_2 = reward_model.ensemble_model[member_idx](seg2)
+            ensemble_returns_1.append(member_rewards_1.sum().item())
+            ensemble_returns_2.append(member_rewards_2.sum().item())
+        
+        if return_ensemble_predictions:
+            return ensemble_returns_1, ensemble_returns_2
+        else:
+            # Return averaged predictions
+            pred_ret_1 = np.mean(ensemble_returns_1)
+            pred_ret_2 = np.mean(ensemble_returns_2)
+            return pred_ret_1, pred_ret_2
+            
+    else:
+        # Single model - try different methods
+        if hasattr(reward_model, 'ensemble_model_forward') and hasattr(reward_model, 'ensemble_model') and reward_model.ensemble_model is not None:
+            # Use ensemble_model_forward if available and ensemble_model exists
+            rewards_1 = reward_model.ensemble_model_forward(seg1)
+            rewards_2 = reward_model.ensemble_model_forward(seg2)
+        elif hasattr(reward_model, 'single_model_forward'):
+            # Try single_model_forward method
+            rewards_1 = reward_model.single_model_forward(seg1)
+            rewards_2 = reward_model.single_model_forward(seg2)
+        elif hasattr(reward_model, 'net') and reward_model.net is not None:
+            # Use single net if available
+            rewards_1 = reward_model.net(seg1)
+            rewards_2 = reward_model.net(seg2)
+        else:
+            raise ValueError(f"Could not find a valid model to use for prediction in {reward_model}")
+        
+        pred_ret_1 = rewards_1.sum().item()
+        pred_ret_2 = rewards_2.sum().item()
+        
+        if return_ensemble_predictions:
+            # Return as single-element lists for consistency
+            return [pred_ret_1], [pred_ret_2]
+        else:
+            return pred_ret_1, pred_ret_2
+
+
 def compute_acquisition_scores(reward_model, obs_act_1, obs_act_2, labels, config):
     """
     Compute acquisition scores based on ensemble disagreement/entropy for preference pairs.
@@ -999,18 +1088,11 @@ def compute_acquisition_scores(reward_model, obs_act_1, obs_act_2, labels, confi
     """
     print(f"Computing acquisition scores for {len(obs_act_1)} preference pairs...")
     
-    # Set ensemble models to eval mode
-    for member in range(reward_model.ensemble_num):
-        reward_model.ensemble_model[member].eval()
-    
     # Convert data to tensors if needed
     if not isinstance(obs_act_1, torch.Tensor):
         obs_act_1 = torch.tensor(obs_act_1, dtype=torch.float32)
     if not isinstance(obs_act_2, torch.Tensor):
         obs_act_2 = torch.tensor(obs_act_2, dtype=torch.float32)
-    
-    obs_act_1 = obs_act_1.to(reward_model.device)
-    obs_act_2 = obs_act_2.to(reward_model.device)
     
     acquisition_scores = []
     
@@ -1020,21 +1102,10 @@ def compute_acquisition_scores(reward_model, obs_act_1, obs_act_2, labels, confi
             seg1 = obs_act_1[i]  # [segment_size, obs+act_dim]
             seg2 = obs_act_2[i]  # [segment_size, obs+act_dim]
             
-            # Get predictions from each ensemble member
-            ensemble_returns_1 = []
-            ensemble_returns_2 = []
-            
-            for member_idx in range(reward_model.ensemble_num):
-                # Use individual ensemble member
-                member_rewards_1 = reward_model.ensemble_model[member_idx](seg1)  # [segment_size, 1]
-                member_rewards_2 = reward_model.ensemble_model[member_idx](seg2)  # [segment_size, 1]
-                
-                # Calculate returns (sum over time dimension)
-                member_return_1 = member_rewards_1.sum().item()
-                member_return_2 = member_rewards_2.sum().item()
-                
-                ensemble_returns_1.append(member_return_1)
-                ensemble_returns_2.append(member_return_2)
+            # Get ensemble predictions
+            ensemble_returns_1, ensemble_returns_2 = get_reward_model_predictions(
+                reward_model, seg1, seg2, return_ensemble_predictions=True
+            )
             
             # Convert to numpy arrays
             ensemble_returns_1 = np.array(ensemble_returns_1)
@@ -1366,19 +1437,10 @@ def analyze_dtw_augmentation_quality(
             seg1 = dtw_obs_act_1[i]  # [segment_size, obs+act_dim]
             seg2 = dtw_obs_act_2[i]  # [segment_size, obs+act_dim]
             
-            # Get predictions from each ensemble member
-            ensemble_returns_1 = []
-            ensemble_returns_2 = []
-            
-            for member_idx in range(reward_model.ensemble_num):
-                member_rewards_1 = reward_model.ensemble_model[member_idx](seg1)  # [segment_size, 1]
-                member_rewards_2 = reward_model.ensemble_model[member_idx](seg2)  # [segment_size, 1]
-                
-                member_return_1 = member_rewards_1.sum().item()
-                member_return_2 = member_rewards_2.sum().item()
-                
-                ensemble_returns_1.append(member_return_1)
-                ensemble_returns_2.append(member_return_2)
+            # Get ensemble predictions using unified function
+            ensemble_returns_1, ensemble_returns_2 = get_reward_model_predictions(
+                reward_model, seg1, seg2, return_ensemble_predictions=True
+            )
             
             # Convert to numpy arrays
             ensemble_returns_1 = np.array(ensemble_returns_1)
@@ -1598,23 +1660,21 @@ def compare_baseline_vs_augmented_performance(
         
         with torch.no_grad():
             for i in tqdm(range(len(test_obs_act_1)), desc=f"Evaluating {model_name}"):
-                seg1 = test_obs_act_1[i].to(reward_model.device)
-                seg2 = test_obs_act_2[i].to(reward_model.device)
+                seg1 = test_obs_act_1[i]
+                seg2 = test_obs_act_2[i]
                 true_label = test_labels[i]
                 
-                # Get ensemble predictions if available, otherwise single model
-                if hasattr(reward_model, 'ensemble_model') and reward_model.ensemble_model:
-                    # Ensemble model - average predictions
+                # Check if ensemble model is available
+                if hasattr(reward_model, 'ensemble_model') and reward_model.ensemble_model is not None and len(reward_model.ensemble_model) > 0:
+                    # Ensemble model - get individual member predictions for ensemble averaging
+                    ensemble_returns_1, ensemble_returns_2 = get_reward_model_predictions(
+                        reward_model, seg1, seg2, return_ensemble_predictions=True
+                    )
+                    
+                    # Convert to preference probabilities for each ensemble member
                     ensemble_probs = []
-                    for member_idx in range(reward_model.ensemble_num):
-                        member_rewards_1 = reward_model.ensemble_model[member_idx](seg1)
-                        member_rewards_2 = reward_model.ensemble_model[member_idx](seg2)
-                        
-                        member_return_1 = member_rewards_1.sum().item()
-                        member_return_2 = member_rewards_2.sum().item()
-                        
-                        # Convert to preference probability
-                        delta = member_return_1 - member_return_2
+                    for ret1, ret2 in zip(ensemble_returns_1, ensemble_returns_2):
+                        delta = ret1 - ret2
                         prob_1 = 1.0 / (1.0 + np.exp(-delta))
                         prob_2 = 1.0 - prob_1
                         ensemble_probs.append([prob_1, prob_2])
@@ -1623,15 +1683,13 @@ def compare_baseline_vs_augmented_performance(
                     pred_probs = np.mean(ensemble_probs, axis=0)
                     
                 else:
-                    # Single model
-                    rewards_1 = reward_model.model(seg1) if hasattr(reward_model, 'model') else reward_model(seg1)
-                    rewards_2 = reward_model.model(seg2) if hasattr(reward_model, 'model') else reward_model(seg2)
-                    
-                    return_1 = rewards_1.sum().item()
-                    return_2 = rewards_2.sum().item()
+                    # Single model - get averaged prediction
+                    pred_ret_1, pred_ret_2 = get_reward_model_predictions(
+                        reward_model, seg1, seg2
+                    )
                     
                     # Convert to preference probability
-                    delta = return_1 - return_2
+                    delta = pred_ret_1 - pred_ret_2
                     prob_1 = 1.0 / (1.0 + np.exp(-delta))
                     prob_2 = 1.0 - prob_1
                     pred_probs = [prob_1, prob_2]
@@ -1682,8 +1740,6 @@ def compare_baseline_vs_augmented_performance(
     # Evaluate both models
     baseline_results = evaluate_model(baseline_reward_model, "Baseline")
     augmented_results = evaluate_model(augmented_reward_model, "Augmented")
-
-    import ipdb; ipdb.set_trace()
     
     # Compute improvements
     accuracy_improvement = augmented_results['accuracy'] - baseline_results['accuracy']
@@ -1818,4 +1874,172 @@ def compare_baseline_vs_augmented_performance(
         "binary_accuracy_improvement": binary_accuracy_improvement,
         "loss_improvement": loss_improvement,
         "test_set_size": len(test_obs_act_1)
+    }
+
+
+def plot_baseline_vs_augmented_scatter_analysis(
+    baseline_reward_model,
+    augmented_reward_model,
+    obs_act_segments,
+    gt_returns,
+    segment_size,
+    output_file=None,
+    max_samples=5000,
+    wandb_run=None,
+    random_seed=42
+):
+    """
+    Create side-by-side scatter plots comparing baseline vs augmented model predictions
+    against ground truth returns for individual segments.
+    
+    Args:
+        baseline_reward_model: Baseline reward model
+        augmented_reward_model: Augmented reward model
+        obs_act_segments: Individual segments [N, segment_size, obs+act_dim]
+        gt_returns: Ground truth returns for segments [N]
+        segment_size: Size of segments
+        output_file: Path to save plot
+        max_samples: Maximum number of samples to plot
+        wandb_run: W&B run for logging
+        random_seed: Random seed for sampling
+        
+    Returns:
+        dict: Analysis metrics for both models
+    """
+    print(f"Creating baseline vs augmented scatter analysis for individual segments...")
+    
+    # Set random seed for reproducible sampling
+    np.random.seed(random_seed)
+    
+    # Sample data if too large
+    n_samples = min(max_samples, len(obs_act_segments))
+    if len(obs_act_segments) > max_samples:
+        indices = np.random.choice(len(obs_act_segments), max_samples, replace=False)
+        obs_act_segments_sample = obs_act_segments[indices]
+        gt_returns_sample = gt_returns[indices]
+    else:
+        obs_act_segments_sample = obs_act_segments
+        gt_returns_sample = gt_returns
+    
+    # Convert to tensors if needed
+    if not isinstance(obs_act_segments_sample, torch.Tensor):
+        obs_act_segments_sample = torch.tensor(obs_act_segments_sample, dtype=torch.float32)
+    
+    def get_model_predictions(reward_model, model_name):
+        """Get predictions from a reward model for individual segments."""
+        print(f"  Computing {model_name} predictions...")
+        
+        pred_returns = []
+        
+        with torch.no_grad():
+            for i in tqdm(range(len(obs_act_segments_sample)), desc=f"Predicting {model_name}"):
+                seg = obs_act_segments_sample[i]
+                
+                # Get single segment prediction (no pairs needed)
+                if hasattr(reward_model, 'ensemble_model') and reward_model.ensemble_model is not None and len(reward_model.ensemble_model) > 0:
+                    # Ensemble model - average predictions
+                    ensemble_returns = []
+                    for member_idx in range(len(reward_model.ensemble_model)):
+                        member_rewards = reward_model.ensemble_model[member_idx](seg.to(reward_model.device))
+                        ensemble_returns.append(member_rewards.sum().item())
+                    pred_ret = np.mean(ensemble_returns)
+                else:
+                    # Single model - use unified prediction function approach
+                    seg = seg.to(reward_model.device)
+                    if hasattr(reward_model, 'ensemble_model_forward') and hasattr(reward_model, 'ensemble_model') and reward_model.ensemble_model is not None:
+                        rewards = reward_model.ensemble_model_forward(seg)
+                    elif hasattr(reward_model, 'single_model_forward'):
+                        rewards = reward_model.single_model_forward(seg)
+                    elif hasattr(reward_model, 'net') and reward_model.net is not None:
+                        rewards = reward_model.net(seg)
+                    else:
+                        raise ValueError(f"Could not find a valid model to use for prediction in {reward_model}")
+                    pred_ret = rewards.sum().item()
+                
+                pred_returns.append(pred_ret)
+        
+        return np.array(pred_returns)
+    
+    # Get predictions from both models
+    baseline_pred = get_model_predictions(baseline_reward_model, "baseline")
+    augmented_pred = get_model_predictions(augmented_reward_model, "augmented")
+    
+    # Compute metrics
+    def compute_metrics(pred, gt, model_name):
+        corr = np.corrcoef(pred, gt)[0, 1] if len(set(gt)) > 1 else 0.0
+        mse = np.mean((pred - gt) ** 2)
+        mae = np.mean(np.abs(pred - gt))
+        
+        print(f"  {model_name} metrics:")
+        print(f"    Correlation: {corr:.3f}")
+        print(f"    MSE: {mse:.3f}")
+        print(f"    MAE: {mae:.3f}")
+        
+        return {
+            'correlation': corr,
+            'mse': mse,
+            'mae': mae
+        }
+    
+    baseline_metrics = compute_metrics(baseline_pred, gt_returns_sample, "Baseline")
+    augmented_metrics = compute_metrics(augmented_pred, gt_returns_sample, "Augmented")
+    
+    # Create side-by-side plots
+    if output_file is not None:
+        import matplotlib.pyplot as plt
+        
+        fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+        fig.suptitle('Baseline vs Augmented Model: Segment Return Prediction', fontsize=16)
+        
+        # Common plot settings
+        def setup_scatter_plot(ax, pred, gt, title, metrics):
+            ax.scatter(gt, pred, alpha=0.6, s=20)
+            
+            # Add perfect prediction line
+            min_val = min(gt.min(), pred.min())
+            max_val = max(gt.max(), pred.max())
+            ax.plot([min_val, max_val], [min_val, max_val], 'r--', alpha=0.8, label='Perfect prediction')
+            
+            ax.set_xlabel('Ground Truth Return')
+            ax.set_ylabel('Predicted Return')
+            ax.set_title(title)
+            ax.grid(True, alpha=0.3)
+            ax.legend()
+            
+            # Add metrics text
+            ax.text(0.05, 0.95, f'r = {metrics["correlation"]:.3f}\nMSE = {metrics["mse"]:.3f}\nMAE = {metrics["mae"]:.3f}', 
+                   transform=ax.transAxes, verticalalignment='top',
+                   bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+        
+        # Baseline model
+        setup_scatter_plot(axes[0], baseline_pred, gt_returns_sample, 'Baseline Model', baseline_metrics)
+        
+        # Augmented model
+        setup_scatter_plot(axes[1], augmented_pred, gt_returns_sample, 'Augmented Model', augmented_metrics)
+        
+        plt.tight_layout()
+        plt.savefig(output_file, dpi=150, bbox_inches='tight')
+        plt.close()
+        
+        print(f"Baseline vs augmented scatter analysis saved to: {output_file}")
+    
+    # Log to wandb if available
+    if wandb_run is not None:
+        wandb_run.log({
+            "scatter_comparison/baseline_correlation": baseline_metrics['correlation'],
+            "scatter_comparison/baseline_mse": baseline_metrics['mse'],
+            "scatter_comparison/baseline_mae": baseline_metrics['mae'],
+            "scatter_comparison/augmented_correlation": augmented_metrics['correlation'],
+            "scatter_comparison/augmented_mse": augmented_metrics['mse'],
+            "scatter_comparison/augmented_mae": augmented_metrics['mae'],
+            "scatter_comparison/samples_used": n_samples,
+            "scatter_comparison/correlation_improvement": augmented_metrics['correlation'] - baseline_metrics['correlation'],
+            "scatter_comparison/mse_improvement": baseline_metrics['mse'] - augmented_metrics['mse'],  # Lower MSE is better
+            "scatter_comparison/mae_improvement": baseline_metrics['mae'] - augmented_metrics['mae']   # Lower MAE is better
+        })
+    
+    return {
+        "baseline_metrics": baseline_metrics,
+        "augmented_metrics": augmented_metrics,
+        "n_samples": n_samples
     }

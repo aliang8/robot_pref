@@ -13,7 +13,7 @@ import uuid
 from dataclasses import asdict, dataclass
 
 import reward_utils
-from reward_utils import collect_feedback, collect_human_feedback, consist_test_dataset, collect_dtw_augmentations, compute_acquisition_scores, filter_augmentations_by_acquisition, collect_simple_pairwise_feedback, analyze_dtw_augmentation_quality, compare_baseline_vs_augmented_performance, display_preference_label_stats
+from reward_utils import collect_feedback, collect_human_feedback, consist_test_dataset, collect_dtw_augmentations, compute_acquisition_scores, filter_augmentations_by_acquisition, collect_simple_pairwise_feedback, analyze_dtw_augmentation_quality, compare_baseline_vs_augmented_performance, display_preference_label_stats, plot_baseline_vs_augmented_scatter_analysis
 from models.reward_model import RewardModel
 from utils.analyze_rewards_legacy import analyze_rewards_legacy, create_episodes_from_dataset, plot_preference_return_analysis_legacy, plot_segment_return_scatter_analysis_legacy
 
@@ -349,6 +349,9 @@ def train(config: TrainConfig):
             combined_return_1 = np.concatenate([return_1, dtw_return_1], axis=0)
             combined_return_2 = np.concatenate([return_2, dtw_return_2], axis=0)
             
+            # Display stats about combined dataset
+            display_preference_label_stats(combined_labels, combined_return_1, combined_return_2, config, title="Combined (Original + DTW) Labels")
+            
             print(f"Combined dataset sizes:")
             print(f"  Original: {len(obs_act_1)} pairs")
             print(f"  DTW augmentations: {len(dtw_obs_act_1)} pairs")
@@ -409,6 +412,37 @@ def train(config: TrainConfig):
                 config=config,
                 output_path=dtw_analysis_path,
                 wandb_run=wandb.run if wandb.run else None
+            )
+            
+            # Step 6: Create baseline vs augmented scatter analysis 
+            print("Step 6: Creating baseline vs augmented scatter analysis...")
+            scatter_comparison_path = os.path.join(config.checkpoints_path, f"baseline_vs_augmented_scatter_seed_{config.seed}.png") if config.checkpoints_path else None
+            
+            # Use original data for fair comparison (both models see same data)
+            # Combine both segments from pairs into individual segments
+            original_obs_act_1 = np.concatenate(
+                (dataset["observations"][idx_1], dataset["actions"][idx_1]), axis=-1
+            )
+            original_obs_act_2 = np.concatenate(
+                (dataset["observations"][idx_2], dataset["actions"][idx_2]), axis=-1
+            )
+            original_return_1 = dataset["rewards"][idx_1].sum(axis=1)
+            original_return_2 = dataset["rewards"][idx_2].sum(axis=1)
+            
+            # Combine both segments and returns into single arrays
+            all_segments = np.concatenate([original_obs_act_1, original_obs_act_2], axis=0)
+            all_returns = np.concatenate([original_return_1, original_return_2], axis=0)
+            
+            scatter_results = plot_baseline_vs_augmented_scatter_analysis(
+                baseline_reward_model=baseline_reward_model,
+                augmented_reward_model=reward_model,
+                obs_act_segments=all_segments,
+                gt_returns=all_returns,
+                segment_size=config.segment_size,
+                output_file=scatter_comparison_path,
+                max_samples=5000,
+                wandb_run=wandb.run if wandb.run else None,
+                random_seed=config.seed
             )
 
     else:
@@ -492,12 +526,25 @@ def train(config: TrainConfig):
                     threshold_high=config.acquisition_threshold_high
                 )
                 
+                # Display stats about filtered DTW augmentation labels
+                if len(filtered_dtw_obs_act_1) > 0:
+                    # Compute returns for filtered augmentations
+                    filtered_dtw_return_1 = dtw_return_1[acquisition_scores >= np.percentile(acquisition_scores, config.acquisition_threshold_low * 100)]
+                    filtered_dtw_return_2 = dtw_return_2[acquisition_scores >= np.percentile(acquisition_scores, config.acquisition_threshold_low * 100)]
+                    display_preference_label_stats(filtered_dtw_labels, filtered_dtw_return_1, filtered_dtw_return_2, config, title="Filtered DTW Augmentation Labels")
+                
                 # Combine original data with filtered augmentations
                 print("Combining original data with filtered DTW augmentations...")
                 combined_obs_act_1 = np.concatenate([obs_act_1, filtered_dtw_obs_act_1], axis=0)
                 combined_obs_act_2 = np.concatenate([obs_act_2, filtered_dtw_obs_act_2], axis=0)  
                 combined_labels = np.concatenate([labels, filtered_dtw_labels], axis=0)
                 combined_multiple_ranked_list = multiple_ranked_list + filtered_dtw_ranked_list
+                
+                # Display stats about combined dataset
+                if len(filtered_dtw_obs_act_1) > 0:
+                    combined_return_1 = np.concatenate([return_1, filtered_dtw_return_1], axis=0)
+                    combined_return_2 = np.concatenate([return_2, filtered_dtw_return_2], axis=0)
+                    display_preference_label_stats(combined_labels, combined_return_1, combined_return_2, config, title="Combined (Original + Filtered DTW) Labels")
                 
                 print(f"Combined dataset sizes:")
                 print(f"  Original: {len(obs_act_1)} pairs")
@@ -555,6 +602,37 @@ def train(config: TrainConfig):
                     np.save(os.path.join(config.checkpoints_path, "acquisition_scores.npy"), acquisition_scores)
                     np.save(os.path.join(config.checkpoints_path, "dtw_segment_indices.npy"), candidate_segment_indices)
                     print(f"Saved DTW analysis data to {config.checkpoints_path}")
+                
+                # Create baseline vs augmented scatter analysis
+                print("Creating baseline vs augmented scatter analysis...")
+                scatter_comparison_path = os.path.join(config.checkpoints_path, f"baseline_vs_augmented_scatter_seed_{config.seed}.png") if config.checkpoints_path else None
+                
+                # Use original data for fair comparison (both models see same data)
+                # Combine both segments from pairs into individual segments
+                original_obs_act_1 = np.concatenate(
+                    (dataset["observations"][idx_1], dataset["actions"][idx_1]), axis=-1
+                )
+                original_obs_act_2 = np.concatenate(
+                    (dataset["observations"][idx_2], dataset["actions"][idx_2]), axis=-1
+                )
+                original_return_1 = dataset["rewards"][idx_1].sum(axis=1)
+                original_return_2 = dataset["rewards"][idx_2].sum(axis=1)
+                
+                # Combine both segments and returns into single arrays
+                all_segments = np.concatenate([original_obs_act_1, original_obs_act_2], axis=0)
+                all_returns = np.concatenate([original_return_1, original_return_2], axis=0)
+                
+                scatter_results = plot_baseline_vs_augmented_scatter_analysis(
+                    baseline_reward_model=baseline_reward_model,
+                    augmented_reward_model=combined_reward_model,
+                    obs_act_segments=all_segments,
+                    gt_returns=all_returns,
+                    segment_size=config.segment_size,
+                    output_file=scatter_comparison_path,
+                    max_samples=5000,
+                    wandb_run=wandb.run if wandb.run else None,
+                    random_seed=config.seed
+                )
             else:
                 print("No DTW augmentations generated, using baseline model")
 
@@ -613,22 +691,6 @@ def train(config: TrainConfig):
             wandb_run=wandb.run if wandb.run else None
         )
         print(f"Preference return analysis saved to: {preference_return_path}")
-        
-        # Generate reward scatter analysis plot
-        scatter_analysis_path = os.path.join(config.checkpoints_path, f"segment_return_scatter_analysis_seed_{config.seed}.png")
-        plot_segment_return_scatter_analysis_legacy(
-            reward_model=reward_model,
-            obs_act_1=obs_act_1,
-            obs_act_2=obs_act_2,
-            gt_return_1=return_1,
-            gt_return_2=return_2,
-            segment_size=config.segment_size,
-            output_file=scatter_analysis_path,
-            max_samples=5000,
-            wandb_run=wandb.run if wandb.run else None,
-            random_seed=config.seed
-        )
-        print(f"Segment return scatter analysis saved to: {scatter_analysis_path}")
 
 
 if __name__ == "__main__":

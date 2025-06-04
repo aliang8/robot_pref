@@ -9,7 +9,7 @@ model_type=linear_BT       # ["BT", "linear_BT"]: BT means exponential bradley-t
 epochs=1000          # we use 300 epochs in the paper, but more epochs (e.g., 5000) can be used for better performance
 activation=tanh     # final activation function of the reward model (use tanh for bounded reward)
 seed=10             # random seed
-threshold=0.5       # Thresholds for determining tie labels (eqaully preferred pairs)
+threshold=0.1       # Thresholds for determining tie labels (eqaully preferred pairs)
                     # Larger thresholds result in more tie labels
 segment_size=25     # segment size
 data_aug=none       # ["none", "temporal"]: if you want to use data augmentation (TDA), set data_aug=temporal
