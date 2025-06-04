@@ -59,12 +59,14 @@ def MetaWorld_dataset(config):
         env_name = config.env
         base_path += str(env_name.replace("metaworld_", ""))
         dataset = dict()
-        for seed in range(3):
-            path = base_path + f"/saved_replay_buffer_1000000_seed{seed}.pkl"
 
-            # TODO: hardcode for now
-            path = "/data/matthewh6/robot_pref/dataset/MetaWorld/button-press-topdown-v2/replay_buffer_step_150000_seed34512.pkl"
-            # path = "/home/matthewh6/robot_pref/dataset/MetaWorld/button-press-topdown-wall-v2/saved_replay_buffer_1000000_seed0.pkl"
+        # TODO: hardcode this for now
+        paths = ["/data/matthewh6/robot_pref/dataset/MetaWorld/button-press-topdown-v2/replay_buffer_step_150000_seed12345.pkl", "/data/matthewh6/robot_pref/dataset/MetaWorld/button-press-topdown-v2/replay_buffer_step_150000_seed23451.pkl", "/data/matthewh6/robot_pref/dataset/MetaWorld/button-press-topdown-v2/replay_buffer_step_150000_seed34512.pkl"]
+        # for seed in range(3):
+        for path in paths:
+            # path = base_path + f"/saved_replay_buffer_1000000_seed{seed}.pkl"
+            print(f"loading data from: {path}")
+            
             with open(path, "rb") as f:
                 load_dataset = pkl.load(f)
 

@@ -1,15 +1,15 @@
 env=metaworld_button-press-topdown-v2   # ["metaworld_button-press-topdown-v2", "dmc_cheetah-run"]: env name
 data_quality=1.0    # data quality. 
                     # The lower the quality, the more random policy data, and the higher the quality, the more expert policy data. (maximum is 10.0)
-feedback_num=500    # total feedback number (we use 500, 1000 feedback in the paper)
+feedback_num=100    # total feedback number (we use 500, 1000 feedback in the paper)
 q_budget=1        # query budget (we use 100 in the paper)
                     # Setting q_budget=1 is equivalent to independent pairwise sampling.
 feedback_type=RLT   # ["RLT", "SeqRank"]: RLT means ranked list
 model_type=linear_BT       # ["BT", "linear_BT"]: BT means exponential bradley-terry model, and linear_BT use linear score function
-epochs=1000          # we use 300 epochs in the paper, but more epochs (e.g., 5000) can be used for better performance
+epochs=3000          # we use 300 epochs in the paper, but more epochs (e.g., 5000) can be used for better performance
 activation=tanh     # final activation function of the reward model (use tanh for bounded reward)
 seed=10             # random seed
-threshold=0.5       # Thresholds for determining tie labels (eqaully preferred pairs)
+threshold=0.1       # Thresholds for determining tie labels (eqaully preferred pairs)
                     # Larger thresholds result in more tie labels
 segment_size=25     # segment size
 data_aug=none       # ["none", "temporal"]: if you want to use data augmentation (TDA), set data_aug=temporal
@@ -20,10 +20,10 @@ noise=0.0           # probability of preference labels (0.0 is noiseless label a
 human=False         # [True, False]: use human feedback or not
 
 # augmentation settings
-use_dtw_augmentations=True
-dtw_subsample_size=10000
+use_dtw_augmentations=False
+dtw_subsample_size=20000
 dtw_augmentation_size=2000
-dtw_k_augment=5
+dtw_k_augment=10
 acquisition_threshold_low=0.25
 acquisition_threshold_high=0.75
 dtw_augment_before_training=True

@@ -122,44 +122,57 @@ def log_queries_to_wandb(
     # --- Log DTW augmented pairs as videos ---
     # Only if data and segment_start_end are provided
     if data is not None and segment_start_end is not None and len(dtw_augmented_pairs) > 0 and "image" in data:
-        dtw_video_logs = []
+        # Group augmented pairs by their original query segment
+        augmented_by_seg1 = []  # Pairs where seg1 is from original query
+        augmented_by_seg2 = []  # Pairs where seg2 is from original query
+        
         for idx, ((seg1_aug, seg2_aug), pref, dist) in enumerate(zip(dtw_augmented_pairs, dtw_augmented_prefs, dtw_augmented_pair_distances)):
-            seg1_video = get_segment_video(data, segment_start_end, seg1_aug, video_key="image")
-            seg2_video = get_segment_video(data, segment_start_end, seg2_aug, video_key="image")
-            
-            # Ensure videos are numpy arrays with shape (T, C, H, W)
-            if seg1_video is not None and seg1_video.shape[-1] == 3:
-                seg1_video = seg1_video.transpose(0, 3, 1, 2)
-            if seg2_video is not None and seg2_video.shape[-1] == 3:
-                seg2_video = seg2_video.transpose(0, 3, 1, 2)
+            # Check which segment is from the original query
+            if seg1_aug == seg1 or seg1_aug == seg2:
+                augmented_by_seg1.append((seg1_aug, seg2_aug, pref, dist))
+            elif seg2_aug == seg1 or seg2_aug == seg2:
+                augmented_by_seg2.append((seg1_aug, seg2_aug, pref, dist))
+        
+        # Log augmentations for each group
+        for group_name, group_pairs in [("augmented_by_seg1", augmented_by_seg1), ("augmented_by_seg2", augmented_by_seg2)]:
+            dtw_video_logs = []
+            for seg1_aug, seg2_aug, pref, dist in group_pairs:
+                seg1_video = get_segment_video(data, segment_start_end, seg1_aug, video_key="image")
+                seg2_video = get_segment_video(data, segment_start_end, seg2_aug, video_key="image")
+                
+                # Ensure videos are numpy arrays with shape (T, C, H, W)
+                if seg1_video is not None and seg1_video.shape[-1] == 3:
+                    seg1_video = seg1_video.transpose(0, 3, 1, 2)
+                if seg2_video is not None and seg2_video.shape[-1] == 3:
+                    seg2_video = seg2_video.transpose(0, 3, 1, 2)
 
-            # Format preference information with consistent format
-            ret1_aug = segment_returns[seg1_aug]
-            ret2_aug = segment_returns[seg2_aug]
-            if pref == 1:
-                pref1_disp = f"Seg {seg1_aug}, Return: {ret1_aug}, DTW Dist: {dist:.4f} ⭐ PREFERRED ⭐"
-                pref2_disp = f"Seg {seg2_aug}, Return: {ret2_aug}, DTW Dist: {dist:.4f}"
-            elif pref == 0:
-                pref1_disp = f"Seg {seg1_aug}, Return: {ret1_aug}, DTW Dist: {dist:.4f}"
-                pref2_disp = f"Seg {seg2_aug}, Return: {ret2_aug}, DTW Dist: {dist:.4f} ⭐ PREFERRED ⭐"
-            else:
-                pref1_disp = f"Seg {seg1_aug}, Return: {ret1_aug}, DTW Dist: {dist:.4f} (EQUAL)"
-                pref2_disp = f"Seg {seg2_aug}, Return: {ret2_aug}, DTW Dist: {dist:.4f} (EQUAL)"
+                # Format preference information with consistent format
+                ret1_aug = segment_returns[seg1_aug]
+                ret2_aug = segment_returns[seg2_aug]
+                if pref == 1:
+                    pref1_disp = f"Seg {seg1_aug}, Return: {ret1_aug}, DTW Dist: {dist:.4f} ⭐ PREFERRED ⭐"
+                    pref2_disp = f"Seg {seg2_aug}, Return: {ret2_aug}, DTW Dist: {dist:.4f}"
+                elif pref == 0:
+                    pref1_disp = f"Seg {seg1_aug}, Return: {ret1_aug}, DTW Dist: {dist:.4f}"
+                    pref2_disp = f"Seg {seg2_aug}, Return: {ret2_aug}, DTW Dist: {dist:.4f} ⭐ PREFERRED ⭐"
+                else:
+                    pref1_disp = f"Seg {seg1_aug}, Return: {ret1_aug}, DTW Dist: {dist:.4f} (EQUAL)"
+                    pref2_disp = f"Seg {seg2_aug}, Return: {ret2_aug}, DTW Dist: {dist:.4f} (EQUAL)"
 
-            # Append both videos with clear captions
-            if seg1_video is not None and seg2_video is not None:
-                dtw_video_logs.append(
-                    wandb.Video(seg1_video, caption=pref1_disp, fps=8, format="mp4")
-                )
-                dtw_video_logs.append(
-                    wandb.Video(seg2_video, caption=pref2_disp, fps=8, format="mp4")
-                )
+                # Append both videos with clear captions
+                if seg1_video is not None and seg2_video is not None:
+                    dtw_video_logs.append(
+                        wandb.Video(seg1_video, caption=pref1_disp, fps=8, format="mp4")
+                    )
+                    dtw_video_logs.append(
+                        wandb.Video(seg2_video, caption=pref2_disp, fps=8, format="mp4")
+                    )
 
-        if dtw_video_logs:
-            # Use a constant key for all iterations to enable slider view
-            wandb.log({
-                "DTW_Augmented_Pairs": dtw_video_logs
-            }, step=iteration)
+            if dtw_video_logs:
+                # Log each group separately with iteration for slider view
+                wandb.log({
+                    f"DTW_Augmented_Pairs/{group_name}/iteration_{iteration}": dtw_video_logs
+                }, step=iteration)
 
 def get_segment_video(data, segment_start_end, seg_idx, video_key="image"):
     """

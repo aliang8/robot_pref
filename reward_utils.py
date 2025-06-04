@@ -337,7 +337,7 @@ def generate_feedback_from_indices(dataset, segment_indices: List[int], config):
     return multiple_ranked_list
 
 
-def collect_dtw_augmentations(dataset, traj_total, config, original_pairs, original_preferences, use_relative_eef=True):
+def collect_dtw_augmentations(dataset, traj_total, config, original_pairs, original_preferences, use_relative_eef=True, use_goal_pos=True):
     """
     Collect DTW-guided augmentations using ground truth preference propagation.
     Takes original preference pairs and creates augmentations by finding DTW-similar segments.
@@ -430,21 +430,29 @@ def collect_dtw_augmentations(dataset, traj_total, config, original_pairs, origi
     for orig_seg_idx in tqdm(original_segments, desc="Computing DTW distances"):
         # Extract observations for original segment
         orig_segment_idx = [j for j in range(orig_seg_idx, orig_seg_idx + config.segment_size)]
-        orig_obs = dataset["observations"][orig_segment_idx][:, :3]  # EE positions (first 3 dims)
+        orig_obs = dataset["observations"][orig_segment_idx]
+        orig_pos = orig_obs[:, :3]  # EE positions
+
+        if use_goal_pos:
+            orig_pos = np.concatenate((orig_pos, orig_obs[:, 36:]))
         
-        # Use relative positions if requested
+        # Use relative positions (of eef/goal) if requested
         if use_relative_eef:
-            orig_obs = orig_obs[1:] - orig_obs[:-1]
-        
+            orig_pos = orig_pos[1:] - orig_pos[:-1]
+
         distances = []
         for cand_idx, candidate in enumerate(candidate_segments):
-            cand_obs = candidate["obs"].numpy()[:, :3]  # EE positions
+            cand_obs = dataset["observations"][orig_segment_idx]
+            cand_pos = cand_obs[:, :3]  # EE positions
+
+            if use_goal_pos:
+                cand_pos = np.concatenate((cand_pos, cand_obs[:, 36:]))
             
-            # Use relative positions if requested
+            # Use relative positions (of eef/goal) if requested
             if use_relative_eef:
-                cand_obs = cand_obs[1:] - cand_obs[:-1]
+                cand_pos = cand_pos[1:] - cand_pos[:-1]
             
-            cost, _ = dtw.get_single_match(orig_obs, cand_obs)            
+            cost, _ = dtw.get_single_match(orig_pos, cand_pos)            
             distances.append((candidate_segment_indices[cand_idx], cost))
         
         # Sort by distance and store

@@ -212,7 +212,7 @@ def combine_segments_side_by_side(images1, images2, preference=None):
         
         # Add border around preferred trajectory if preference is provided
         if preference is not None:
-            border_width = 3  # Reduced from 5 to 3
+            border_width = h1 // 10
             border_color = np.array([0, 255, 0], dtype=np.uint8)  # Green border
             
             if preference == 0:  # First segment is preferred
@@ -337,7 +337,8 @@ def train(config: TrainConfig):
             config,
             original_pairs,
             original_preferences,
-            use_relative_eef=True
+            use_relative_eef=True,
+            use_goal_pos=True,
         )
         
         # Extract augmentation data in the same format as original training data
@@ -654,30 +655,63 @@ def train(config: TrainConfig):
             if i >= 9:
                 break
         
-        # If using DTW augmentations, log some augmented videos
+        # If using DTW augmentations, log videos for each query's top K augmentations
         if config.use_dtw_augmentations and len(dtw_idx_st_1) > 0:
             print("Logging DTW augmented video sequences...")
+            
+            # Group augmented pairs by their original query segment
+            augmented_by_query = {}  # query_idx -> list of (aug_idx1, aug_idx2, pref, dist)
+            
             for i, (idx1, idx2) in enumerate(zip(dtw_idx_st_1, dtw_idx_st_2)):
-                # Get image sequences for both segments
-                images1 = dataset["images"][idx1:idx1 + config.segment_size]
-                images2 = dataset["images"][idx2:idx2 + config.segment_size]
+                # Find which original query this augmentation came from
+                for query_idx, (query_idx1, query_idx2) in enumerate(zip(idx_st_1, idx_st_2)):
+                    if idx1 == query_idx1 or idx1 == query_idx2 or idx2 == query_idx1 or idx2 == query_idx2:
+                        if query_idx not in augmented_by_query:
+                            augmented_by_query[query_idx] = []
+                        
+                        # Get preference and distance for this pair
+                        pref = None
+                        if i < len(dtw_labels):
+                            if dtw_labels[i][0] == 0 and dtw_labels[i][1] == 1:
+                                pref = 1
+                            elif dtw_labels[i][0] == 1 and dtw_labels[i][1] == 0:
+                                pref = 0
+                        
+                        # Get DTW distance if available
+                        dist = None
+                        if hasattr(config, 'dtw_distances_dict'):
+                            # Find the distance in the DTW matrix
+                            for orig_idx, distances in config.dtw_distances_dict.items():
+                                for cand_idx, d in distances:
+                                    if (cand_idx == idx1 or cand_idx == idx2) and (orig_idx == query_idx1 or orig_idx == query_idx2):
+                                        dist = d
+                                        break
+                        
+                        augmented_by_query[query_idx].append((idx1, idx2, pref, dist))
+                        break
+            
+            # Log top K augmentations for each query
+            for query_idx, augmentations in augmented_by_query.items():
+                # Sort augmentations by DTW distance if available
+                if augmentations[0][3] is not None:  # Check if distance is available
+                    augmentations.sort(key=lambda x: x[3])  # Sort by distance
                 
-                # Get preference for this pair
-                preference = None
-                if i < len(dtw_labels):
-                    if dtw_labels[i][0] == 0 and dtw_labels[i][1] == 1:  # Second segment preferred
-                        preference = 1
-                    elif dtw_labels[i][0] == 1 and dtw_labels[i][1] == 0:  # First segment preferred
-                        preference = 0
+                # Take top K augmentations
+                top_k = min(config.dtw_k_augment, len(augmentations))
+                top_augmentations = augmentations[:top_k]
                 
-                # Combine segments side by side with preference border
-                combined_images = combine_segments_side_by_side(images1, images2, preference)
-                if combined_images is not None:
-                    log_video_to_wandb(combined_images, f"dtw_aug_{i}")
-                
-                # Only log first 5 augmented pairs to avoid overwhelming wandb
-                if i >= 4:
-                    break
+                # Log videos for top K augmentations
+                for aug_idx, (idx1, idx2, pref, dist) in enumerate(top_augmentations):
+                    # Get image sequences for both segments
+                    images1 = dataset["images"][idx1:idx1 + config.segment_size]
+                    images2 = dataset["images"][idx2:idx2 + config.segment_size]
+                    
+                    # Combine segments side by side with preference border
+                    combined_images = combine_segments_side_by_side(images1, images2, pref)
+                    if combined_images is not None:
+                        # Include DTW distance in the name if available
+                        dist_str = f"_dist_{dist:.4f}" if dist is not None else ""
+                        log_video_to_wandb(combined_images, f"query_{query_idx}_dtw_aug_{aug_idx}{dist_str}")
 
 
 if __name__ == "__main__":
