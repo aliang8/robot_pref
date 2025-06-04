@@ -172,7 +172,7 @@ class TrainConfig:
 
 def wandb_init(config: dict) -> None:
     wandb.init(
-        mode="offline",
+        # mode="offline",
         config=config,
         project=config["project"],
         group=config["group"],
@@ -180,6 +180,55 @@ def wandb_init(config: dict) -> None:
         id=str(uuid.uuid4()),
     )
     wandb.run.save()
+
+
+def log_video_to_wandb(images, name, fps=8):
+    """Log a sequence of images as a video to wandb."""
+    if images is None or len(images) == 0:
+        return
+    
+    # Convert to (N, C, H, W) format if needed
+    if len(images.shape) == 4:
+        if images.shape[-1] == 3:
+            images = images.transpose(0, 3, 1, 2)
+        
+        # Log the video
+        wandb.log({
+            name: wandb.Video(images, fps=fps, format="mp4")
+        })
+
+
+def combine_segments_side_by_side(images1, images2, preference=None):
+    """Combine two image sequences side by side with a border around the preferred trajectory."""
+    if len(images1.shape) == 4:  # (N, H, W, C)
+        h1, w1 = images1.shape[1:3]
+        h2, w2 = images2.shape[1:3]
+        combined = np.zeros((len(images1), max(h1, h2), w1 + w2, 3), dtype=np.uint8)
+        
+        # Copy the images
+        combined[:, :h1, :w1] = images1
+        combined[:, :h2, w1:w1+w2] = images2
+        
+        # Add border around preferred trajectory if preference is provided
+        if preference is not None:
+            border_width = 3  # Reduced from 5 to 3
+            border_color = np.array([0, 255, 0], dtype=np.uint8)  # Green border
+            
+            if preference == 0:  # First segment is preferred
+                # Add border to first segment
+                combined[:, :border_width, :w1] = border_color  # Top border
+                combined[:, -border_width:, :w1] = border_color  # Bottom border
+                combined[:, :, :border_width] = border_color  # Left border
+                combined[:, :, w1-border_width:w1] = border_color  # Right border
+            elif preference == 1:  # Second segment is preferred
+                # Add border to second segment
+                combined[:, :border_width, w1:] = border_color  # Top border
+                combined[:, -border_width:, w1:] = border_color  # Bottom border
+                combined[:, :, w1:w1+border_width] = border_color  # Left border
+                combined[:, :, -border_width:] = border_color  # Right border
+        
+        return combined
+    return None
 
 
 @pyrallis.wrap()
@@ -531,6 +580,58 @@ def train(config: TrainConfig):
             random_seed=config.seed
         )
         print(f"Segment return scatter analysis saved to: {scatter_analysis_path}")
+
+    # After collecting feedback and before training
+    if "images" in dataset:
+        print("Logging video sequences to wandb...")
+        
+        # Log original query videos
+        for i, (idx1, idx2) in enumerate(zip(idx_st_1, idx_st_2)):
+            # Get image sequences for both segments
+            images1 = dataset["images"][idx1:idx1 + config.segment_size]
+            images2 = dataset["images"][idx2:idx2 + config.segment_size]
+            
+            # Get preference for this pair
+            preference = None
+            if i < len(labels):
+                if labels[i][0] == 0 and labels[i][1] == 1:  # Second segment preferred
+                    preference = 1
+                elif labels[i][0] == 1 and labels[i][1] == 0:  # First segment preferred
+                    preference = 0
+
+            # Combine segments side by side with preference border
+            combined_images = combine_segments_side_by_side(images1, images2, preference)
+            if combined_images is not None:
+                log_video_to_wandb(combined_images, f"query_{i}")
+            
+            # Only log first 10 queries to avoid overwhelming wandb
+            if i >= 9:
+                break
+        
+        # If using DTW augmentations, log some augmented videos
+        if config.use_dtw_augmentations and len(dtw_idx_st_1) > 0:
+            print("Logging DTW augmented video sequences...")
+            for i, (idx1, idx2) in enumerate(zip(dtw_idx_st_1, dtw_idx_st_2)):
+                # Get image sequences for both segments
+                images1 = dataset["images"][idx1:idx1 + config.segment_size]
+                images2 = dataset["images"][idx2:idx2 + config.segment_size]
+                
+                # Get preference for this pair
+                preference = None
+                if i < len(dtw_labels):
+                    if dtw_labels[i][0] == 0 and dtw_labels[i][1] == 1:  # Second segment preferred
+                        preference = 1
+                    elif dtw_labels[i][0] == 1 and dtw_labels[i][1] == 0:  # First segment preferred
+                        preference = 0
+                
+                # Combine segments side by side with preference border
+                combined_images = combine_segments_side_by_side(images1, images2, preference)
+                if combined_images is not None:
+                    log_video_to_wandb(combined_images, f"dtw_aug_{i}")
+                
+                # Only log first 5 augmented pairs to avoid overwhelming wandb
+                if i >= 4:
+                    break
 
 
 if __name__ == "__main__":

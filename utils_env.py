@@ -61,6 +61,10 @@ def MetaWorld_dataset(config):
         dataset = dict()
         for seed in range(3):
             path = base_path + f"/saved_replay_buffer_1000000_seed{seed}.pkl"
+
+            # TODO: hardcode for now
+            path = "/data/matthewh6/robot_pref/dataset/MetaWorld/button-press-topdown-v2/replay_buffer_step_150000_seed34512.pkl"
+            # path = "/home/matthewh6/robot_pref/dataset/MetaWorld/button-press-topdown-wall-v2/saved_replay_buffer_1000000_seed0.pkl"
             with open(path, "rb") as f:
                 load_dataset = pkl.load(f)
 
@@ -90,6 +94,7 @@ def MetaWorld_dataset(config):
             dataset["next_observations"] = np.array(dataset["next_observations"])
             dataset["rewards"] = np.array(dataset["rewards"])
             dataset["terminals"] = np.array(dataset["dones"])
+            dataset["images"] = np.array(dataset["images"])
 
     N = dataset["rewards"].shape[0]
     obs_ = []
@@ -97,6 +102,7 @@ def MetaWorld_dataset(config):
     action_ = []
     reward_ = []
     done_ = []
+    images_ = []
 
     dataset["rewards"] = dataset["rewards"].reshape(-1)
     dataset["terminals"] = dataset["terminals"].reshape(-1)
@@ -106,12 +112,14 @@ def MetaWorld_dataset(config):
         new_obs = dataset["next_observations"][i].astype(np.float32)
         action = dataset["actions"][i].astype(np.float32)
         reward = dataset["rewards"][i].astype(np.float32)
+        images = dataset["images"][i].astype(np.uint8)
         done_bool = bool(dataset["terminals"][i])
         obs_.append(obs)
         next_obs_.append(new_obs)
         action_.append(action)
         reward_.append(reward)
         done_.append(done_bool)
+        images_.append(images)
 
     return {
         "observations": np.array(obs_),
@@ -119,6 +127,7 @@ def MetaWorld_dataset(config):
         "next_observations": np.array(next_obs_),
         "rewards": np.array(reward_),
         "terminals": np.array(done_),
+        "images": np.array(images_),
     }
 
 
