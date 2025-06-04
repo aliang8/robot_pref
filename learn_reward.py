@@ -13,7 +13,7 @@ import uuid
 from dataclasses import asdict, dataclass
 
 import reward_utils
-from reward_utils import collect_feedback, collect_human_feedback, consist_test_dataset, collect_dtw_augmentations, compute_acquisition_scores, filter_augmentations_by_acquisition, collect_simple_pairwise_feedback
+from reward_utils import collect_feedback, collect_human_feedback, consist_test_dataset, collect_dtw_augmentations, compute_acquisition_scores, filter_augmentations_by_acquisition, collect_simple_pairwise_feedback, analyze_dtw_augmentation_quality
 from models.reward_model import RewardModel
 from utils.analyze_rewards_legacy import analyze_rewards_legacy, create_episodes_from_dataset, plot_preference_return_analysis_legacy, plot_segment_return_scatter_analysis_legacy
 
@@ -48,6 +48,7 @@ class TrainConfig:
     dtw_augment_before_training: bool = False  # If True: augment first then train, If False: train then augment
     dtw_subsample_size: int = 10000  # Number of segments to sample for DTW matrix
     dtw_augmentation_size: int = 2000  # Number of augmentation pairs to create from DTW matrix
+    dtw_k_augment: int = 5  # Number of similar segments to find for each original preference pair
     acquisition_threshold_low: float = 0.25  # 25th percentile for acquisition filtering
     acquisition_threshold_high: float = 0.75  # 75th percentile for acquisition filtering
     # Cache paths for reproducibility
@@ -276,11 +277,17 @@ def train(config: TrainConfig):
     if config.use_dtw_augmentations and config.dtw_augment_before_training:
         print("\nStrategy: DTW augmentations BEFORE training...")
         
+        # Prepare original preference pairs for DTW augmentation
+        original_pairs = list(zip(idx_st_1, idx_st_2))
+        original_preferences = labels.tolist()
+        
         # Collect DTW augmentations
-        dtw_multiple_ranked_list, dtw_matrix, dtw_segment_indices = collect_dtw_augmentations(
+        dtw_multiple_ranked_list, dtw_distances_dict, candidate_segment_indices = collect_dtw_augmentations(
             dataset, 
             traj_total, 
             config,
+            original_pairs,
+            original_preferences,
             use_relative_eef=True
         )
         
@@ -344,8 +351,8 @@ def train(config: TrainConfig):
             
             # Save DTW matrix for analysis
             if config.checkpoints_path:
-                np.save(os.path.join(config.checkpoints_path, "dtw_matrix.npy"), dtw_matrix)
-                np.save(os.path.join(config.checkpoints_path, "dtw_segment_indices.npy"), dtw_segment_indices)
+                np.save(os.path.join(config.checkpoints_path, "dtw_matrix.npy"), dtw_distances_dict)
+                np.save(os.path.join(config.checkpoints_path, "dtw_segment_indices.npy"), candidate_segment_indices)
                 print(f"Saved DTW analysis data to {config.checkpoints_path}")
         else:
             print("No DTW augmentations generated, using original data")
@@ -353,6 +360,23 @@ def train(config: TrainConfig):
         # Train the model (either original or augmented)
         print("Training reward model...")
         reward_model.train_model()
+        
+        # Analyze DTW augmentation quality if DTW was used
+        if config.use_dtw_augmentations and len(dtw_multiple_ranked_list) > 0:
+            print("Analyzing DTW augmentation quality...")
+            dtw_analysis_path = os.path.join(config.checkpoints_path, f"dtw_augmentation_analysis_seed_{config.seed}.png") if config.checkpoints_path else None
+            analyze_dtw_augmentation_quality(
+                reward_model=reward_model,
+                dtw_obs_act_1=dtw_obs_act_1,
+                dtw_obs_act_2=dtw_obs_act_2,
+                dtw_labels=dtw_labels,
+                dataset=dataset,
+                segment_start_indices_1=dtw_idx_st_1,
+                segment_start_indices_2=dtw_idx_st_2,
+                config=config,
+                output_path=dtw_analysis_path,
+                wandb_run=wandb.run if wandb.run else None
+            )
         
     else:
         # Original approach: Train first, then optionally augment
@@ -366,11 +390,17 @@ def train(config: TrainConfig):
         if config.use_dtw_augmentations:
             print("\nStage 2: DTW augmentations with acquisition filtering...")
             
+            # Prepare original preference pairs for DTW augmentation
+            original_pairs = list(zip(idx_st_1, idx_st_2))
+            original_preferences = labels.tolist()
+            
             # Collect DTW augmentations
-            dtw_multiple_ranked_list, dtw_matrix, dtw_segment_indices = collect_dtw_augmentations(
+            dtw_multiple_ranked_list, dtw_distances_dict, candidate_segment_indices = collect_dtw_augmentations(
                 dataset, 
                 traj_total, 
                 config,
+                original_pairs,
+                original_preferences,
                 use_relative_eef=True
             )
             
@@ -451,11 +481,27 @@ def train(config: TrainConfig):
                 return_1 = np.concatenate([return_1, dtw_return_1[acquisition_scores >= np.percentile(acquisition_scores, config.acquisition_threshold_low * 100)]], axis=0)
                 return_2 = np.concatenate([return_2, dtw_return_2[acquisition_scores >= np.percentile(acquisition_scores, config.acquisition_threshold_low * 100)]], axis=0)
                 
+                # Analyze DTW augmentation quality after retraining
+                print("Analyzing DTW augmentation quality after retraining...")
+                dtw_analysis_path = os.path.join(config.checkpoints_path, f"dtw_augmentation_analysis_seed_{config.seed}.png") if config.checkpoints_path else None
+                analyze_dtw_augmentation_quality(
+                    reward_model=combined_reward_model,
+                    dtw_obs_act_1=dtw_obs_act_1,
+                    dtw_obs_act_2=dtw_obs_act_2,
+                    dtw_labels=dtw_labels,
+                    dataset=dataset,
+                    segment_start_indices_1=dtw_idx_st_1,
+                    segment_start_indices_2=dtw_idx_st_2,
+                    config=config,
+                    output_path=dtw_analysis_path,
+                    wandb_run=wandb.run if wandb.run else None
+                )
+                
                 # Save DTW matrix and acquisition scores for analysis
                 if config.checkpoints_path:
-                    np.save(os.path.join(config.checkpoints_path, "dtw_matrix.npy"), dtw_matrix)
+                    np.save(os.path.join(config.checkpoints_path, "dtw_matrix.npy"), dtw_distances_dict)
                     np.save(os.path.join(config.checkpoints_path, "acquisition_scores.npy"), acquisition_scores)
-                    np.save(os.path.join(config.checkpoints_path, "dtw_segment_indices.npy"), dtw_segment_indices)
+                    np.save(os.path.join(config.checkpoints_path, "dtw_segment_indices.npy"), candidate_segment_indices)
                     print(f"Saved DTW analysis data to {config.checkpoints_path}")
             else:
                 print("No DTW augmentations generated, using original model")

@@ -21,8 +21,9 @@ human=False         # [True, False]: use human feedback or not
 
 # augmentation settings
 use_dtw_augmentations=True
-dtw_subsample_size=5000
+dtw_subsample_size=10000
 dtw_augmentation_size=2000
+dtw_k_augment=5
 acquisition_threshold_low=0.25
 acquisition_threshold_high=0.75
 dtw_augment_before_training=True
@@ -33,7 +34,7 @@ CUDA_VISIBLE_DEVICES=0 python3 learn_reward.py --config=configs/reward.yaml --en
 --threshold=$threshold --activation=$activation --epochs=$epochs --noise=$noise --seed=$seed \
 --segment_size=$segment_size --data_aug=$data_aug  --ensemble_num=$ensemble_num --ensemble_method=$ensemble_method --batch_size=$batch_size \
 --use_dtw_augmentations=$use_dtw_augmentations --dtw_subsample_size=$dtw_subsample_size --dtw_augmentation_size=$dtw_augmentation_size \
---acquisition_threshold_low=$acquisition_threshold_high --acquisition_threshold_high=$acquisition_threshold_high \
+--dtw_k_augment=$dtw_k_augment --acquisition_threshold_low=$acquisition_threshold_low --acquisition_threshold_high=$acquisition_threshold_high \
 --dtw_augment_before_training=$dtw_augment_before_training
 
 # Offline IQL with reward model

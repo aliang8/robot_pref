@@ -337,25 +337,36 @@ def generate_feedback_from_indices(dataset, segment_indices: List[int], config):
     return multiple_ranked_list
 
 
-def collect_dtw_augmentations(dataset, traj_total, config, use_relative_eef=True):
+def collect_dtw_augmentations(dataset, traj_total, config, original_pairs, original_preferences, use_relative_eef=True):
     """
-    Collect DTW-guided augmentations using a large independent sample of segments.
-    Samples 10k segments independently, computes DTW matrix, then selects diverse pairs for augmentation.
+    Collect DTW-guided augmentations using ground truth preference propagation.
+    Takes original preference pairs and creates augmentations by finding DTW-similar segments.
     
     Args:
         dataset: The dataset containing observations, actions, rewards
         traj_total: Total number of trajectories 
         config: Configuration object
+        original_pairs: List of tuples (idx_st_1, idx_st_2) representing original segment pairs
+        original_preferences: List of preference labels [0, 1], [1, 0], or [0.5, 0.5] for each pair
         use_relative_eef: Whether to use relative EEF positions for DTW
         
     Returns:
-        tuple: (multiple_ranked_list, dtw_matrix, dtw_segment_indices)
+        tuple: (multiple_ranked_list, dtw_distances_dict, candidate_segment_indices)
     """
-    print(f"Collecting DTW augmentations using independent segment sampling")
+    print(f"Collecting DTW augmentations using ground truth preference propagation")
+    print(f"Input: {len(original_pairs)} original preference pairs")
     
-    # Step 1: Sample segments independently for DTW matrix (much larger pool)
+    # Step 1: Get unique segments from original preference pairs
+    original_segments_set = set()
+    for i, j in original_pairs:
+        original_segments_set.add(i)
+        original_segments_set.add(j)
+    original_segments = list(original_segments_set)
+    print(f"Found {len(original_segments)} unique segments in original preference pairs")
+    
+    # Step 2: Sample candidate segments for DTW comparison
     dtw_sample_size = getattr(config, 'dtw_subsample_size', 10000)
-    print(f"Sampling {dtw_sample_size} segments independently for DTW matrix...")
+    print(f"Sampling {dtw_sample_size} candidate segments for DTW comparison...")
     
     # Set random seed for reproducible DTW segment selection
     if hasattr(config, 'seed'):
@@ -363,11 +374,11 @@ def collect_dtw_augmentations(dataset, traj_total, config, use_relative_eef=True
         random.seed(config.seed + 1000)
         print(f"Set DTW random seed to {config.seed + 1000} for reproducible DTW segment selection")
     
-    dtw_segments = []
-    dtw_segment_indices = []
-    used_indices = set()  # Track used segment indices to avoid duplicates
+    candidate_segments = []
+    candidate_segment_indices = []
+    used_indices = set(original_segments)  # Include original segments to avoid duplicates
     
-    for i in tqdm(range(dtw_sample_size), desc="Sampling DTW segments"):
+    for i in tqdm(range(dtw_sample_size), desc="Sampling candidate segments"):
         max_attempts = 100  # Prevent infinite loop
         attempts = 0
         
@@ -376,7 +387,7 @@ def collect_dtw_augmentations(dataset, traj_total, config, use_relative_eef=True
             idx = get_indices(traj_total, config)
             idx_st = idx[0][0]
             
-            # Avoid duplicate segments
+            # Avoid duplicate segments (including original segments)
             if idx_st not in used_indices:
                 used_indices.add(idx_st)
                 break
@@ -384,7 +395,7 @@ def collect_dtw_augmentations(dataset, traj_total, config, use_relative_eef=True
             attempts += 1
         
         if attempts >= max_attempts:
-            print(f"Warning: Could not find unique segment after {max_attempts} attempts for DTW sample {i+1}")
+            print(f"Warning: Could not find unique segment after {max_attempts} attempts for candidate sample {i+1}")
             # Use the last generated segment anyway
         
         # Create segment indices
@@ -398,118 +409,123 @@ def collect_dtw_augmentations(dataset, traj_total, config, use_relative_eef=True
             "obs": torch.from_numpy(obs).float(),
             "start_idx": idx_st
         }
-        dtw_segments.append(segment)
-        dtw_segment_indices.append(idx_st)
+        candidate_segments.append(segment)
+        candidate_segment_indices.append(idx_st)
 
-    print(f"Sampled {len(dtw_segments)} unique segments for DTW matrix")
+    print(f"Sampled {len(candidate_segments)} unique candidate segments")
 
-    # Step 2: Load or compute DTW distance matrix from independent segments
-    dtw_matrix_path = getattr(config, 'dtw_matrix_path', 'dtw_matrix_cache.pkl')
-    dtw_matrix = load_or_compute_dtw_matrix(dtw_segments, use_relative_eef, dtw_matrix_path, config)
+    # Step 3: Compute DTW distances from each original segment to all candidate segments
+    print(f"Computing DTW distances from {len(original_segments)} original segments to {len(candidate_segments)} candidates...")
     
-    # Step 3: Select diverse pairs from DTW matrix for augmentation
-    print(f"Selecting {config.dtw_augmentation_size} pairs for augmentation from DTW matrix...")
+    # Import DTW module
+    try:
+        from utils import dtw
+        print("Using custom DTW implementation")
+    except ImportError:
+        raise ImportError("DTW module not found. Make sure robot_pref.utils.dtw is available.")
     
-    n_segments = len(dtw_segments)
+    # Compute DTW distances for each original segment
+    dtw_distances_dict = {}  # original_segment_idx -> list of (candidate_idx, distance)
     
-    # Get upper triangle indices and their DTW distances
-    upper_triangle_indices = []
-    upper_triangle_distances = []
-    
-    for i in range(n_segments):
-        for j in range(i + 1, n_segments):
-            upper_triangle_indices.append((i, j))
-            upper_triangle_distances.append(dtw_matrix[i, j])
-    
-    upper_triangle_distances = np.array(upper_triangle_distances)
-    
-    # Strategy: Select pairs with diverse DTW distances
-    # Sort by distance and select from different percentile ranges
-    sorted_indices = np.argsort(upper_triangle_distances)
-    n_pairs = min(config.dtw_augmentation_size, len(upper_triangle_indices))
-    
-    # Select pairs from different distance ranges for diversity
-    # 30% from low distances (similar segments), 40% from medium, 30% from high (dissimilar segments)
-    n_low = int(0.3 * n_pairs)
-    n_medium = int(0.4 * n_pairs) 
-    n_high = n_pairs - n_low - n_medium
-    
-    low_indices = sorted_indices[:len(sorted_indices)//3]
-    medium_indices = sorted_indices[len(sorted_indices)//3:2*len(sorted_indices)//3]
-    high_indices = sorted_indices[2*len(sorted_indices)//3:]
-    
-    # Sample from each range
-    selected_pair_indices = []
-    if len(low_indices) > 0:
-        selected_pair_indices.extend(np.random.choice(low_indices, min(n_low, len(low_indices)), replace=False))
-    if len(medium_indices) > 0:
-        selected_pair_indices.extend(np.random.choice(medium_indices, min(n_medium, len(medium_indices)), replace=False))
-    if len(high_indices) > 0:
-        selected_pair_indices.extend(np.random.choice(high_indices, min(n_high, len(high_indices)), replace=False))
-    
-    selected_pairs = [upper_triangle_indices[idx] for idx in selected_pair_indices]
-    selected_distances = [upper_triangle_distances[idx] for idx in selected_pair_indices]
-    
-    print(f"Selected {len(selected_pairs)} pairs with DTW distances ranging from "
-          f"{min(selected_distances):.3f} to {max(selected_distances):.3f}")
-    print(f"Distance distribution - Low: {n_low}, Medium: {n_medium}, High: {n_high}")
-    
-    # Step 4: Create preference labels for selected pairs
-    multiple_ranked_list = []
-    
-    for i, j in tqdm(selected_pairs, desc="Creating preference labels"):
-        # Get the actual segment starting indices from DTW segments
-        idx_st_1 = dtw_segment_indices[i]
-        idx_st_2 = dtw_segment_indices[j]
+    for orig_seg_idx in tqdm(original_segments, desc="Computing DTW distances"):
+        # Extract observations for original segment
+        orig_segment_idx = [j for j in range(orig_seg_idx, orig_seg_idx + config.segment_size)]
+        orig_obs = dataset["observations"][orig_segment_idx][:, :3]  # EE positions (first 3 dims)
         
-        # Create segment index lists
-        idx_1 = [[k for k in range(idx_st_1, idx_st_1 + config.segment_size)]]
-        idx_2 = [[k for k in range(idx_st_2, idx_st_2 + config.segment_size)]]
+        # Use relative positions if requested
+        if use_relative_eef:
+            orig_obs = orig_obs[1:] - orig_obs[:-1]
         
-        # Calculate segment rewards
+        distances = []
+        for cand_idx, candidate in enumerate(candidate_segments):
+            cand_obs = candidate["obs"].numpy()[:, :3]  # EE positions
+            
+            # Use relative positions if requested
+            if use_relative_eef:
+                cand_obs = cand_obs[1:] - cand_obs[:-1]
+            
+            cost, _ = dtw.get_single_match(orig_obs, cand_obs)            
+            distances.append((candidate_segment_indices[cand_idx], cost))
+        
+        # Sort by distance and store
+        distances.sort(key=lambda x: x[1])
+        dtw_distances_dict[orig_seg_idx] = distances
+    
+    # Step 4: Generate DTW augmentations using ground truth preference propagation
+    print(f"Generating DTW augmentations using preference propagation...")
+    
+    dtw_k_augment = getattr(config, 'dtw_k_augment', 5)  # Number of similar segments to find
+    augmented_pairs = []
+    augmented_preferences = []
+    
+    # Take a subset of original pairs for augmentation to control the total size
+    max_original_pairs = min(config.dtw_augmentation_size // (2 * dtw_k_augment), len(original_pairs))
+    selected_original_indices = random.sample(range(len(original_pairs)), max_original_pairs)
+    
+    print(f"Using {len(selected_original_indices)} original pairs for DTW augmentation")
+    
+    for orig_idx in tqdm(selected_original_indices, desc="Creating DTW augmentations"):
+        i, j = original_pairs[orig_idx]  # Get the segment start indices
+        pref = original_preferences[orig_idx]  # Get the preference label
+        
+        # Get K most similar segments to both i and j from DTW distances
+        similar_to_i = [seg_idx for seg_idx, _ in dtw_distances_dict[i][:dtw_k_augment]]
+        similar_to_j = [seg_idx for seg_idx, _ in dtw_distances_dict[j][:dtw_k_augment]]
+        
+        # Add augmented pairs: if i > j, then similar_to_i > j and i > similar_to_j
+        for sim_segment_idx in similar_to_i:
+            if sim_segment_idx != i and sim_segment_idx != j:  # Avoid duplicates
+                augmented_pairs.append((sim_segment_idx, j))
+                augmented_preferences.append(pref)  # Same preference as original
+        
+        for sim_segment_idx in similar_to_j:
+            if sim_segment_idx != i and sim_segment_idx != j:  # Avoid duplicates
+                augmented_pairs.append((i, sim_segment_idx))
+                augmented_preferences.append(pref)  # Same preference as original
+    
+    print(f"Generated {len(augmented_pairs)} DTW augmentation pairs")
+    
+    # Step 5: Convert augmented pairs back to ranking list format
+    augmented_multiple_ranked_list = []
+    
+    for (idx_st_1, idx_st_2), pref in zip(augmented_pairs, augmented_preferences):
+        # Calculate segment rewards for ranking
+        idx_1 = [[j for j in range(idx_st_1, idx_st_1 + config.segment_size)]]
+        idx_2 = [[j for j in range(idx_st_2, idx_st_2 + config.segment_size)]]
         reward_1 = np.round(np.sum(dataset["rewards"][idx_1], axis=1), 2).item()
         reward_2 = np.round(np.sum(dataset["rewards"][idx_2], axis=1), 2).item()
-        
-        # Get preference label
-        label = obtain_labels(
-            dataset,
-            idx_1,
-            idx_2,
-            segment_size=config.segment_size,
-            threshold=config.threshold,
-            noise=config.noise,
-        )
         
         # Create ranking list for this comparison
         single_ranked_list = []
         
-        if np.all(label[0] == [1, 0]):
+        if np.array_equal(pref, [1, 0]):
             # Segment 1 is preferred over segment 2
             group_1 = [(idx_st_1, reward_1)]  # Higher ranked (preferred)
             group_2 = [(idx_st_2, reward_2)]  # Lower ranked  
             single_ranked_list.append(group_2)  # Lower rank first
             single_ranked_list.append(group_1)  # Higher rank second
             
-        elif np.all(label[0] == [0.5, 0.5]):
+        elif np.array_equal(pref, [0.5, 0.5]):
             # Segments are considered equal
             group = [(idx_st_1, reward_1), (idx_st_2, reward_2)]
             single_ranked_list.append(group)
             
-        elif np.all(label[0] == [0, 1]):
+        elif np.array_equal(pref, [0, 1]):
             # Segment 2 is preferred over segment 1
             group_1 = [(idx_st_1, reward_1)]  # Lower ranked
             group_2 = [(idx_st_2, reward_2)]  # Higher ranked (preferred)
             single_ranked_list.append(group_1)  # Lower rank first
             single_ranked_list.append(group_2)  # Higher rank second
         
-        multiple_ranked_list.append(single_ranked_list)
+        augmented_multiple_ranked_list.append(single_ranked_list)
     
     print(f"Completed DTW augmentation collection:")
-    print(f"  - Sampled {len(dtw_segments)} independent segments for DTW matrix")
-    print(f"  - DTW matrix shape: {dtw_matrix.shape[0]}x{dtw_matrix.shape[1]}")
-    print(f"  - Created {len(multiple_ranked_list)} preference comparisons from DTW-guided selection")
+    print(f"  - Used {len(selected_original_indices)} original preference pairs")
+    print(f"  - {len(original_segments)} unique original segments")
+    print(f"  - Sampled {len(candidate_segments)} candidate segments")
+    print(f"  - Created {len(augmented_multiple_ranked_list)} DTW-augmented preference comparisons")
     
-    return multiple_ranked_list, dtw_matrix, dtw_segment_indices
+    return augmented_multiple_ranked_list, dtw_distances_dict, candidate_segment_indices
 
 
 def load_or_compute_dtw_matrix(segments: List[Dict], use_relative_eef: bool, dtw_matrix_path: str, config) -> np.ndarray:
@@ -1176,3 +1192,258 @@ def compute_full_dtw_matrix(segments: List[Dict], use_relative_eef: bool, dtw) -
         print(f"WARNING: {non_finite_count} DTW distances were non-finite")
         
     return distance_matrix
+
+
+def analyze_dtw_augmentation_quality(
+    reward_model, 
+    dtw_obs_act_1, 
+    dtw_obs_act_2, 
+    dtw_labels, 
+    dataset,
+    segment_start_indices_1,
+    segment_start_indices_2,
+    config,
+    output_path=None,
+    wandb_run=None
+):
+    """
+    Analyze the quality of DTW augmentations by examining the relationship between
+    reward model uncertainty and ground truth accuracy.
+    
+    Args:
+        reward_model: Trained reward model with ensemble
+        dtw_obs_act_1: First segments of DTW augmented pairs [N, segment_size, obs+act_dim] 
+        dtw_obs_act_2: Second segments of DTW augmented pairs [N, segment_size, obs+act_dim]
+        dtw_labels: Predicted preference labels from DTW propagation [N, 2]
+        dataset: Original dataset to compute ground truth preferences
+        segment_start_indices_1: Starting indices of first segments [N]
+        segment_start_indices_2: Starting indices of second segments [N]
+        config: Configuration object
+        output_path: Path to save analysis plot
+        wandb_run: W&B run for logging
+        
+    Returns:
+        dict: Analysis metrics
+    """
+    print("Analyzing DTW augmentation quality...")
+    
+    if len(dtw_obs_act_1) == 0:
+        print("No DTW augmentations to analyze")
+        return {}
+    
+    # Set ensemble models to eval mode
+    for member in range(reward_model.ensemble_num):
+        reward_model.ensemble_model[member].eval()
+    
+    # Convert data to tensors if needed
+    if not isinstance(dtw_obs_act_1, torch.Tensor):
+        dtw_obs_act_1 = torch.tensor(dtw_obs_act_1, dtype=torch.float32)
+    if not isinstance(dtw_obs_act_2, torch.Tensor):
+        dtw_obs_act_2 = torch.tensor(dtw_obs_act_2, dtype=torch.float32)
+    
+    dtw_obs_act_1 = dtw_obs_act_1.to(reward_model.device)
+    dtw_obs_act_2 = dtw_obs_act_2.to(reward_model.device)
+    
+    # Compute ground truth preferences for DTW augmented pairs
+    print("Computing ground truth preferences for DTW augmentations...")
+    gt_preferences = []
+    
+    for i in range(len(segment_start_indices_1)):
+        idx_st_1 = segment_start_indices_1[i]
+        idx_st_2 = segment_start_indices_2[i]
+        
+        # Calculate segment rewards
+        idx_1 = [[j for j in range(idx_st_1, idx_st_1 + config.segment_size)]]
+        idx_2 = [[j for j in range(idx_st_2, idx_st_2 + config.segment_size)]]
+        
+        gt_label = obtain_labels(
+            dataset,
+            idx_1,
+            idx_2,
+            segment_size=config.segment_size,
+            threshold=config.threshold,
+            noise=0.0,  # No noise for ground truth
+        )[0]
+        gt_preferences.append(gt_label)
+    
+    gt_preferences = np.array(gt_preferences)
+    
+    # Compute reward model uncertainty/disagreement for each pair
+    print("Computing reward model uncertainty for DTW augmentations...")
+    uncertainties = []
+    predicted_preferences = []
+    
+    with torch.no_grad():
+        for i in tqdm(range(len(dtw_obs_act_1)), desc="Computing uncertainties"):
+            seg1 = dtw_obs_act_1[i]  # [segment_size, obs+act_dim]
+            seg2 = dtw_obs_act_2[i]  # [segment_size, obs+act_dim]
+            
+            # Get predictions from each ensemble member
+            ensemble_returns_1 = []
+            ensemble_returns_2 = []
+            
+            for member_idx in range(reward_model.ensemble_num):
+                member_rewards_1 = reward_model.ensemble_model[member_idx](seg1)  # [segment_size, 1]
+                member_rewards_2 = reward_model.ensemble_model[member_idx](seg2)  # [segment_size, 1]
+                
+                member_return_1 = member_rewards_1.sum().item()
+                member_return_2 = member_rewards_2.sum().item()
+                
+                ensemble_returns_1.append(member_return_1)
+                ensemble_returns_2.append(member_return_2)
+            
+            # Convert to numpy arrays
+            ensemble_returns_1 = np.array(ensemble_returns_1)
+            ensemble_returns_2 = np.array(ensemble_returns_2)
+            
+            # Compute return deltas for each ensemble member
+            ensemble_deltas = ensemble_returns_1 - ensemble_returns_2
+            
+            # Convert to preference probabilities using softmax
+            ensemble_probs = []
+            temperature = 1.0
+            for delta in ensemble_deltas:
+                prob_1 = 1.0 / (1.0 + np.exp(-delta / temperature))
+                prob_2 = 1.0 - prob_1
+                ensemble_probs.append([prob_1, prob_2])
+            
+            ensemble_probs = np.array(ensemble_probs)  # [ensemble_num, 2]
+            
+            # Compute mean probability across ensemble
+            mean_probs = np.mean(ensemble_probs, axis=0)  # [2]
+            predicted_preferences.append(mean_probs)
+            
+            # Compute uncertainty measures
+            # 1. Entropy of mean probabilities
+            epsilon = 1e-8
+            mean_probs_clipped = np.clip(mean_probs, epsilon, 1 - epsilon)
+            entropy = -np.sum(mean_probs_clipped * np.log(mean_probs_clipped))
+            
+            # 2. Disagreement: variance in probabilities across ensemble members
+            prob_disagreement = np.mean(np.var(ensemble_probs, axis=0))
+            
+            # 3. Combined uncertainty measure
+            uncertainty = entropy + prob_disagreement
+            uncertainties.append(uncertainty)
+    
+    uncertainties = np.array(uncertainties)
+    predicted_preferences = np.array(predicted_preferences)
+    
+    # Compute accuracy of DTW propagated labels vs ground truth
+    print("Computing accuracy metrics...")
+    
+    # Convert predicted preferences to discrete labels
+    predicted_labels = []
+    for pred_probs in predicted_preferences:
+        if pred_probs[0] > pred_probs[1] + 0.1:  # Threshold for preference
+            predicted_labels.append([1, 0])
+        elif pred_probs[1] > pred_probs[0] + 0.1:
+            predicted_labels.append([0, 1])
+        else:
+            predicted_labels.append([0.5, 0.5])
+    predicted_labels = np.array(predicted_labels)
+    
+    # Compute accuracy: DTW propagated vs ground truth
+    dtw_vs_gt_accuracy = np.mean([
+        np.array_equal(dtw_labels[i], gt_preferences[i]) 
+        for i in range(len(dtw_labels))
+    ])
+    
+    # Compute accuracy: Reward model prediction vs ground truth  
+    rm_vs_gt_accuracy = np.mean([
+        np.array_equal(predicted_labels[i], gt_preferences[i])
+        for i in range(len(predicted_labels))
+    ])
+    
+    # Compute accuracy: Reward model prediction vs DTW propagated
+    rm_vs_dtw_accuracy = np.mean([
+        np.array_equal(predicted_labels[i], dtw_labels[i])
+        for i in range(len(predicted_labels))
+    ])
+    
+    print(f"DTW Augmentation Quality Analysis:")
+    print(f"  DTW propagated vs Ground Truth accuracy: {dtw_vs_gt_accuracy:.3f}")
+    print(f"  Reward Model vs Ground Truth accuracy: {rm_vs_gt_accuracy:.3f}") 
+    print(f"  Reward Model vs DTW propagated accuracy: {rm_vs_dtw_accuracy:.3f}")
+    print(f"  Mean uncertainty: {np.mean(uncertainties):.3f}")
+    print(f"  Uncertainty std: {np.std(uncertainties):.3f}")
+    
+    # Create visualization
+    if output_path is not None:
+        import matplotlib.pyplot as plt
+        
+        fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+        fig.suptitle('DTW Augmentation Quality Analysis', fontsize=16)
+        
+        # 1. Uncertainty vs DTW-GT accuracy scatter plot
+        ax1 = axes[0, 0]
+        dtw_gt_correct = [np.array_equal(dtw_labels[i], gt_preferences[i]) for i in range(len(dtw_labels))]
+        scatter1 = ax1.scatter(uncertainties, dtw_gt_correct, alpha=0.6, s=20)
+        ax1.set_xlabel('Reward Model Uncertainty')
+        ax1.set_ylabel('DTW vs GT Correct (0/1)')
+        ax1.set_title('Uncertainty vs DTW Accuracy')
+        ax1.grid(True, alpha=0.3)
+        
+        # 2. Uncertainty vs RM-GT accuracy scatter plot  
+        ax2 = axes[0, 1]
+        rm_gt_correct = [np.array_equal(predicted_labels[i], gt_preferences[i]) for i in range(len(predicted_labels))]
+        scatter2 = ax2.scatter(uncertainties, rm_gt_correct, alpha=0.6, s=20, color='orange')
+        ax2.set_xlabel('Reward Model Uncertainty') 
+        ax2.set_ylabel('RM vs GT Correct (0/1)')
+        ax2.set_title('Uncertainty vs RM Accuracy')
+        ax2.grid(True, alpha=0.3)
+        
+        # 3. Uncertainty histogram
+        ax3 = axes[1, 0]
+        ax3.hist(uncertainties, bins=30, alpha=0.7, edgecolor='black')
+        ax3.set_xlabel('Uncertainty')
+        ax3.set_ylabel('Count')
+        ax3.set_title('Uncertainty Distribution')
+        ax3.axvline(np.mean(uncertainties), color='red', linestyle='--', 
+                   label=f'Mean: {np.mean(uncertainties):.3f}')
+        ax3.legend()
+        ax3.grid(True, alpha=0.3)
+        
+        # 4. Accuracy comparison bar chart
+        ax4 = axes[1, 1]
+        accuracies = [dtw_vs_gt_accuracy, rm_vs_gt_accuracy, rm_vs_dtw_accuracy]
+        labels = ['DTW vs GT', 'RM vs GT', 'RM vs DTW']
+        colors = ['blue', 'orange', 'green']
+        bars = ax4.bar(labels, accuracies, color=colors, alpha=0.7)
+        ax4.set_ylabel('Accuracy')
+        ax4.set_title('Accuracy Comparison')
+        ax4.set_ylim(0, 1)
+        
+        # Add value labels on bars
+        for bar, acc in zip(bars, accuracies):
+            ax4.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.01,
+                    f'{acc:.3f}', ha='center', va='bottom')
+        
+        ax4.grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        plt.savefig(output_path, dpi=150, bbox_inches='tight')
+        plt.close()
+        
+        print(f"DTW augmentation analysis saved to: {output_path}")
+    
+    # Log to wandb if available
+    if wandb_run is not None:
+        wandb_run.log({
+            "dtw_analysis/dtw_vs_gt_accuracy": dtw_vs_gt_accuracy,
+            "dtw_analysis/rm_vs_gt_accuracy": rm_vs_gt_accuracy,
+            "dtw_analysis/rm_vs_dtw_accuracy": rm_vs_dtw_accuracy,
+            "dtw_analysis/mean_uncertainty": np.mean(uncertainties),
+            "dtw_analysis/uncertainty_std": np.std(uncertainties),
+            "dtw_analysis/num_augmentations": len(dtw_labels)
+        })
+    
+    return {
+        "dtw_vs_gt_accuracy": dtw_vs_gt_accuracy,
+        "rm_vs_gt_accuracy": rm_vs_gt_accuracy, 
+        "rm_vs_dtw_accuracy": rm_vs_dtw_accuracy,
+        "uncertainties": uncertainties,
+        "mean_uncertainty": np.mean(uncertainties),
+        "uncertainty_std": np.std(uncertainties),
+        "num_augmentations": len(dtw_labels)
+    }
