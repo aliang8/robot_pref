@@ -13,7 +13,7 @@ import uuid
 from dataclasses import asdict, dataclass
 
 import reward_utils
-from reward_utils import collect_feedback, collect_human_feedback, consist_test_dataset, collect_dtw_augmentations, compute_acquisition_scores, filter_augmentations_by_acquisition, collect_simple_pairwise_feedback, analyze_dtw_augmentation_quality, compare_baseline_vs_augmented_performance, display_preference_label_stats, plot_baseline_vs_augmented_scatter_analysis
+from reward_utils import collect_feedback, collect_human_feedback, consist_test_dataset, collect_dtw_augmentations, compute_acquisition_scores, filter_augmentations_by_acquisition, collect_simple_pairwise_feedback, analyze_dtw_augmentation_quality, compare_baseline_vs_augmented_performance, display_preference_label_stats, plot_baseline_vs_augmented_scatter_analysis, plot_individual_test_example_deltas
 from models.reward_model import RewardModel
 from utils.analyze_rewards_legacy import analyze_rewards_legacy, create_episodes_from_dataset, plot_preference_return_analysis_legacy, plot_segment_return_scatter_analysis_legacy
 
@@ -50,6 +50,7 @@ class TrainConfig:
     dtw_subsample_size: int = 10000  # Number of segments to sample for DTW matrix
     dtw_augmentation_size: int = 2000  # Number of augmentation pairs to create from DTW matrix
     dtw_k_augment: int = 5  # Number of similar segments to find for each original preference pair
+    dtw_exclude_equal_pref: bool = True  # If True: only augment non-equal preference pairs (exclude [0.5, 0.5])
     acquisition_threshold_low: float = 0.25  # 25th percentile for acquisition filtering
     acquisition_threshold_high: float = 0.75  # 75th percentile for acquisition filtering
     acquisition_method: str = "entropy"  # "entropy", "disagreement", "combined", "variance"
@@ -64,6 +65,8 @@ class TrainConfig:
     hidden_sizes: int = 128
     ensemble_num: int = 3
     ensemble_method: str = "mean"
+    # Class weighting for preference balancing
+    use_class_weights: bool = True  # Apply inverse frequency weighting to balance preference types
     # Wandb logging
     project: str = "Reward Learning"
     group: str = "Reward learning"
@@ -95,8 +98,9 @@ class TrainConfig:
             "dtw_mode": "before" if self.dtw_augment_before_training else "after",
             "dtw_subsample": f"{self.dtw_subsample_size//1000}k",
             "dtw_augmentation": self.dtw_augmentation_size,
+            "dtw_exclude_equal": int(self.dtw_exclude_equal_pref),
             "acquisition_thresholds": f"{self.acquisition_threshold_low}-{self.acquisition_threshold_high}",
-            "dtw_settings": f"{int(self.use_dtw_augmentations)}-{int(self.dtw_augment_before_training)}-{self.dtw_subsample_size//1000}k-{self.dtw_augmentation_size}-A{self.acquisition_threshold_low}-{self.acquisition_threshold_high}"
+            "dtw_settings": f"{int(self.use_dtw_augmentations)}-{int(self.dtw_augment_before_training)}-{self.dtw_subsample_size//1000}k-{self.dtw_augmentation_size}-E{int(self.dtw_exclude_equal_pref)}-A{self.acquisition_threshold_low}-{self.acquisition_threshold_high}"
         }
         
         # Use custom parameters if specified, otherwise use default structure
@@ -128,8 +132,9 @@ class TrainConfig:
                 ["m", self.model_type],
                 ["e", self.epochs],
                 ["n", self.noise],
+                ["th", self.threshold],
                 # DTW augmentation settings (only if enabled)
-                ["dtw", f"{int(self.use_dtw_augmentations)}-{int(self.dtw_augment_before_training)}-{self.dtw_subsample_size//1000}k-{self.dtw_augmentation_size}-A{self.acquisition_threshold_low}-{self.acquisition_threshold_high}"] if self.use_dtw_augmentations else None,
+                ["dtw", f"{int(self.use_dtw_augmentations)}-{int(self.dtw_augment_before_training)}-{self.dtw_subsample_size//1000}k-{self.dtw_augmentation_size}-E{int(self.dtw_exclude_equal_pref)}-A{self.acquisition_threshold_low}-{self.acquisition_threshold_high}"] if self.use_dtw_augmentations else None,
                 # Seed (always last)
                 ["s", self.seed]
             ]
@@ -148,7 +153,8 @@ class TrainConfig:
                 f"ft_{self.feedback_type}",
                 f"m_{self.model_type}",
                 f"n_{self.noise}",
-                f"e_{self.epochs}"
+                f"e_{self.epochs}",
+                f"th_{self.threshold}"
             ]
             
             # Add DTW components if enabled
@@ -268,6 +274,20 @@ def train(config: TrainConfig):
             threshold=config.threshold,
         )
     )
+    
+    # Compute test ground truth returns by recreating the test indices
+    # (using same logic as consist_test_dataset)
+    np.random.seed(config.seed)  # Use same seed as test dataset creation
+    test_traj_idx = np.random.choice(traj_total, 2 * test_feedback_num, replace=True)
+    test_idx = [
+        500 * i + np.random.randint(0, 500 - config.segment_size) for i in test_traj_idx
+    ]
+    test_idx_st_1 = test_idx[:test_feedback_num]
+    test_idx_st_2 = test_idx[test_feedback_num:]
+    test_idx_1 = [[j for j in range(i, i + config.segment_size)] for i in test_idx_st_1]
+    test_idx_2 = [[j for j in range(i, i + config.segment_size)] for i in test_idx_st_2]
+    test_gt_return_1 = dataset["rewards"][test_idx_1].sum(axis=1)
+    test_gt_return_2 = dataset["rewards"][test_idx_2].sum(axis=1)
 
     wandb_init(asdict(config))
 
@@ -392,9 +412,27 @@ def train(config: TrainConfig):
                 test_obs_act_2=test_obs_act_2,
                 test_labels=test_labels,
                 test_binary_labels=test_binary_labels,
+                test_gt_return_1=test_gt_return_1,
+                test_gt_return_2=test_gt_return_2,
                 config=config,
                 output_path=comparison_path,
                 wandb_run=wandb.run if wandb.run else None
+            )
+            
+            # Create individual test example deltas chart
+            print("Creating individual test example deltas chart...")
+            deltas_chart_path = os.path.join(config.checkpoints_path, f"individual_test_deltas_seed_{config.seed}.png") if config.checkpoints_path else None
+            deltas_results = plot_individual_test_example_deltas(
+                baseline_reward_model=baseline_reward_model,
+                augmented_reward_model=reward_model,
+                test_obs_act_1=test_obs_act_1,
+                test_obs_act_2=test_obs_act_2,
+                test_gt_return_1=test_gt_return_1,
+                test_gt_return_2=test_gt_return_2,
+                output_file=deltas_chart_path,
+                max_examples=200,  # Show more examples in dedicated chart
+                wandb_run=wandb.run if wandb.run else None,
+                random_seed=config.seed
             )
         
         # Analyze DTW augmentation quality if DTW was used
@@ -402,7 +440,7 @@ def train(config: TrainConfig):
             print("Step 5: Analyzing DTW augmentation quality...")
             dtw_analysis_path = os.path.join(config.checkpoints_path, f"dtw_augmentation_analysis_seed_{config.seed}.png") if config.checkpoints_path else None
             analyze_dtw_augmentation_quality(
-                reward_model=reward_model,
+                reward_model=baseline_reward_model,
                 dtw_obs_act_1=dtw_obs_act_1,
                 dtw_obs_act_2=dtw_obs_act_2,
                 dtw_labels=dtw_labels,
@@ -569,9 +607,27 @@ def train(config: TrainConfig):
                     test_obs_act_2=test_obs_act_2,
                     test_labels=test_labels,
                     test_binary_labels=test_binary_labels,
+                    test_gt_return_1=test_gt_return_1,
+                    test_gt_return_2=test_gt_return_2,
                     config=config,
                     output_path=comparison_path,
                     wandb_run=wandb.run if wandb.run else None
+                )
+                
+                # Create individual test example deltas chart
+                print("Creating individual test example deltas chart...")
+                deltas_chart_path = os.path.join(config.checkpoints_path, f"individual_test_deltas_seed_{config.seed}.png") if config.checkpoints_path else None
+                deltas_results = plot_individual_test_example_deltas(
+                    baseline_reward_model=baseline_reward_model,
+                    augmented_reward_model=combined_reward_model,
+                    test_obs_act_1=test_obs_act_1,
+                    test_obs_act_2=test_obs_act_2,
+                    test_gt_return_1=test_gt_return_1,
+                    test_gt_return_2=test_gt_return_2,
+                    output_file=deltas_chart_path,
+                    max_examples=200,  # Show more examples in dedicated chart
+                    wandb_run=wandb.run if wandb.run else None,
+                    random_seed=config.seed
                 )
                 
                 # Use the combined model for final results

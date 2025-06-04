@@ -345,6 +345,355 @@ def collect_dtw_augmentations(dataset, traj_total, config, original_pairs, origi
     Args:
         dataset: The dataset containing observations, actions, rewards
         traj_total: Total number of trajectories 
+        config: Configuration object (uses dtw_exclude_equal_pref to filter equal preference pairs)
+        original_pairs: List of tuples (idx_st_1, idx_st_2) representing original segment pairs
+import numpy as np
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+import gym, random, torch, os, uuid
+import rich
+import wandb
+from tqdm import tqdm
+import pickle
+
+
+def set_seed(
+    seed: int, env: Optional[gym.Env] = None, deterministic_torch: bool = False
+):
+    if env is not None:
+        env.seed(seed)
+        env.action_space.seed(seed)
+    os.environ["PYTHONHASHSEED"] = str(seed)
+    np.random.seed(seed)
+    random.seed(seed)
+    torch.manual_seed(seed)
+    torch.use_deterministic_algorithms(deterministic_torch)
+
+
+def normalize_states(states: np.ndarray, mean: np.ndarray, std: np.ndarray):
+    return (states - mean) / std
+
+
+def compute_mean_std(states: np.ndarray, eps: float) -> Tuple[np.ndarray, np.ndarray]:
+    mean = states.mean(0)
+    std = states.std(0) + eps
+    return mean, std
+
+
+def get_indices(traj_total, config):
+    traj_idx = np.random.choice(traj_total, replace=False)
+    idx_st = 500 * traj_idx + np.random.randint(0, 500 - config.segment_size)
+    idx = [[j for j in range(idx_st, idx_st + config.segment_size)]]
+    return idx
+
+
+def consist_test_dataset(
+    dataset, test_feedback_num, traj_total, segment_size, threshold
+):
+    test_traj_idx = np.random.choice(traj_total, 2 * test_feedback_num, replace=True)
+    test_idx = [
+        500 * i + np.random.randint(0, 500 - segment_size) for i in test_traj_idx
+    ]
+    test_idx_st_1 = test_idx[:test_feedback_num]
+    test_idx_st_2 = test_idx[test_feedback_num:]
+    test_idx_1 = [[j for j in range(i, i + segment_size)] for i in test_idx_st_1]
+    test_idx_2 = [[j for j in range(i, i + segment_size)] for i in test_idx_st_2]
+    test_labels = obtain_labels(
+        dataset,
+        test_idx_1,
+        test_idx_2,
+        segment_size=segment_size,
+        threshold=threshold,
+        noise=0.0,
+    )
+    test_binary_labels = obtain_labels(
+        dataset,
+        test_idx_1,
+        test_idx_2,
+        segment_size=segment_size,
+        threshold=0,
+        noise=0.0,
+    )
+    test_obs_act_1 = np.concatenate(
+        (dataset["observations"][test_idx_1], dataset["actions"][test_idx_1]),
+        axis=-1,
+    )
+    test_obs_act_2 = np.concatenate(
+        (dataset["observations"][test_idx_2], dataset["actions"][test_idx_2]),
+        axis=-1,
+    )
+    return test_obs_act_1, test_obs_act_2, test_labels, test_binary_labels
+
+
+def collect_simple_pairwise_feedback(dataset, traj_total, config):
+    """
+    Simplified version of collect_feedback for independent pairwise feedback only.
+    No RLT (Ranking Learning with Ties) complexity - just simple pairwise comparisons.
+    
+    Args:
+        dataset: The dataset containing observations, actions, rewards
+        traj_total: Total number of trajectories 
+        config: Configuration object with feedback_num, segment_size, threshold, noise
+        
+    Returns:
+        tuple: (multiple_ranked_list, segment_indices)
+            multiple_ranked_list: List of ranking lists, each containing the result of one pairwise comparison
+            segment_indices: List of all segment starting indices used in feedback collection
+    """
+    # Set random seed for reproducible segment selection
+    if hasattr(config, 'seed'):
+        np.random.seed(config.seed)
+        random.seed(config.seed)
+        print(f"Set random seed to {config.seed} for reproducible segment selection")
+    
+    # Check if segment indices are cached
+    segment_indices_path = getattr(config, 'segment_indices_path', 'segment_indices_cache.pkl')
+    
+    # Try to load existing segment indices
+    segment_indices = load_segment_indices(segment_indices_path, config)
+    
+    if segment_indices is not None:
+        print(f"Using cached segment indices from {segment_indices_path}")
+        # Generate multiple_ranked_list from cached indices
+        multiple_ranked_list = generate_feedback_from_indices(dataset, segment_indices, config)
+        return multiple_ranked_list, segment_indices
+    
+    # Generate new segment indices and feedback
+    multiple_ranked_list = []
+    segment_indices = []  # Track all segment indices used
+    used_pairs = set()  # Track used pairs to avoid duplicates
+    print(f"Collecting {config.feedback_num} independent pairwise feedback samples")
+
+    for i in range(config.feedback_num):
+        max_attempts = 50  # Prevent infinite loop
+        attempts = 0
+        
+        while attempts < max_attempts:
+            # Get two random trajectory segments
+            idx_1 = get_indices(traj_total, config)
+            idx_2 = get_indices(traj_total, config) 
+            
+            # Extract starting indices
+            idx_st_1 = idx_1[0][0]
+            idx_st_2 = idx_2[0][0]
+            
+            # Create a pair key (order-independent to catch (A,B) and (B,A) as same)
+            pair_key = tuple(sorted([idx_st_1, idx_st_2]))
+            
+            # Check if this is a valid new pair
+            if (idx_st_1 != idx_st_2 and  # Don't compare segment with itself
+                pair_key not in used_pairs):  # Don't use duplicate pairs
+                # Valid pair found
+                used_pairs.add(pair_key)
+                break
+                
+            attempts += 1
+        
+        if attempts >= max_attempts:
+            print(f"Warning: Could not find unique pair after {max_attempts} attempts for sample {i+1}")
+            # Use the last generated pair anyway to avoid infinite loop
+        
+        # Calculate segment rewards
+        reward_1 = np.round(np.sum(dataset["rewards"][idx_1], axis=1), 2).item()
+        reward_2 = np.round(np.sum(dataset["rewards"][idx_2], axis=1), 2).item()
+        
+        # Track segment indices
+        segment_indices.extend([idx_st_1, idx_st_2])
+        
+        # Get preference label for this pair
+        label = obtain_labels(
+            dataset,
+            idx_1,
+            idx_2,
+            segment_size=config.segment_size,
+            threshold=config.threshold,
+            noise=config.noise,
+        )
+        
+        # Create a single ranking list for this comparison
+        single_ranked_list = []
+        
+        if np.all(label[0] == [1, 0]):
+            # Segment 1 is preferred over segment 2
+            group_1 = [(idx_st_1, reward_1)]  # Higher ranked (preferred)
+            group_2 = [(idx_st_2, reward_2)]  # Lower ranked  
+            single_ranked_list.append(group_2)  # Lower rank first
+            single_ranked_list.append(group_1)  # Higher rank second
+            
+        elif np.all(label[0] == [0.5, 0.5]):
+            # Segments are considered equal
+            group = [(idx_st_1, reward_1), (idx_st_2, reward_2)]
+            single_ranked_list.append(group)
+            
+        elif np.all(label[0] == [0, 1]):
+            # Segment 2 is preferred over segment 1
+            group_1 = [(idx_st_1, reward_1)]  # Lower ranked
+            group_2 = [(idx_st_2, reward_2)]  # Higher ranked (preferred)
+            single_ranked_list.append(group_1)  # Lower rank first
+            single_ranked_list.append(group_2)  # Higher rank second
+        
+        # Add this pairwise comparison to the list
+        multiple_ranked_list.append(single_ranked_list)
+        
+        if (i + 1) % 100 == 0:
+            print(f"Collected {i + 1}/{config.feedback_num} pairwise comparisons")
+    
+    # Remove duplicates from segment indices
+    segment_indices = list(set(segment_indices))
+
+    # Save segment indices for future use
+    save_segment_indices(segment_indices, segment_indices_path, config)
+    
+    print(f"Completed collection of {len(multiple_ranked_list)} pairwise feedback samples")
+    print(f"Used {len(segment_indices)} unique segment indices")
+    print(f"Generated {len(used_pairs)} unique segment pairs")
+    return multiple_ranked_list, segment_indices
+
+
+def load_segment_indices(segment_indices_path: str, config) -> Optional[List[int]]:
+    """
+    Load segment indices from cache file with validation.
+    
+    Args:
+        segment_indices_path: Path to segment indices cache file
+        config: Configuration object
+        
+    Returns:
+        segment_indices: List of segment indices if cache is valid, None otherwise
+    """
+    if not os.path.exists(segment_indices_path):
+        return None
+        
+    try:
+        with open(segment_indices_path, 'rb') as f:
+            cached_data = pickle.load(f)
+            
+        # Validate cache metadata
+        cache_metadata = cached_data['metadata']
+        current_metadata = {
+            'feedback_num': config.feedback_num,
+            'segment_size': config.segment_size,
+            'seed': getattr(config, 'seed', None)
+        }
+        
+        # Check if cache matches current config
+        if (cache_metadata['feedback_num'] == current_metadata['feedback_num'] and
+            cache_metadata['segment_size'] == current_metadata['segment_size'] and
+            cache_metadata['seed'] == current_metadata['seed']):
+            
+            print("Segment indices cache validation successful")
+            return cached_data['segment_indices']
+        else:
+            print("Segment indices cache validation failed - will regenerate")
+            return None
+            
+    except Exception as e:
+        print(f"Error loading segment indices cache: {e} - will regenerate")
+        return None
+
+
+def save_segment_indices(segment_indices: List[int], segment_indices_path: str, config):
+    """
+    Save segment indices to cache file with metadata.
+    
+    Args:
+        segment_indices: List of segment indices to save
+        segment_indices_path: Path to save segment indices cache
+        config: Configuration object
+    """
+    try:
+        # Create directory if it doesn't exist
+        os.makedirs(os.path.dirname(segment_indices_path), exist_ok=True)
+        
+        cache_data = {
+            'segment_indices': segment_indices,
+            'metadata': {
+                'feedback_num': config.feedback_num,
+                'segment_size': config.segment_size,
+                'seed': getattr(config, 'seed', None),
+                'n_segments': len(segment_indices)
+            }
+        }
+        
+        with open(segment_indices_path, 'wb') as f:
+            pickle.dump(cache_data, f)
+            
+        print(f"Saved {len(segment_indices)} segment indices to {segment_indices_path}")
+        
+    except Exception as e:
+        print(f"Warning: Could not save segment indices cache: {e}")
+
+
+def generate_feedback_from_indices(dataset, segment_indices: List[int], config):
+    """
+    Generate feedback comparisons from cached segment indices.
+    
+    Args:
+        dataset: The dataset containing observations, actions, rewards
+        segment_indices: List of segment starting indices
+        config: Configuration object
+        
+    Returns:
+        multiple_ranked_list: List of ranking lists for pairwise comparisons
+    """
+    multiple_ranked_list = []
+    
+    # Recreate pairwise comparisons from segment indices
+    # Note: This assumes segment_indices contains pairs in sequence
+    for i in range(0, len(segment_indices), 2):
+        if i + 1 >= len(segment_indices):
+            break
+            
+        idx_st_1 = segment_indices[i]
+        idx_st_2 = segment_indices[i + 1]
+        
+        # Create segment index lists
+        idx_1 = [[j for j in range(idx_st_1, idx_st_1 + config.segment_size)]]
+        idx_2 = [[j for j in range(idx_st_2, idx_st_2 + config.segment_size)]]
+        
+        # Calculate segment rewards
+        reward_1 = np.round(np.sum(dataset["rewards"][idx_1], axis=1), 2).item()
+        reward_2 = np.round(np.sum(dataset["rewards"][idx_2], axis=1), 2).item()
+        
+        # Get preference label
+        label = obtain_labels(
+            dataset,
+            idx_1,
+            idx_2,
+            segment_size=config.segment_size,
+            threshold=config.threshold,
+            noise=config.noise,
+        )
+        
+        # Create ranking list for this comparison
+        single_ranked_list = []
+        
+        if np.all(label[0] == [1, 0]):
+            group_1 = [(idx_st_1, reward_1)]
+            group_2 = [(idx_st_2, reward_2)]
+            single_ranked_list.append(group_2)
+            single_ranked_list.append(group_1)
+        elif np.all(label[0] == [0.5, 0.5]):
+            group = [(idx_st_1, reward_1), (idx_st_2, reward_2)]
+            single_ranked_list.append(group)
+        elif np.all(label[0] == [0, 1]):
+            group_1 = [(idx_st_1, reward_1)]
+            group_2 = [(idx_st_2, reward_2)]
+            single_ranked_list.append(group_1)
+            single_ranked_list.append(group_2)
+        
+        multiple_ranked_list.append(single_ranked_list)
+    
+    return multiple_ranked_list
+
+
+def collect_dtw_augmentations(dataset, traj_total, config, original_pairs, original_preferences, use_relative_eef=True):
+    """
+    Collect DTW-guided augmentations using ground truth preference propagation.
+    Takes original preference pairs and creates augmentations by finding DTW-similar segments.
+    
+    Args:
+        dataset: The dataset containing observations, actions, rewards
+        traj_total: Total number of trajectories 
         config: Configuration object
         original_pairs: List of tuples (idx_st_1, idx_st_2) representing original segment pairs
         original_preferences: List of preference labels [0, 1], [1, 0], or [0.5, 0.5] for each pair
@@ -356,13 +705,42 @@ def collect_dtw_augmentations(dataset, traj_total, config, original_pairs, origi
     print(f"Collecting DTW augmentations using ground truth preference propagation")
     print(f"Input: {len(original_pairs)} original preference pairs")
     
-    # Step 1: Get unique segments from original preference pairs
+    # Filter out equal preference pairs if requested
+    filtered_pairs = []
+    filtered_preferences = []
+    
+    if getattr(config, 'dtw_exclude_equal_pref', True):
+        print("Filtering out equal preference pairs from DTW augmentation...")
+        equal_pref_count = 0
+        for pair, pref in zip(original_pairs, original_preferences):
+            if not np.array_equal(pref, [0.5, 0.5]):  # Keep non-equal preferences
+                filtered_pairs.append(pair)
+                filtered_preferences.append(pref)
+            else:
+                equal_pref_count += 1
+        
+        print(f"Excluded {equal_pref_count} equal preference pairs from DTW augmentation")
+        print(f"Using {len(filtered_pairs)} non-equal preference pairs for DTW augmentation")
+        
+        # Use filtered pairs
+        pairs_for_dtw = filtered_pairs
+        preferences_for_dtw = filtered_preferences
+    else:
+        print("Including all preference pairs (including equal preferences) in DTW augmentation")
+        pairs_for_dtw = original_pairs
+        preferences_for_dtw = original_preferences
+    
+    if len(pairs_for_dtw) == 0:
+        print("Warning: No pairs available for DTW augmentation after filtering")
+        return [], {}, []
+    
+    # Step 1: Get unique segments from filtered preference pairs
     original_segments_set = set()
-    for i, j in original_pairs:
+    for i, j in pairs_for_dtw:
         original_segments_set.add(i)
         original_segments_set.add(j)
     original_segments = list(original_segments_set)
-    print(f"Found {len(original_segments)} unique segments in original preference pairs")
+    print(f"Found {len(original_segments)} unique segments in filtered preference pairs")
     
     # Step 2: Sample candidate segments for DTW comparison
     dtw_sample_size = getattr(config, 'dtw_subsample_size', 10000)
@@ -459,14 +837,14 @@ def collect_dtw_augmentations(dataset, traj_total, config, original_pairs, origi
     augmented_preferences = []
     
     # Take a subset of original pairs for augmentation to control the total size
-    max_original_pairs = min(config.dtw_augmentation_size // (2 * dtw_k_augment), len(original_pairs))
-    selected_original_indices = random.sample(range(len(original_pairs)), max_original_pairs)
+    max_original_pairs = min(config.dtw_augmentation_size // (2 * dtw_k_augment), len(pairs_for_dtw))
+    selected_original_indices = random.sample(range(len(pairs_for_dtw)), max_original_pairs)
     
-    print(f"Using {len(selected_original_indices)} original pairs for DTW augmentation")
+    print(f"Using {len(selected_original_indices)} filtered pairs for DTW augmentation")
     
     for orig_idx in tqdm(selected_original_indices, desc="Creating DTW augmentations"):
-        i, j = original_pairs[orig_idx]  # Get the segment start indices
-        pref = original_preferences[orig_idx]  # Get the preference label
+        i, j = pairs_for_dtw[orig_idx]  # Get the segment start indices
+        pref = preferences_for_dtw[orig_idx]  # Get the preference label
         
         # Get K most similar segments to both i and j from DTW distances
         similar_to_i = [seg_idx for seg_idx, _ in dtw_distances_dict[i][:dtw_k_augment]]
@@ -520,7 +898,14 @@ def collect_dtw_augmentations(dataset, traj_total, config, original_pairs, origi
         augmented_multiple_ranked_list.append(single_ranked_list)
     
     print(f"Completed DTW augmentation collection:")
-    print(f"  - Used {len(selected_original_indices)} original preference pairs")
+    print(f"  - Started with {len(original_pairs)} original preference pairs")
+    if getattr(config, 'dtw_exclude_equal_pref', True):
+        excluded_count = len(original_pairs) - len(pairs_for_dtw)
+        print(f"  - Excluded {excluded_count} equal preference pairs")
+        print(f"  - Used {len(pairs_for_dtw)} non-equal preference pairs for DTW")
+    else:
+        print(f"  - Used all {len(pairs_for_dtw)} preference pairs for DTW")
+    print(f"  - Selected {len(selected_original_indices)} pairs for augmentation")
     print(f"  - {len(original_segments)} unique original segments")
     print(f"  - Sampled {len(candidate_segments)} candidate segments")
     print(f"  - Created {len(augmented_multiple_ranked_list)} DTW-augmented preference comparisons")
@@ -1568,20 +1953,42 @@ def analyze_dtw_augmentation_quality(
         
         # 4. Accuracy comparison bar chart
         ax4 = axes[1, 1]
-        accuracies = [dtw_vs_gt_accuracy, rm_vs_gt_accuracy, rm_vs_dtw_accuracy]
-        labels = ['DTW vs GT', 'RM vs GT', 'RM vs DTW']
-        colors = ['blue', 'orange', 'green']
-        bars = ax4.bar(labels, accuracies, color=colors, alpha=0.7)
+        
+        # Prepare data for grouped bar chart
+        pref_types = ['Overall', 'Seg1 Better', 'Seg2 Better', 'Equal Pref']
+        baseline_accs = [
+            dtw_vs_gt_accuracy,
+            dtw_vs_gt_accuracy,
+            dtw_vs_gt_accuracy,
+            dtw_vs_gt_accuracy
+        ]
+        augmented_accs = [
+            rm_vs_gt_accuracy,
+            rm_vs_gt_accuracy,
+            rm_vs_gt_accuracy,
+            rm_vs_gt_accuracy
+        ]
+        
+        x = np.arange(len(pref_types))
+        width = 0.35
+        
+        bars1 = ax4.bar(x - width/2, baseline_accs, width, label='DTW vs GT', alpha=0.7, color='blue')
+        bars2 = ax4.bar(x + width/2, augmented_accs, width, label='RM vs GT', alpha=0.7, color='green')
+        
         ax4.set_ylabel('Accuracy')
-        ax4.set_title('Accuracy Comparison')
-        ax4.set_ylim(0, 1)
+        ax4.set_title('Accuracy Comparison by Preference Type')
+        ax4.set_xticks(x)
+        ax4.set_xticklabels(pref_types, rotation=15)
+        ax4.legend()
+        ax4.grid(True, alpha=0.3)
+        ax4.set_ylim(0, 1.1)
         
         # Add value labels on bars
-        for bar, acc in zip(bars, accuracies):
-            ax4.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.01,
-                    f'{acc:.3f}', ha='center', va='bottom')
-        
-        ax4.grid(True, alpha=0.3)
+        for bars in [bars1, bars2]:
+            for bar in bars:
+                height = bar.get_height()
+                ax4.text(bar.get_x() + bar.get_width()/2., height + 0.01,
+                        f'{height:.3f}', ha='center', va='bottom', fontsize=8)
         
         plt.tight_layout()
         plt.savefig(output_path, dpi=150, bbox_inches='tight')
@@ -1618,6 +2025,8 @@ def compare_baseline_vs_augmented_performance(
     test_obs_act_2,
     test_labels,
     test_binary_labels,
+    test_gt_return_1,  # Ground truth returns for first segments
+    test_gt_return_2,  # Ground truth returns for second segments
     config,
     output_path=None,
     wandb_run=None
@@ -1632,6 +2041,8 @@ def compare_baseline_vs_augmented_performance(
         test_obs_act_2: Test set second segments [N, segment_size, obs+act_dim]
         test_labels: Test set preference labels [N, 2]
         test_binary_labels: Test set binary preference labels [N, 2]
+        test_gt_return_1: Ground truth returns for first segments [N]
+        test_gt_return_2: Ground truth returns for second segments [N]
         config: Configuration object
         output_path: Path to save comparison plot
         wandb_run: W&B run for logging
@@ -1657,6 +2068,15 @@ def compare_baseline_vs_augmented_performance(
         
         predictions = []
         losses = []
+        predicted_deltas = []  # Store predicted return deltas
+        
+        # Track accuracy by preference type
+        seg1_better_correct = 0
+        seg1_better_total = 0
+        seg2_better_correct = 0
+        seg2_better_total = 0
+        equal_pref_correct = 0
+        equal_pref_total = 0
         
         with torch.no_grad():
             for i in tqdm(range(len(test_obs_act_1)), desc=f"Evaluating {model_name}"):
@@ -1681,6 +2101,7 @@ def compare_baseline_vs_augmented_performance(
                     
                     # Average ensemble predictions
                     pred_probs = np.mean(ensemble_probs, axis=0)
+                    pred_delta = np.mean(ensemble_returns_1) - np.mean(ensemble_returns_2)
                     
                 else:
                     # Single model - get averaged prediction
@@ -1693,8 +2114,34 @@ def compare_baseline_vs_augmented_performance(
                     prob_1 = 1.0 / (1.0 + np.exp(-delta))
                     prob_2 = 1.0 - prob_1
                     pred_probs = [prob_1, prob_2]
+                    pred_delta = delta
                 
                 predictions.append(pred_probs)
+                predicted_deltas.append(pred_delta)
+                
+                # Convert prediction to discrete label
+                if pred_probs[0] > pred_probs[1] + 0.1:
+                    pred_label = [1, 0]
+                elif pred_probs[1] > pred_probs[0] + 0.1:
+                    pred_label = [0, 1]
+                else:
+                    pred_label = [0.5, 0.5]
+                
+                # Check accuracy by preference type
+                is_correct = np.array_equal(pred_label, true_label)
+                
+                if np.array_equal(true_label, [1, 0]):  # Segment 1 better
+                    seg1_better_total += 1
+                    if is_correct:
+                        seg1_better_correct += 1
+                elif np.array_equal(true_label, [0, 1]):  # Segment 2 better
+                    seg2_better_total += 1
+                    if is_correct:
+                        seg2_better_correct += 1
+                elif np.array_equal(true_label, [0.5, 0.5]):  # Equal preference
+                    equal_pref_total += 1
+                    if is_correct:
+                        equal_pref_correct += 1
                 
                 # Compute loss (binary cross entropy)
                 pred_tensor = torch.tensor(pred_probs, dtype=torch.float32)
@@ -1716,7 +2163,7 @@ def compare_baseline_vs_augmented_performance(
                 pred_labels.append([0.5, 0.5])
         pred_labels = np.array(pred_labels)
         
-        # Compute accuracy
+        # Compute overall accuracy
         accuracy = np.mean([
             np.array_equal(pred_labels[i], test_labels[i])
             for i in range(len(pred_labels))
@@ -1728,18 +2175,58 @@ def compare_baseline_vs_augmented_performance(
             for i in range(len(pred_labels))
         ])
         
+        # Compute accuracy by preference type
+        seg1_better_acc = seg1_better_correct / seg1_better_total if seg1_better_total > 0 else 0.0
+        seg2_better_acc = seg2_better_correct / seg2_better_total if seg2_better_total > 0 else 0.0
+        equal_pref_acc = equal_pref_correct / equal_pref_total if equal_pref_total > 0 else 0.0
+        
+        print(f"  {model_name} accuracy by preference type:")
+        print(f"    Segment 1 better: {seg1_better_acc:.3f} ({seg1_better_correct}/{seg1_better_total})")
+        print(f"    Segment 2 better: {seg2_better_acc:.3f} ({seg2_better_correct}/{seg2_better_total})")
+        print(f"    Equal preference: {equal_pref_acc:.3f} ({equal_pref_correct}/{equal_pref_total})")
+        
         return {
             'accuracy': accuracy,
             'binary_accuracy': binary_accuracy, 
             'mean_loss': np.mean(losses),
             'std_loss': np.std(losses),
             'predictions': predictions,
-            'pred_labels': pred_labels
+            'pred_labels': pred_labels,
+            'predicted_deltas': predicted_deltas,
+            'seg1_better_acc': seg1_better_acc,
+            'seg2_better_acc': seg2_better_acc,
+            'equal_pref_acc': equal_pref_acc,
+            'seg1_better_total': seg1_better_total,
+            'seg2_better_total': seg2_better_total,
+            'equal_pref_total': equal_pref_total
         }
     
     # Evaluate both models
     baseline_results = evaluate_model(baseline_reward_model, "Baseline")
     augmented_results = evaluate_model(augmented_reward_model, "Augmented")
+    
+    # Compute ground truth deltas from test set
+    print("Computing ground truth return deltas for test set...")
+    gt_deltas = test_gt_return_1 - test_gt_return_2
+    
+    gt_deltas = np.array(gt_deltas)
+    baseline_pred_deltas = np.array(baseline_results['predicted_deltas'])
+    augmented_pred_deltas = np.array(augmented_results['predicted_deltas'])
+    
+    # Compute MSE for delta predictions
+    baseline_delta_mse = np.mean((baseline_pred_deltas - gt_deltas) ** 2)
+    augmented_delta_mse = np.mean((augmented_pred_deltas - gt_deltas) ** 2)
+    
+    # Normalize MSE by variance of ground truth deltas for interpretability
+    gt_delta_var = np.var(gt_deltas)
+    if gt_delta_var > 0:
+        baseline_delta_mse_normalized = baseline_delta_mse / gt_delta_var
+        augmented_delta_mse_normalized = augmented_delta_mse / gt_delta_var
+        delta_mse_improvement = (baseline_delta_mse - augmented_delta_mse) / baseline_delta_mse * 100  # % improvement
+    else:
+        baseline_delta_mse_normalized = baseline_delta_mse
+        augmented_delta_mse_normalized = augmented_delta_mse
+        delta_mse_improvement = 0.0
     
     # Compute improvements
     accuracy_improvement = augmented_results['accuracy'] - baseline_results['accuracy']
@@ -1749,18 +2236,36 @@ def compare_baseline_vs_augmented_performance(
     # Print results
     print(f"\nTest Set Performance Comparison:")
     print(f"  Test set size: {len(test_obs_act_1)} pairs")
+    print(f"  Test set breakdown:")
+    print(f"    Segment 1 better: {baseline_results['seg1_better_total']} pairs")
+    print(f"    Segment 2 better: {baseline_results['seg2_better_total']} pairs") 
+    print(f"    Equal preference: {baseline_results['equal_pref_total']} pairs")
     print(f"  Baseline model:")
-    print(f"    Accuracy: {baseline_results['accuracy']:.4f}")
+    print(f"    Overall accuracy: {baseline_results['accuracy']:.4f}")
     print(f"    Binary accuracy: {baseline_results['binary_accuracy']:.4f}")
+    print(f"    Accuracy by preference type:")
+    print(f"      Segment 1 better: {baseline_results['seg1_better_acc']:.4f}")
+    print(f"      Segment 2 better: {baseline_results['seg2_better_acc']:.4f}")
+    print(f"      Equal preference: {baseline_results['equal_pref_acc']:.4f}")
     print(f"    Mean loss: {baseline_results['mean_loss']:.4f} ± {baseline_results['std_loss']:.4f}")
+    print(f"    Delta MSE: {baseline_delta_mse:.4f} (normalized: {baseline_delta_mse_normalized:.4f})")
     print(f"  Augmented model:")
-    print(f"    Accuracy: {augmented_results['accuracy']:.4f}")
+    print(f"    Overall accuracy: {augmented_results['accuracy']:.4f}")
     print(f"    Binary accuracy: {augmented_results['binary_accuracy']:.4f}")
+    print(f"    Accuracy by preference type:")
+    print(f"      Segment 1 better: {augmented_results['seg1_better_acc']:.4f}")
+    print(f"      Segment 2 better: {augmented_results['seg2_better_acc']:.4f}")
+    print(f"      Equal preference: {augmented_results['equal_pref_acc']:.4f}")
     print(f"    Mean loss: {augmented_results['mean_loss']:.4f} ± {augmented_results['std_loss']:.4f}")
+    print(f"    Delta MSE: {augmented_delta_mse:.4f} (normalized: {augmented_delta_mse_normalized:.4f})")
     print(f"  Improvements:")
-    print(f"    Accuracy: {accuracy_improvement:+.4f} ({accuracy_improvement/baseline_results['accuracy']*100:+.1f}%)")
+    print(f"    Overall accuracy: {accuracy_improvement:+.4f} ({accuracy_improvement/baseline_results['accuracy']*100:+.1f}%)")
     print(f"    Binary accuracy: {binary_accuracy_improvement:+.4f} ({binary_accuracy_improvement/baseline_results['binary_accuracy']*100:+.1f}%)")
+    print(f"    Seg1 better accuracy: {augmented_results['seg1_better_acc'] - baseline_results['seg1_better_acc']:+.4f}")
+    print(f"    Seg2 better accuracy: {augmented_results['seg2_better_acc'] - baseline_results['seg2_better_acc']:+.4f}")
+    print(f"    Equal pref accuracy: {augmented_results['equal_pref_acc'] - baseline_results['equal_pref_acc']:+.4f}")
     print(f"    Loss: {loss_improvement:+.4f} ({loss_improvement/baseline_results['mean_loss']*100:+.1f}%)")
+    print(f"    Delta MSE: {delta_mse_improvement:+.1f}% improvement")
     
     # Create visualization
     if output_path is not None:
@@ -1771,27 +2276,42 @@ def compare_baseline_vs_augmented_performance(
         
         # 1. Accuracy comparison bar chart
         ax1 = axes[0, 0]
-        accuracies = [baseline_results['accuracy'], augmented_results['accuracy']]
-        binary_accuracies = [baseline_results['binary_accuracy'], augmented_results['binary_accuracy']]
-        x = np.arange(2)
+        
+        # Prepare data for grouped bar chart
+        pref_types = ['Overall', 'Seg1 Better', 'Seg2 Better', 'Equal Pref']
+        baseline_accs = [
+            baseline_results['accuracy'],
+            baseline_results['seg1_better_acc'],
+            baseline_results['seg2_better_acc'], 
+            baseline_results['equal_pref_acc']
+        ]
+        augmented_accs = [
+            augmented_results['accuracy'],
+            augmented_results['seg1_better_acc'],
+            augmented_results['seg2_better_acc'],
+            augmented_results['equal_pref_acc']
+        ]
+        
+        x = np.arange(len(pref_types))
         width = 0.35
         
-        bars1 = ax1.bar(x - width/2, accuracies, width, label='Accuracy', alpha=0.7)
-        bars2 = ax1.bar(x + width/2, binary_accuracies, width, label='Binary Accuracy', alpha=0.7)
+        bars1 = ax1.bar(x - width/2, baseline_accs, width, label='Baseline', alpha=0.7, color='orange')
+        bars2 = ax1.bar(x + width/2, augmented_accs, width, label='Augmented', alpha=0.7, color='green')
         
         ax1.set_ylabel('Accuracy')
-        ax1.set_title('Accuracy Comparison')
+        ax1.set_title('Accuracy Comparison by Preference Type')
         ax1.set_xticks(x)
-        ax1.set_xticklabels(['Baseline', 'Augmented'])
+        ax1.set_xticklabels(pref_types, rotation=15)
         ax1.legend()
         ax1.grid(True, alpha=0.3)
+        ax1.set_ylim(0, 1.1)
         
         # Add value labels on bars
         for bars in [bars1, bars2]:
             for bar in bars:
                 height = bar.get_height()
                 ax1.text(bar.get_x() + bar.get_width()/2., height + 0.01,
-                        f'{height:.3f}', ha='center', va='bottom')
+                        f'{height:.3f}', ha='center', va='bottom', fontsize=8)
         
         # 2. Loss comparison
         ax2 = axes[0, 1] 
@@ -1828,22 +2348,28 @@ def compare_baseline_vs_augmented_performance(
         ax3.legend()
         ax3.grid(True, alpha=0.3)
         
-        # 4. Scatter plot: baseline vs augmented predictions
+        # 4. Delta MSE comparison
         ax4 = axes[1, 1]
-        baseline_conf = np.abs(baseline_results['predictions'][:, 0] - 0.5) * 2  # Confidence in [0,1]
-        augmented_conf = np.abs(augmented_results['predictions'][:, 0] - 0.5) * 2
         
-        ax4.scatter(baseline_conf, augmented_conf, alpha=0.6, s=20)
-        ax4.plot([0, 1], [0, 1], 'r--', alpha=0.8)  # y=x line
-        ax4.set_xlabel('Baseline Confidence')
-        ax4.set_ylabel('Augmented Confidence')
-        ax4.set_title('Prediction Confidence Correlation')
+        delta_mses = [baseline_delta_mse_normalized, augmented_delta_mse_normalized]
+        model_names = ['Baseline', 'Augmented']
+        colors = ['orange', 'green']
+        
+        bars = ax4.bar(model_names, delta_mses, color=colors, alpha=0.7)
+        ax4.set_ylabel('Normalized Delta MSE')
+        ax4.set_title('Delta Prediction MSE (Lower is Better)')
         ax4.grid(True, alpha=0.3)
         
-        # Add correlation coefficient
-        correlation = np.corrcoef(baseline_conf, augmented_conf)[0, 1]
-        ax4.text(0.05, 0.95, f'r = {correlation:.3f}', transform=ax4.transAxes,
-                bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+        # Add value labels on bars
+        for bar, mse in zip(bars, delta_mses):
+            ax4.text(bar.get_x() + bar.get_width()/2., bar.get_height() + 0.02,
+                    f'{mse:.3f}', ha='center', va='bottom')
+        
+        # Add improvement percentage as text
+        if delta_mse_improvement != 0:
+            ax4.text(0.5, 0.95, f'{delta_mse_improvement:+.1f}% improvement', 
+                    transform=ax4.transAxes, ha='center', va='top',
+                    bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
         
         plt.tight_layout()
         plt.savefig(output_path, dpi=150, bbox_inches='tight')
@@ -1860,11 +2386,29 @@ def compare_baseline_vs_augmented_performance(
             "comparison/baseline_binary_accuracy": baseline_results['binary_accuracy'],
             "comparison/augmented_binary_accuracy": augmented_results['binary_accuracy'], 
             "comparison/binary_accuracy_improvement": binary_accuracy_improvement,
+            "comparison/baseline_seg1_better_acc": baseline_results['seg1_better_acc'],
+            "comparison/augmented_seg1_better_acc": augmented_results['seg1_better_acc'],
+            "comparison/seg1_better_acc_improvement": augmented_results['seg1_better_acc'] - baseline_results['seg1_better_acc'],
+            "comparison/baseline_seg2_better_acc": baseline_results['seg2_better_acc'],
+            "comparison/augmented_seg2_better_acc": augmented_results['seg2_better_acc'],
+            "comparison/seg2_better_acc_improvement": augmented_results['seg2_better_acc'] - baseline_results['seg2_better_acc'],
+            "comparison/baseline_equal_pref_acc": baseline_results['equal_pref_acc'],
+            "comparison/augmented_equal_pref_acc": augmented_results['equal_pref_acc'],
+            "comparison/equal_pref_acc_improvement": augmented_results['equal_pref_acc'] - baseline_results['equal_pref_acc'],
+            "comparison/test_set_breakdown/seg1_better_total": baseline_results['seg1_better_total'],
+            "comparison/test_set_breakdown/seg2_better_total": baseline_results['seg2_better_total'],
+            "comparison/test_set_breakdown/equal_pref_total": baseline_results['equal_pref_total'],
             "comparison/baseline_loss": baseline_results['mean_loss'],
             "comparison/augmented_loss": augmented_results['mean_loss'],
             "comparison/loss_improvement": loss_improvement,
             "comparison/baseline_loss_std": baseline_results['std_loss'],
             "comparison/augmented_loss_std": augmented_results['std_loss'],
+            "comparison/baseline_delta_mse": baseline_delta_mse,
+            "comparison/augmented_delta_mse": augmented_delta_mse,
+            "comparison/baseline_delta_mse_normalized": baseline_delta_mse_normalized,
+            "comparison/augmented_delta_mse_normalized": augmented_delta_mse_normalized,
+            "comparison/delta_mse_improvement": delta_mse_improvement,
+            "comparison/gt_delta_variance": gt_delta_var,
         })
     
     return {
@@ -1872,8 +2416,22 @@ def compare_baseline_vs_augmented_performance(
         "augmented_results": augmented_results,
         "accuracy_improvement": accuracy_improvement,
         "binary_accuracy_improvement": binary_accuracy_improvement,
+        "seg1_better_acc_improvement": augmented_results['seg1_better_acc'] - baseline_results['seg1_better_acc'],
+        "seg2_better_acc_improvement": augmented_results['seg2_better_acc'] - baseline_results['seg2_better_acc'],
+        "equal_pref_acc_improvement": augmented_results['equal_pref_acc'] - baseline_results['equal_pref_acc'],
         "loss_improvement": loss_improvement,
-        "test_set_size": len(test_obs_act_1)
+        "baseline_delta_mse": baseline_delta_mse,
+        "augmented_delta_mse": augmented_delta_mse,
+        "baseline_delta_mse_normalized": baseline_delta_mse_normalized,
+        "augmented_delta_mse_normalized": augmented_delta_mse_normalized,
+        "delta_mse_improvement": delta_mse_improvement,
+        "gt_delta_variance": gt_delta_var,
+        "test_set_size": len(test_obs_act_1),
+        "test_set_breakdown": {
+            "seg1_better_total": baseline_results['seg1_better_total'],
+            "seg2_better_total": baseline_results['seg2_better_total'],
+            "equal_pref_total": baseline_results['equal_pref_total']
+        }
     }
 
 
@@ -2042,4 +2600,216 @@ def plot_baseline_vs_augmented_scatter_analysis(
         "baseline_metrics": baseline_metrics,
         "augmented_metrics": augmented_metrics,
         "n_samples": n_samples
+    }
+
+
+def plot_individual_test_example_deltas(
+    baseline_reward_model,
+    augmented_reward_model,
+    test_obs_act_1,
+    test_obs_act_2,
+    test_gt_return_1,
+    test_gt_return_2,
+    output_file=None,
+    max_examples=100,
+    wandb_run=None,
+    random_seed=42
+):
+    """
+    Create a dedicated chart showing individual test example deltas for baseline, augmented, and ground truth.
+    
+    Args:
+        baseline_reward_model: Baseline reward model
+        augmented_reward_model: Augmented reward model
+        test_obs_act_1: Test set first segments [N, segment_size, obs+act_dim]
+        test_obs_act_2: Test set second segments [N, segment_size, obs+act_dim]
+        test_gt_return_1: Ground truth returns for first segments [N]
+        test_gt_return_2: Ground truth returns for second segments [N]
+        output_file: Path to save plot
+        max_examples: Maximum number of examples to show
+        wandb_run: W&B run for logging
+        random_seed: Random seed for sampling
+        
+    Returns:
+        dict: Analysis metrics
+    """
+    print(f"Creating individual test example deltas chart...")
+    
+    # Set random seed for reproducible sampling
+    np.random.seed(random_seed)
+    
+    # Convert data to tensors if needed
+    if not isinstance(test_obs_act_1, torch.Tensor):
+        test_obs_act_1 = torch.tensor(test_obs_act_1, dtype=torch.float32)
+    if not isinstance(test_obs_act_2, torch.Tensor):
+        test_obs_act_2 = torch.tensor(test_obs_act_2, dtype=torch.float32)
+    
+    # Compute ground truth deltas
+    gt_deltas = test_gt_return_1 - test_gt_return_2
+    
+    # Get predictions from both models
+    print("  Computing baseline predictions...")
+    baseline_pred_deltas = []
+    with torch.no_grad():
+        for i in tqdm(range(len(test_obs_act_1)), desc="Baseline predictions"):
+            seg1 = test_obs_act_1[i]
+            seg2 = test_obs_act_2[i]
+            pred_ret_1, pred_ret_2 = get_reward_model_predictions(baseline_reward_model, seg1, seg2)
+            baseline_pred_deltas.append(pred_ret_1 - pred_ret_2)
+    baseline_pred_deltas = np.array(baseline_pred_deltas)
+    
+    print("  Computing augmented predictions...")
+    augmented_pred_deltas = []
+    with torch.no_grad():
+        for i in tqdm(range(len(test_obs_act_1)), desc="Augmented predictions"):
+            seg1 = test_obs_act_1[i]
+            seg2 = test_obs_act_2[i]
+            pred_ret_1, pred_ret_2 = get_reward_model_predictions(augmented_reward_model, seg1, seg2)
+            augmented_pred_deltas.append(pred_ret_1 - pred_ret_2)
+    augmented_pred_deltas = np.array(augmented_pred_deltas)
+    
+    # Sample examples to display (sorted by GT delta magnitude for interesting cases)
+    n_examples = min(max_examples, len(gt_deltas))
+    sorted_indices = np.argsort(np.abs(gt_deltas))[-n_examples:]  # Take examples with largest |GT delta|
+    
+    sample_gt = gt_deltas[sorted_indices]
+    sample_baseline = baseline_pred_deltas[sorted_indices]
+    sample_augmented = augmented_pred_deltas[sorted_indices]
+    
+    # Normalize all predictions and ground truth to standardized scale (z-scores)
+    print("  Normalizing all deltas to standardized scale (mean=0, std=1)...")
+    
+    # Compute statistics
+    gt_mean = np.mean(gt_deltas)
+    gt_std = np.std(gt_deltas)
+    
+    baseline_mean = np.mean(baseline_pred_deltas)
+    baseline_std = np.std(baseline_pred_deltas)
+    
+    augmented_mean = np.mean(augmented_pred_deltas)
+    augmented_std = np.std(augmented_pred_deltas)
+    
+    print(f"    Original scales:")
+    print(f"      GT: mean={gt_mean:.3f}, std={gt_std:.3f}")
+    print(f"      Baseline: mean={baseline_mean:.3f}, std={baseline_std:.3f}")
+    print(f"      Augmented: mean={augmented_mean:.3f}, std={augmented_std:.3f}")
+    
+    # Normalize all to z-scores (mean=0, std=1)
+    if gt_std > 0:
+        gt_deltas_normalized = (gt_deltas - gt_mean) / gt_std
+        sample_gt_normalized = (sample_gt - gt_mean) / gt_std
+    else:
+        gt_deltas_normalized = gt_deltas
+        sample_gt_normalized = sample_gt
+    
+    if baseline_std > 0:
+        baseline_pred_deltas_normalized = (baseline_pred_deltas - baseline_mean) / baseline_std
+        sample_baseline_normalized = (sample_baseline - baseline_mean) / baseline_std
+    else:
+        baseline_pred_deltas_normalized = baseline_pred_deltas
+        sample_baseline_normalized = sample_baseline
+        
+    if augmented_std > 0:
+        augmented_pred_deltas_normalized = (augmented_pred_deltas - augmented_mean) / augmented_std
+        sample_augmented_normalized = (sample_augmented - augmented_mean) / augmented_std
+    else:
+        augmented_pred_deltas_normalized = augmented_pred_deltas
+        sample_augmented_normalized = sample_augmented
+    
+    print(f"    After z-score normalization:")
+    print(f"      GT: mean={np.mean(gt_deltas_normalized):.3f}, std={np.std(gt_deltas_normalized):.3f}")
+    print(f"      Baseline: mean={np.mean(baseline_pred_deltas_normalized):.3f}, std={np.std(baseline_pred_deltas_normalized):.3f}")
+    print(f"      Augmented: mean={np.mean(augmented_pred_deltas_normalized):.3f}, std={np.std(augmented_pred_deltas_normalized):.3f}")
+    
+    # Create visualization
+    if output_file is not None:
+        import matplotlib.pyplot as plt
+        
+        fig, ax = plt.subplots(1, 1, figsize=(max(12, n_examples * 0.3), 8))
+        fig.suptitle(f'Individual Test Example Deltas - All Normalized to Z-Scores (Top {n_examples} by |GT Delta|)', fontsize=16)
+        
+        x = np.arange(n_examples)
+        width = 0.25
+        
+        bars1 = ax.bar(x - width, sample_baseline_normalized, width, label='Baseline Pred (Normalized)', alpha=0.8, color='orange')
+        bars2 = ax.bar(x, sample_augmented_normalized, width, label='Augmented Pred (Normalized)', alpha=0.8, color='green')
+        bars3 = ax.bar(x + width, sample_gt_normalized, width, label='Ground Truth (Normalized)', alpha=0.8, color='blue')
+        
+        ax.set_xlabel('Test Example (sorted by |GT Delta|)')
+        ax.set_ylabel('Normalized Return Delta (Z-Score)')
+        ax.set_title(f'Baseline vs Augmented vs Ground Truth Delta Predictions (All Normalized to Z-Scores)')
+        ax.legend(loc='upper left')
+        ax.grid(True, alpha=0.3)
+        
+        # Set x-axis labels (show every nth example for readability)
+        step = max(1, n_examples // 20)  # Show at most 20 labels
+        ax.set_xticks(x[::step])
+        ax.set_xticklabels([f'{i}' for i in range(0, n_examples, step)], rotation=45)
+        
+        # Add horizontal line at y=0 for reference
+        ax.axhline(y=0, color='black', linestyle='--', alpha=0.5, linewidth=1)
+        
+        # Compute and display metrics
+        baseline_mse = np.mean((sample_baseline_normalized - sample_gt_normalized) ** 2)
+        augmented_mse = np.mean((sample_augmented_normalized - sample_gt_normalized) ** 2)
+        baseline_mae = np.mean(np.abs(sample_baseline_normalized - sample_gt_normalized))
+        augmented_mae = np.mean(np.abs(sample_augmented_normalized - sample_gt_normalized))
+        baseline_corr = np.corrcoef(sample_baseline_normalized, sample_gt_normalized)[0, 1] if len(set(sample_gt_normalized)) > 1 else 0.0
+        augmented_corr = np.corrcoef(sample_augmented_normalized, sample_gt_normalized)[0, 1] if len(set(sample_gt_normalized)) > 1 else 0.0
+        
+        # Add metrics text box
+        metrics_text = f'Metrics (Top {n_examples} examples, all normalized to z-scores):\n' \
+                      f'Baseline:  MSE={baseline_mse:.3f}, MAE={baseline_mae:.3f}, r={baseline_corr:.3f}\n' \
+                      f'Augmented: MSE={augmented_mse:.3f}, MAE={augmented_mae:.3f}, r={augmented_corr:.3f}\n' \
+                      f'Improvement: MSE={((baseline_mse-augmented_mse)/baseline_mse*100):+.1f}%, ' \
+                      f'MAE={((baseline_mae-augmented_mae)/baseline_mae*100):+.1f}%, ' \
+                      f'r={augmented_corr-baseline_corr:+.3f}\n\n' \
+                      f'Normalization: All values converted to z-scores (mean=0, std=1)'
+        
+        ax.text(0.02, 0.98, metrics_text, transform=ax.transAxes, fontsize=10,
+                verticalalignment='top', bbox=dict(boxstyle='round', facecolor='white', alpha=0.9))
+        
+        plt.tight_layout()
+        plt.savefig(output_file, dpi=150, bbox_inches='tight')
+        plt.close()
+        
+        print(f"Individual test example deltas chart saved to: {output_file}")
+    
+    # Compute full dataset metrics
+    full_baseline_mse = np.mean((baseline_pred_deltas_normalized - gt_deltas_normalized) ** 2)
+    full_augmented_mse = np.mean((augmented_pred_deltas_normalized - gt_deltas_normalized) ** 2) 
+    full_baseline_mae = np.mean(np.abs(baseline_pred_deltas_normalized - gt_deltas_normalized))
+    full_augmented_mae = np.mean(np.abs(augmented_pred_deltas_normalized - gt_deltas_normalized))
+    full_baseline_corr = np.corrcoef(baseline_pred_deltas_normalized, gt_deltas_normalized)[0, 1] if len(set(gt_deltas_normalized)) > 1 else 0.0
+    full_augmented_corr = np.corrcoef(augmented_pred_deltas_normalized, gt_deltas_normalized)[0, 1] if len(set(gt_deltas_normalized)) > 1 else 0.0
+    
+    print(f"  Full dataset metrics:")
+    print(f"    Baseline:  MSE={full_baseline_mse:.3f}, MAE={full_baseline_mae:.3f}, r={full_baseline_corr:.3f}")
+    print(f"    Augmented: MSE={full_augmented_mse:.3f}, MAE={full_augmented_mae:.3f}, r={full_augmented_corr:.3f}")
+    
+    # Log to wandb if available
+    if wandb_run is not None:
+        wandb_run.log({
+            "individual_deltas/full_baseline_mse": full_baseline_mse,
+            "individual_deltas/full_augmented_mse": full_augmented_mse,
+            "individual_deltas/full_baseline_mae": full_baseline_mae,
+            "individual_deltas/full_augmented_mae": full_augmented_mae,
+            "individual_deltas/full_baseline_corr": full_baseline_corr,
+            "individual_deltas/full_augmented_corr": full_augmented_corr,
+            "individual_deltas/n_examples_shown": n_examples,
+            "individual_deltas/n_total_examples": len(gt_deltas_normalized),
+            "individual_deltas/mse_improvement": (full_baseline_mse - full_augmented_mse) / full_baseline_mse * 100,
+            "individual_deltas/mae_improvement": (full_baseline_mae - full_augmented_mae) / full_baseline_mae * 100,
+            "individual_deltas/corr_improvement": full_augmented_corr - full_baseline_corr
+        })
+    
+    return {
+        "baseline_mse": full_baseline_mse,
+        "augmented_mse": full_augmented_mse,
+        "baseline_mae": full_baseline_mae,
+        "augmented_mae": full_augmented_mae,
+        "baseline_corr": full_baseline_corr,
+        "augmented_corr": full_augmented_corr,
+        "n_examples_shown": n_examples,
+        "n_total_examples": len(gt_deltas_normalized)
     }
