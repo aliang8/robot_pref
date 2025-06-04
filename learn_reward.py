@@ -50,7 +50,7 @@ class TrainConfig:
     dtw_subsample_size: int = 10000  # Number of segments to sample for DTW matrix
     dtw_augmentation_size: int = 2000  # Number of augmentation pairs to create from DTW matrix
     dtw_k_augment: int = 5  # Number of similar segments to find for each original preference pair
-    dtw_exclude_equal_pref: bool = True  # If True: only augment non-equal preference pairs (exclude [0.5, 0.5])
+    dtw_preference_ratios: List[float] = None  # Ratios for [seg1_better, seg2_better, equal_pref] sampling. None = use all available
     acquisition_threshold_low: float = 0.25  # 25th percentile for acquisition filtering
     acquisition_threshold_high: float = 0.75  # 75th percentile for acquisition filtering
     acquisition_method: str = "entropy"  # "entropy", "disagreement", "combined", "variance"
@@ -66,7 +66,7 @@ class TrainConfig:
     ensemble_num: int = 3
     ensemble_method: str = "mean"
     # Class weighting for preference balancing
-    use_class_weights: bool = True  # Apply inverse frequency weighting to balance preference types
+    use_class_weights: bool = False  # Apply inverse frequency weighting to balance preference types
     # Wandb logging
     project: str = "Reward Learning"
     group: str = "Reward learning"
@@ -76,6 +76,17 @@ class TrainConfig:
     custom_checkpoint_params: Optional[List[str]] = None  # e.g., ["env", "data_quality", "dtw_settings"]
 
     def __post_init__(self):
+        # Set default equal ratios for DTW preference sampling if not specified
+        if self.dtw_preference_ratios is None:
+            self.dtw_preference_ratios = [0.0, 1.0, 0.0]  # [seg1_better, seg2_better, equal_pref]
+            
+        # Validate ratios sum to 1.0
+        if self.dtw_preference_ratios is not None:
+            ratio_sum = sum(self.dtw_preference_ratios)
+            if abs(ratio_sum - 1.0) > 1e-6:
+                print(f"Warning: DTW preference ratios sum to {ratio_sum:.6f}, normalizing to sum to 1.0")
+                self.dtw_preference_ratios = [r / ratio_sum for r in self.dtw_preference_ratios]
+        
         # Set up cache paths if checkpoints_path is available
         if self.checkpoints_path is not None:
             if self.segment_indices_path is None:
@@ -98,9 +109,9 @@ class TrainConfig:
             "dtw_mode": "before" if self.dtw_augment_before_training else "after",
             "dtw_subsample": f"{self.dtw_subsample_size//1000}k",
             "dtw_augmentation": self.dtw_augmentation_size,
-            "dtw_exclude_equal": int(self.dtw_exclude_equal_pref),
+            "dtw_ratios": f"{self.dtw_preference_ratios[0]:.2f}-{self.dtw_preference_ratios[1]:.2f}-{self.dtw_preference_ratios[2]:.2f}",
             "acquisition_thresholds": f"{self.acquisition_threshold_low}-{self.acquisition_threshold_high}",
-            "dtw_settings": f"{int(self.use_dtw_augmentations)}-{int(self.dtw_augment_before_training)}-{self.dtw_subsample_size//1000}k-{self.dtw_augmentation_size}-E{int(self.dtw_exclude_equal_pref)}-A{self.acquisition_threshold_low}-{self.acquisition_threshold_high}"
+            "dtw_settings": f"{int(self.use_dtw_augmentations)}-{int(self.dtw_augment_before_training)}-{self.dtw_subsample_size//1000}k-{self.dtw_augmentation_size}-R{self.dtw_preference_ratios[0]:.2f}-{self.dtw_preference_ratios[1]:.2f}-{self.dtw_preference_ratios[2]:.2f}-A{self.acquisition_threshold_low}-{self.acquisition_threshold_high}"
         }
         
         # Use custom parameters if specified, otherwise use default structure
@@ -134,7 +145,7 @@ class TrainConfig:
                 ["n", self.noise],
                 ["th", self.threshold],
                 # DTW augmentation settings (only if enabled)
-                ["dtw", f"{int(self.use_dtw_augmentations)}-{int(self.dtw_augment_before_training)}-{self.dtw_subsample_size//1000}k-{self.dtw_augmentation_size}-E{int(self.dtw_exclude_equal_pref)}-A{self.acquisition_threshold_low}-{self.acquisition_threshold_high}"] if self.use_dtw_augmentations else None,
+                ["dtw", f"{int(self.use_dtw_augmentations)}-{int(self.dtw_augment_before_training)}-{self.dtw_subsample_size//1000}k-{self.dtw_augmentation_size}-R{self.dtw_preference_ratios[0]:.2f}-{self.dtw_preference_ratios[1]:.2f}-{self.dtw_preference_ratios[2]:.2f}-A{self.acquisition_threshold_low}-{self.acquisition_threshold_high}"] if self.use_dtw_augmentations else None,
                 # Seed (always last)
                 ["s", self.seed]
             ]

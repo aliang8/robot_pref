@@ -345,7 +345,7 @@ def collect_dtw_augmentations(dataset, traj_total, config, original_pairs, origi
     Args:
         dataset: The dataset containing observations, actions, rewards
         traj_total: Total number of trajectories 
-        config: Configuration object
+        config: Configuration object (uses dtw_preference_ratios to control sampling ratios by preference type)
         original_pairs: List of tuples (idx_st_1, idx_st_2) representing original segment pairs
         original_preferences: List of preference labels [0, 1], [1, 0], or [0.5, 0.5] for each pair
         use_relative_eef: Whether to use relative EEF positions for DTW
@@ -356,34 +356,78 @@ def collect_dtw_augmentations(dataset, traj_total, config, original_pairs, origi
     print(f"Collecting DTW augmentations using ground truth preference propagation")
     print(f"Input: {len(original_pairs)} original preference pairs")
     
-    # Filter out equal preference pairs if requested
+    # Separate pairs by preference type
+    seg1_better_pairs = []
+    seg2_better_pairs = []
+    equal_pref_pairs = []
+    
+    for pair, pref in zip(original_pairs, original_preferences):
+        if np.array_equal(pref, [1, 0]):  # Segment 1 better
+            seg1_better_pairs.append((pair, pref))
+        elif np.array_equal(pref, [0, 1]):  # Segment 2 better
+            seg2_better_pairs.append((pair, pref))
+        elif np.array_equal(pref, [0.5, 0.5]):  # Equal preference
+            equal_pref_pairs.append((pair, pref))
+    
+    print(f"Preference type breakdown:")
+    print(f"  Segment 1 better: {len(seg1_better_pairs)} pairs")
+    print(f"  Segment 2 better: {len(seg2_better_pairs)} pairs")
+    print(f"  Equal preference: {len(equal_pref_pairs)} pairs")
+    
+    # Apply ratio-based sampling to balance preference types
+    ratios = getattr(config, 'dtw_preference_ratios', [1.0/3.0, 1.0/3.0, 1.0/3.0])
+    print(f"Using DTW preference ratios: [seg1_better: {ratios[0]:.3f}, seg2_better: {ratios[1]:.3f}, equal_pref: {ratios[2]:.3f}]")
+    
+    # Calculate target numbers for each preference type
+    # Use the minimum available count to avoid oversampling
+    available_counts = [len(seg1_better_pairs), len(seg2_better_pairs), len(equal_pref_pairs)]
+    max_total_pairs = min(sum(available_counts), config.dtw_augmentation_size // (2 * getattr(config, 'dtw_k_augment', 5)))
+    
+    target_seg1_better = int(max_total_pairs * ratios[0])
+    target_seg2_better = int(max_total_pairs * ratios[1])  
+    target_equal_pref = int(max_total_pairs * ratios[2])
+    
+    # Adjust targets if we don't have enough pairs of a certain type
+    target_seg1_better = min(target_seg1_better, len(seg1_better_pairs))
+    target_seg2_better = min(target_seg2_better, len(seg2_better_pairs))
+    target_equal_pref = min(target_equal_pref, len(equal_pref_pairs))
+    
+    print(f"Target sampling counts:")
+    print(f"  Segment 1 better: {target_seg1_better}/{len(seg1_better_pairs)}")
+    print(f"  Segment 2 better: {target_seg2_better}/{len(seg2_better_pairs)}")
+    print(f"  Equal preference: {target_equal_pref}/{len(equal_pref_pairs)}")
+    
+    # Sample from each preference type
     filtered_pairs = []
     filtered_preferences = []
     
-    if getattr(config, 'dtw_exclude_equal_pref', True):
-        print("Filtering out equal preference pairs from DTW augmentation...")
-        equal_pref_count = 0
-        for pair, pref in zip(original_pairs, original_preferences):
-            if not np.array_equal(pref, [0.5, 0.5]):  # Keep non-equal preferences
-                filtered_pairs.append(pair)
-                filtered_preferences.append(pref)
-            else:
-                equal_pref_count += 1
-        
-        print(f"Excluded {equal_pref_count} equal preference pairs from DTW augmentation")
-        print(f"Using {len(filtered_pairs)} non-equal preference pairs for DTW augmentation")
-        
-        # Use filtered pairs
-        pairs_for_dtw = filtered_pairs
-        preferences_for_dtw = filtered_preferences
-    else:
-        print("Including all preference pairs (including equal preferences) in DTW augmentation")
-        pairs_for_dtw = original_pairs
-        preferences_for_dtw = original_preferences
+    if target_seg1_better > 0:
+        sampled_seg1 = random.sample(seg1_better_pairs, target_seg1_better)
+        for pair, pref in sampled_seg1:
+            filtered_pairs.append(pair)
+            filtered_preferences.append(pref)
     
-    if len(pairs_for_dtw) == 0:
-        print("Warning: No pairs available for DTW augmentation after filtering")
+    if target_seg2_better > 0:
+        sampled_seg2 = random.sample(seg2_better_pairs, target_seg2_better)
+        for pair, pref in sampled_seg2:
+            filtered_pairs.append(pair)
+            filtered_preferences.append(pref)
+    
+    if target_equal_pref > 0:
+        sampled_equal = random.sample(equal_pref_pairs, target_equal_pref)
+        for pair, pref in sampled_equal:
+            filtered_pairs.append(pair)
+            filtered_preferences.append(pref)
+    
+    print(f"After ratio-based sampling: {len(filtered_pairs)} pairs selected for DTW augmentation")
+    
+    if len(filtered_pairs) == 0:
+        print("Warning: No pairs available for DTW augmentation after ratio-based sampling")
         return [], {}, []
+    
+    # Use filtered pairs for DTW augmentation
+    pairs_for_dtw = filtered_pairs
+    preferences_for_dtw = filtered_preferences
     
     # Step 1: Get unique segments from filtered preference pairs
     original_segments_set = set()
@@ -550,13 +594,9 @@ def collect_dtw_augmentations(dataset, traj_total, config, original_pairs, origi
     
     print(f"Completed DTW augmentation collection:")
     print(f"  - Started with {len(original_pairs)} original preference pairs")
-    if getattr(config, 'dtw_exclude_equal_pref', True):
-        excluded_count = len(original_pairs) - len(pairs_for_dtw)
-        print(f"  - Excluded {excluded_count} equal preference pairs")
-        print(f"  - Used {len(pairs_for_dtw)} non-equal preference pairs for DTW")
-    else:
-        print(f"  - Used all {len(pairs_for_dtw)} preference pairs for DTW")
-    print(f"  - Selected {len(selected_original_indices)} pairs for augmentation")
+    print(f"  - Used ratio-based sampling with ratios {ratios}")
+    print(f"  - Selected {len(pairs_for_dtw)} balanced preference pairs for DTW")
+    print(f"  - Final selection: {len(selected_original_indices)} pairs for augmentation")
     print(f"  - {len(original_segments)} unique original segments")
     print(f"  - Sampled {len(candidate_segments)} candidate segments")
     print(f"  - Created {len(augmented_multiple_ranked_list)} DTW-augmented preference comparisons")

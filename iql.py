@@ -81,6 +81,19 @@ class TrainConfig:
     model_type: str = "BT"
     noise: float = 0.0
     human: bool = False
+    use_relative_eef: bool = False
+    # DTW augmentations
+    use_dtw_augmentations: bool = False
+    dtw_augment_before_training: bool = False  # If True: augment first then train, If False: train then augment
+    dtw_subsample_size: int = 10000  # Number of segments to sample for DTW matrix
+    dtw_augmentation_size: int = 2000  # Number of augmentation pairs to create from DTW matrix
+    dtw_k_augment: int = 5  # Number of similar segments to find for each original preference pair
+    dtw_preference_ratios: List[float] = None  # Ratios for [seg1_better, seg2_better, equal_pref] sampling. None = use all available
+    acquisition_threshold_low: float = 0.25  # 25th percentile for acquisition filtering
+    acquisition_threshold_high: float = 0.75  # 75th percentile for acquisition filtering
+    acquisition_method: str = "entropy"  # "entropy", "disagreement", "combined", "variance"
+    # Class weighting for preference balancing
+    use_class_weights: bool = False  # Apply inverse frequency weighting to balance preference types
     # Wandb logging
     project: str = "robot_pref"
     entity: str = "clvr"
@@ -88,12 +101,74 @@ class TrainConfig:
     name: str = "IQL"
 
     def __post_init__(self):
+        # Set default equal ratios for DTW preference sampling if not specified
+        if self.dtw_preference_ratios is None:
+            self.dtw_preference_ratios = [0.0, 1.0, 0.0]  # [seg1_better, seg2_better, equal_pref]
+        
+        # Validate ratios sum to 1.0
+        if self.dtw_preference_ratios is not None:
+            ratio_sum = sum(self.dtw_preference_ratios)
+            if abs(ratio_sum - 1.0) > 1e-6:
+                print(f"Warning: DTW preference ratios sum to {ratio_sum:.6f}, normalizing to sum to 1.0")
+                self.dtw_preference_ratios = [r / ratio_sum for r in self.dtw_preference_ratios]
+        
         if self.use_reward_model:
-            self.group = f"{self.env}_data_{self.data_quality}_fn_{self.feedback_num}_qb_{self.q_budget}_ft_{self.feedback_type}_m_{self.model_type}_n_{self.noise}_e_{self.epochs}_trivial_{self.trivial_reward}"
-            checkpoint_name = f"{self.name}/{self.env}/data_{self.data_quality}/fn_{self.feedback_num}/qb_{self.q_budget}/ft_{self.feedback_type}/m_{self.model_type}/n_{self.noise}/e_{self.epochs}/seed_{self.seed}"
+            # Build comprehensive group and checkpoint names including all new parameters
+            # Create shorter group name to stay under 128 char limit
+            group_parts = [
+                f"env_{self.env.replace('metaworld_', 'mw_')}",  # Shorten metaworld prefix
+                f"d{self.data_quality}",  # Shorter data quality
+                f"fn{self.feedback_num}",  # Shorter feedback num
+                f"qb{self.q_budget}",  # Shorter q budget
+                f"{self.feedback_type}",  # Remove ft_ prefix
+                f"{self.model_type}",  # Remove m_ prefix
+                f"n{self.noise}",  # Shorter noise
+                f"e{self.epochs}",  # Shorter epochs
+                f"th{self.threshold}",  # Shorter threshold
+                f"tr{self.trivial_reward}",  # Shorter trivial reward
+                f"cw{int(self.use_class_weights)}"  # Shorter class weights
+            ]
+            
+            # Add DTW components if enabled (much shorter version)
+            if self.use_dtw_augmentations:
+                dtw_mode = "B" if self.dtw_augment_before_training else "A"  # Before/After
+                dtw_component = f"dtw{int(self.use_dtw_augmentations)}{dtw_mode}{self.dtw_subsample_size//1000}k{self.dtw_augmentation_size}"
+                group_parts.append(dtw_component)
+            
+            self.group = "_".join(group_parts)
+            
+            # Build checkpoint path components to match learn_reward.py exactly
+            checkpoint_components = [
+                f"{self.name}",
+                f"{self.env}",
+                f"data_{self.data_quality}",
+                f"fn_{self.feedback_num}",
+                f"qb_{self.q_budget}",
+                f"ft_{self.feedback_type}",
+                f"m_{self.model_type}",
+                f"n_{self.noise}",
+                f"e_{self.epochs}",
+                f"th_{self.threshold}"
+            ]
+            
+            # Add DTW components if enabled (match learn_reward.py format)
+            if self.use_dtw_augmentations:
+                dtw_mode = "before" if self.dtw_augment_before_training else "after"
+                checkpoint_components.extend([
+                    f"dtw_{dtw_mode}",
+                    f"sub_{self.dtw_subsample_size//1000}k",
+                    f"aug_{self.dtw_augmentation_size}"
+                ])
+            
+            # Use same seed format as learn_reward.py
+            checkpoint_components.append(f"s_{self.seed}")
+            checkpoint_name = "/".join(checkpoint_components)
+            print(f"Checkpoint name: {checkpoint_name}")
+            print(f"Group name length: {len(self.group)} chars: {self.group}")
         else:
             self.group = f"IQL/{self.env}_quality_{self.data_quality}_trivial_{self.trivial_reward}"
             checkpoint_name = f"{self.name}/{self.env}/quality_{self.data_quality}_trivial_{self.trivial_reward}/seed_{self.seed}_{str(uuid.uuid4())[:8]}"
+        
         if self.checkpoints_path is not None:
             self.checkpoints_path = os.path.join(self.checkpoints_path, checkpoint_name)
         self.name = f"seed_{self.seed}_{str(uuid.uuid4())[:8]}"
@@ -651,18 +726,39 @@ def train(config: TrainConfig):
     dimension = dataset["observations"].shape[1] + dataset["actions"].shape[1]
     if config.use_reward_model:
         model = reward_model.RewardModel(config, None, None, None, dimension)
+        
+        # Use the same checkpoint path structure as learn_reward.py
         base_path = os.getcwd() + "/logs/Reward"
-        path = os.path.join(base_path, config.env, "data_" + str(config.data_quality))
-        path = os.path.join(
-            path,
-            "fn_" + str(config.feedback_num),
-            "qb_" + str(config.q_budget),
-            "ft_" + str(config.feedback_type),
-            "m_" + str(config.model_type),
-            "n_" + str(config.noise),
-            "e_" + str(config.epochs),
-            "s_" + str(config.seed),
-        )
+        
+        # Build path components to match learn_reward.py exactly
+        checkpoint_components = [
+            "Reward",  # Name from learn_reward.py
+            config.env,
+            f"data_{config.data_quality}",
+            f"fn_{config.feedback_num}",
+            f"qb_{config.q_budget}",
+            f"ft_{config.feedback_type}",
+            f"m_{config.model_type}",
+            f"n_{config.noise}",
+            f"e_{config.epochs}",
+            f"th_{config.threshold}"
+        ]
+        
+        # Add DTW components if enabled (match learn_reward.py format)
+        if config.use_dtw_augmentations:
+            dtw_mode = "before" if config.dtw_augment_before_training else "after"
+            checkpoint_components.extend([
+                f"dtw_{dtw_mode}",
+                f"sub_{config.dtw_subsample_size//1000}k",
+                f"aug_{config.dtw_augmentation_size}"
+            ])
+        
+        # Use same seed format as learn_reward.py
+        checkpoint_components.append(f"s_{config.seed}")
+        
+        path = os.path.join(base_path, *checkpoint_components[1:])  # Skip "Reward" for path construction
+        print(f"Loading reward model from: {path}")
+        
         model.load_model(path)
         dataset["rewards"] = model.get_reward(dataset)
 

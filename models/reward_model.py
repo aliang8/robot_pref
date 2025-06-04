@@ -152,15 +152,17 @@ class RewardModel:
         losses = -(label * logprobs).sum(dim=1)  # Per-sample losses
         
         if apply_class_weights and self.use_class_weights and self.class_weights is not None:
-            # Apply class weights based on preference type
+            # Apply class weights based on preference type using vectorized operations
+            # Create boolean masks for each preference type
+            seg1_better_mask = (label[:, 0] == 1.0) & (label[:, 1] == 0.0)
+            seg2_better_mask = (label[:, 0] == 0.0) & (label[:, 1] == 1.0)
+            equal_pref_mask = (label[:, 0] == 0.5) & (label[:, 1] == 0.5)
+            
+            # Apply weights using vectorized operations
             weights = torch.ones_like(losses)
-            for i, l in enumerate(label):
-                if torch.allclose(l, torch.tensor([1.0, 0.0], device=l.device)):  # Segment 1 better
-                    weights[i] = self.class_weights['seg1_better']
-                elif torch.allclose(l, torch.tensor([0.0, 1.0], device=l.device)):  # Segment 2 better
-                    weights[i] = self.class_weights['seg2_better']
-                elif torch.allclose(l, torch.tensor([0.5, 0.5], device=l.device)):  # Equal preference
-                    weights[i] = self.class_weights['equal_pref']
+            weights[seg1_better_mask] = self.class_weights['seg1_better']
+            weights[seg2_better_mask] = self.class_weights['seg2_better']
+            weights[equal_pref_mask] = self.class_weights['equal_pref']
             
             losses = losses * weights
         
@@ -173,15 +175,17 @@ class RewardModel:
         losses = -torch.sum(label * torch.log(pred_prob), dim=1)  # Per-sample losses
         
         if apply_class_weights and self.use_class_weights and self.class_weights is not None:
-            # Apply class weights based on preference type
+            # Apply class weights based on preference type using vectorized operations
+            # Create boolean masks for each preference type
+            seg1_better_mask = (label[:, 0] == 1.0) & (label[:, 1] == 0.0)
+            seg2_better_mask = (label[:, 0] == 0.0) & (label[:, 1] == 1.0)
+            equal_pref_mask = (label[:, 0] == 0.5) & (label[:, 1] == 0.5)
+            
+            # Apply weights using vectorized operations
             weights = torch.ones_like(losses)
-            for i, l in enumerate(label):
-                if torch.allclose(l, torch.tensor([1.0, 0.0], device=l.device)):  # Segment 1 better
-                    weights[i] = self.class_weights['seg1_better']
-                elif torch.allclose(l, torch.tensor([0.0, 1.0], device=l.device)):  # Segment 2 better
-                    weights[i] = self.class_weights['seg2_better']
-                elif torch.allclose(l, torch.tensor([0.5, 0.5], device=l.device)):  # Equal preference
-                    weights[i] = self.class_weights['equal_pref']
+            weights[seg1_better_mask] = self.class_weights['seg1_better']
+            weights[seg2_better_mask] = self.class_weights['seg2_better']
+            weights[equal_pref_mask] = self.class_weights['equal_pref']
             
             losses = losses * weights
         
