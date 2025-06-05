@@ -44,6 +44,7 @@ class TrainConfig:
     noise: float = 0.0
     human: bool = False
     use_relative_eef: bool = False
+    use_goal_pos: bool = False
     # DTW augmentations
     use_dtw_augmentations: bool = False
     dtw_augment_before_training: bool = False  # If True: augment first then train, If False: train then augment
@@ -195,7 +196,7 @@ def wandb_init(config: dict) -> None:
         # mode="offline",
         config=config,
         project=config["project"],
-        group=config["group"],
+        # group=config["group"],
         name=config["name"],
         id=str(uuid.uuid4()),
     )
@@ -304,10 +305,11 @@ def train(config: TrainConfig):
             for j in range(i + 1, len(sub_index_set)):
                 idx_st_1.append(sub_index_set[i][0])
                 idx_st_2.append(sub_index_set[j][0])
-                if sub_index_set[i][1] < sub_index_set[j][1]:
+                if sub_index_set[i][1] < sub_index_set[j][1]: # TODO: this is not comparing the rewards
                     labels.append([0, 1])
                 else:
                     labels.append([0.5, 0.5])
+
     labels = np.array(labels)
     idx_1 = [[j for j in range(i, i + config.segment_size)] for i in idx_st_1]
     idx_2 = [[j for j in range(i, i + config.segment_size)] for i in idx_st_2]
@@ -381,13 +383,10 @@ def train(config: TrainConfig):
             config,
             original_pairs,
             original_preferences,
-<<<<<<< HEAD
-            use_relative_eef=True,
-            use_goal_pos=True,
-=======
-            use_relative_eef=config.use_relative_eef
->>>>>>> origin/anthony
+            use_relative_eef=config.use_relative_eef,
+            use_goal_pos=config.use_goal_pos,
         )
+
         
         # Extract augmentation data in the same format as original training data
         dtw_idx_st_1 = []
@@ -572,7 +571,8 @@ def train(config: TrainConfig):
                 config,
                 original_pairs,
                 original_preferences,
-                use_relative_eef=config.use_relative_eef
+                use_relative_eef=config.use_relative_eef,
+                use_goal_pos=config.use_goal_pos,
             )
             
             # Extract augmentation data in the same format as original training data
@@ -824,17 +824,17 @@ def train(config: TrainConfig):
             images2 = dataset["images"][idx2:idx2 + config.segment_size]
             
             # Get preference for this pair
-            preference = None
+            preference = 2 # Default to equal preference
             if i < len(labels):
                 if labels[i][0] == 0 and labels[i][1] == 1:  # Second segment preferred
                     preference = 1
-                elif labels[i][0] == 1 and labels[i][1] == 0:  # First segment preferred
-                    preference = 0
+                # elif labels[i][0] == 1 and labels[i][1] == 0:  # First segment preferred
+                #     preference = 0
 
             # Combine segments side by side with preference border
             combined_images = combine_segments_side_by_side(images1, images2, preference)
             if combined_images is not None:
-                log_video_to_wandb(combined_images, f"query_{i}")
+                log_video_to_wandb(combined_images, f"queries/query_{i}")
             
             # Only log first 10 queries to avoid overwhelming wandb
             if i >= 9:
@@ -855,18 +855,19 @@ def train(config: TrainConfig):
                             augmented_by_query[query_idx] = []
                         
                         # Get preference and distance for this pair
-                        pref = None
+                        pref = 2 # Default to equal preference
                         if i < len(dtw_labels):
                             if dtw_labels[i][0] == 0 and dtw_labels[i][1] == 1:
                                 pref = 1
-                            elif dtw_labels[i][0] == 1 and dtw_labels[i][1] == 0:
-                                pref = 0
+                            # elif dtw_labels[i][0] == 1 and dtw_labels[i][1] == 0:
+                            #     pref = 0
                         
                         # Get DTW distance if available
                         dist = None
-                        if hasattr(config, 'dtw_distances_dict'):
+                        # if hasattr(config, 'dtw_distances_dict'):
+                        if dtw_distances_dict is not None:
                             # Find the distance in the DTW matrix
-                            for orig_idx, distances in config.dtw_distances_dict.items():
+                            for orig_idx, distances in dtw_distances_dict.items():
                                 for cand_idx, d in distances:
                                     if (cand_idx == idx1 or cand_idx == idx2) and (orig_idx == query_idx1 or orig_idx == query_idx2):
                                         dist = d
@@ -875,8 +876,13 @@ def train(config: TrainConfig):
                         augmented_by_query[query_idx].append((idx1, idx2, pref, dist))
                         break
             
-            # Log top K augmentations for each query
-            for query_idx, augmentations in augmented_by_query.items():
+            # Log top K augmentations for first 10 queries
+            for query_idx in range(10):
+                if query_idx not in augmented_by_query:
+                    continue
+                
+                augmentations = augmented_by_query[query_idx]
+                
                 # Sort augmentations by DTW distance if available
                 if augmentations[0][3] is not None:  # Check if distance is available
                     augmentations.sort(key=lambda x: x[3])  # Sort by distance
@@ -894,9 +900,7 @@ def train(config: TrainConfig):
                     # Combine segments side by side with preference border
                     combined_images = combine_segments_side_by_side(images1, images2, pref)
                     if combined_images is not None:
-                        # Include DTW distance in the name if available
-                        dist_str = f"_dist_{dist:.4f}" if dist is not None else ""
-                        log_video_to_wandb(combined_images, f"query_{query_idx}_dtw_aug_{aug_idx}{dist_str}")
+                        log_video_to_wandb(combined_images, f"dtw_augs/query_{query_idx}")
 
 
 if __name__ == "__main__":

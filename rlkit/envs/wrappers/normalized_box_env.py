@@ -1,3 +1,4 @@
+
 import numpy as np
 from gym.spaces import Box
 
@@ -51,7 +52,7 @@ class NormalizedBoxEnv(ProxyEnv):
         scaled_action = np.clip(scaled_action, lb, ub)
 
         wrapped_step = self._wrapped_env.step(scaled_action)
-        next_obs, reward, terminate, done, info = wrapped_step
+        next_obs, reward, done, terminate, info = wrapped_step
         done = done or terminate
         # if done == True:
         #     done = 1.0
@@ -59,7 +60,7 @@ class NormalizedBoxEnv(ProxyEnv):
         #     done = 0.0
         if self._should_normalize:
             next_obs = self._apply_normalize_obs(next_obs)
-        return next_obs, reward * self._reward_scale, done, info
+        return next_obs, reward * self._reward_scale, done, terminate, info
 
     def __str__(self):
         return "Normalized: %s" % self._wrapped_env

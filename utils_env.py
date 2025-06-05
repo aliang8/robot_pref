@@ -61,7 +61,7 @@ def MetaWorld_dataset(config):
         dataset = dict()
 
         # TODO: hardcode this for now
-        paths = ["/data/matthewh6/robot_pref/dataset/MetaWorld/button-press-topdown-v2/replay_buffer_step_150000_seed12345.pkl", "/data/matthewh6/robot_pref/dataset/MetaWorld/button-press-topdown-v2/replay_buffer_step_150000_seed23451.pkl", "/data/matthewh6/robot_pref/dataset/MetaWorld/button-press-topdown-v2/replay_buffer_step_150000_seed34512.pkl"]
+        paths = ["/project2/biyik_1165/hongmm/dataset/MetaWorld/button-press-topdown-v2/replay_buffer_step_150000_seed12345.pkl", "/project2/biyik_1165/hongmm/dataset/MetaWorld/button-press-topdown-v2/replay_buffer_step_150000_seed23451.pkl", "/project2/biyik_1165/hongmm/dataset/MetaWorld/button-press-topdown-v2/replay_buffer_step_150000_seed34512.pkl"]
         # for seed in range(3):
         for path in paths:
             # path = base_path + f"/saved_replay_buffer_1000000_seed{seed}.pkl"

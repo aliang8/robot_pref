@@ -336,13 +336,19 @@ def eval_actor(
     episode_success_list = []
     for _ in range(n_episodes):
         # perturn initial arm position
-        state, done = env.reset(), False
+        # state, done = env.reset(), False
+        # TODO
+        (state, info), done = env.reset(), False
 
         episode_reward = 0.0
         episode_succes = 0
         while not done:
             action = actor.act(state, device)
-            state, reward, done, info = env.step(action)
+            # state, reward, done, info = env.step(action)
+            # TODO: 
+            state, reward, terminated, truncated, info = env.step(action)
+            done = terminated or truncated
+
             episode_reward += reward
             if "metaworld" in env_name:
                 episode_succes = max(episode_succes, info["success"])

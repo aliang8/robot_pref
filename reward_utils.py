@@ -507,7 +507,8 @@ def collect_dtw_augmentations(dataset, traj_total, config, original_pairs, origi
         orig_pos = orig_obs[:, :3]  # EE positions
 
         if use_goal_pos:
-            orig_pos = np.concatenate((orig_pos, orig_obs[:, 36:]))
+            print("Using goal positions in DTW computation")
+            orig_pos = np.concatenate((orig_pos, orig_obs[:, 36:]), axis=-1)
         
         # Use relative positions (of eef/goal) if requested
         if use_relative_eef:
@@ -519,7 +520,7 @@ def collect_dtw_augmentations(dataset, traj_total, config, original_pairs, origi
             cand_pos = cand_obs[:, :3]  # EE positions
 
             if use_goal_pos:
-                cand_pos = np.concatenate((cand_pos, cand_obs[:, 36:]))
+                cand_pos = np.concatenate((cand_pos, cand_obs[:, 36:]), axis=-1)
             
             # Use relative positions (of eef/goal) if requested
             if use_relative_eef:
@@ -1373,7 +1374,7 @@ def display_preference_label_stats(labels, return_1, return_2, config, title="Pr
     }
 
 
-def compute_full_dtw_matrix(segments: List[Dict], use_relative_eef: bool, dtw) -> np.ndarray:
+def compute_full_dtw_matrix(segments: List[Dict], use_relative_eef: bool, use_goal_pos: bool, dtw) -> np.ndarray:
     """
     Compute full DTW distance matrix between segments.
     Slower but more accurate than fast approximation.
@@ -1402,6 +1403,10 @@ def compute_full_dtw_matrix(segments: List[Dict], use_relative_eef: bool, dtw) -
                 # Extract EE positions (assuming first 3 dimensions are EE positions)
                 query = segments[i]["obs"].numpy()[:, :3]
                 reference = segments[j]["obs"].numpy()[:, :3]
+                import ipdb; ipdb.set_trace()
+                if use_goal_pos:
+                    query = np.concatenate((query, segments[i]["obs"].numpy()[:, 36:]), axis=1)
+                    reference = np.concatenate((reference, segments[j]["obs"].numpy()[:, 36:]), axis=1)
 
                 # Use relative positions if requested
                 if use_relative_eef:
