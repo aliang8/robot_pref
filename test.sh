@@ -1,4 +1,4 @@
-env=metaworld_button-press-topdown-wall-v2   # ["metaworld_button-press-topdown-v2", "dmc_cheetah-run"]: env name
+env=robomimic_square   # ["metaworld_button-press-topdown-v2", "dmc_cheetah-run"]: env name
 data_quality=1.0    # data quality. 
                     # The lower the quality, the more random policy data, and the higher the quality, the more expert policy data. (maximum is 10.0)
 feedback_num=100    # total feedback number (we use 500, 1000 feedback in the paper)
@@ -8,7 +8,7 @@ feedback_type=RLT   # ["RLT", "SeqRank"]: RLT means ranked list
 model_type=linear_BT       # ["BT", "linear_BT"]: BT means exponential bradley-terry model, and linear_BT use linear score function
 epochs=3000          # we use 300 epochs in the paper, but more epochs (e.g., 5000) can be used for better performance
 activation=tanh     # final activation function of the reward model (use tanh for bounded reward)
-seed=10             # random seed
+seed=12             # random seed
 threshold=0.1       # Thresholds for determining tie labels (eqaully preferred pairs)
                     # Larger thresholds result in more tie labels
 segment_size=25     # segment size
@@ -32,19 +32,19 @@ use_goal_pos=True
 use_relative_eef=True
 
 # Reward model learning
-CUDA_VISIBLE_DEVICES=0 python3 learn_reward.py --config=configs/reward.yaml --env=$env --human=$human \
---data_quality=$data_quality --feedback_num=$feedback_num --q_budget=$q_budget --feedback_type=$feedback_type --model_type=$model_type \
---threshold=$threshold --activation=$activation --epochs=$epochs --noise=$noise --seed=$seed \
---segment_size=$segment_size --data_aug=$data_aug  --ensemble_num=$ensemble_num --ensemble_method=$ensemble_method --batch_size=$batch_size \
---use_dtw_augmentations=$use_dtw_augmentations --dtw_subsample_size=$dtw_subsample_size --dtw_augmentation_size=$dtw_augmentation_size \
---dtw_k_augment=$dtw_k_augment --acquisition_threshold_low=$acquisition_threshold_low --acquisition_threshold_high=$acquisition_threshold_high \
---dtw_augment_before_training=$dtw_augment_before_training --use_goal_pos=$use_goal_pos --use_relative_eef=$use_relative_eef
+# CUDA_VISIBLE_DEVICES=0 python3 learn_reward.py --config=configs/reward.yaml --env=$env --human=$human \
+# --data_quality=$data_quality --feedback_num=$feedback_num --q_budget=$q_budget --feedback_type=$feedback_type --model_type=$model_type \
+# --threshold=$threshold --activation=$activation --epochs=$epochs --noise=$noise --seed=$seed \
+# --segment_size=$segment_size --data_aug=$data_aug  --ensemble_num=$ensemble_num --ensemble_method=$ensemble_method --batch_size=$batch_size \
+# --use_dtw_augmentations=$use_dtw_augmentations --dtw_subsample_size=$dtw_subsample_size --dtw_augmentation_size=$dtw_augmentation_size \
+# --dtw_k_augment=$dtw_k_augment --acquisition_threshold_low=$acquisition_threshold_low --acquisition_threshold_high=$acquisition_threshold_high \
+# --dtw_augment_before_training=$dtw_augment_before_training --use_goal_pos=$use_goal_pos --use_relative_eef=$use_relative_eef
 
 # Offline IQL with reward model
-CUDA_VISIBLE_DEVICES=0 python3 iql.py --use_reward_model=True --config=configs/iql.yaml --env=$env \
+python3 iql.py --use_reward_model=False --config=configs/iql.yaml --env=$env \
 --data_quality=$data_quality --feedback_num=$feedback_num --q_budget=$q_budget --feedback_type=$feedback_type --model_type=$model_type \
 --threshold=$threshold --activation=$activation --epochs=$epochs --noise=$noise --seed=$seed \
 --segment_size=$segment_size --data_aug=$data_aug --ensemble_num=$ensemble_num --ensemble_method=$ensemble_method \
 --use_dtw_augmentations=$use_dtw_augmentations --dtw_subsample_size=$dtw_subsample_size --dtw_augmentation_size=$dtw_augmentation_size \
 --dtw_k_augment=$dtw_k_augment --acquisition_threshold_low=$acquisition_threshold_low --acquisition_threshold_high=$acquisition_threshold_high \
---dtw_augment_before_training=$dtw_augment_before_training
+--dtw_augment_before_training=$dtw_augment_before_training --trivial_reward=1

@@ -12,6 +12,7 @@ from metaworld.envs import ALL_V2_ENVIRONMENTS_GOAL_OBSERVABLE
 from gym.wrappers.time_limit import TimeLimit
 from rlkit.envs.wrappers import NormalizedBoxEnv
 import pickle as pkl
+from pathlib import Path
 
 
 def make_metaworld_env(env_name, seed):
@@ -43,6 +44,130 @@ def make_dmc_env(env_name, seed):
     )
     return env
 
+def Robomimic_dataset(config):
+    """
+    Load and process Robomimic datasets in HDF5 format.
+    
+    Returns:
+        A dictionary containing keys:
+            observations: An N x dim_obs array of observations.
+            actions: An N x dim_action array of actions.
+            next_observations: An N x dim_obs array of next observations.
+            rewards: An N-dim float array of dummy rewards.
+            terminals: An N-dim boolean array of "done" or episode termination flags.
+    """
+    if config.human == False:
+        import h5py
+        
+        # Load the HDF5 format dataset
+        path = "/scr/shared/datasets/robot_pref/square_panda/demo_combined.hdf5"
+        # path = "/tmp/core_datasets/square/demo_src_square_task_D0_r_Panda/demo.hdf5"
+        print(f"loading data from: {path}")
+        
+        dataset = dict()
+        with h5py.File(path, 'r') as f:
+            data = f["data"]
+            
+            # Initialize lists to store data
+            observations = []
+            actions = []
+            episodes = []
+            images = []
+            
+            # Process each demonstration
+            for demo in sorted(data.keys(), key=lambda x: int(x.split('_')[1])):
+                demo_data = data[demo]
+                
+                # Get observations
+                obs = np.concatenate([
+                    demo_data["obs"]["robot0_eef_pos"][:].reshape(-1, 3),
+                    demo_data["obs"]["robot0_eef_quat"][:].reshape(-1, 4),
+                    demo_data["obs"]["robot0_gripper_qpos"][:].reshape(-1, 2),
+                    demo_data["obs"]["object"][:].reshape(-1, 14)  # obs varies by task
+                ], axis=1)
+                
+                observations.append(obs)
+                actions.append(demo_data["actions"][:])
+                episodes.append(np.full((len(demo_data["actions"]),), int(demo.split('_')[1])))
+                
+                # Get images if available
+                if "agentview_image" in demo_data["obs"]:
+                    images.append(demo_data["obs"]["agentview_image"][:])
+            
+            # Convert lists to numpy arrays
+            dataset["observations"] = np.concatenate(observations, axis=0)
+            dataset["actions"] = np.concatenate(actions, axis=0)
+            episodes = np.concatenate(episodes, axis=0)
+            
+            # Create next_observations by shifting observations
+            dataset["next_observations"] = np.roll(dataset["observations"], -1, axis=0)
+            
+            # Create terminals based on episode boundaries
+            dataset["terminals"] = np.zeros(len(dataset["observations"]), dtype=bool)
+            # Mark the last step of each episode as terminal
+            for i in range(len(episodes)-1):
+                if episodes[i] != episodes[i+1]:
+                    dataset["terminals"][i] = True
+            # Mark the very last step as terminal
+            dataset["terminals"][-1] = True
+            
+            # Create dummy rewards
+            dataset["rewards"] = np.zeros(len(dataset["observations"]))
+            
+            # Store images if available
+            if len(images) > 0:
+                dataset["images"] = np.concatenate(images, axis=0)
+            
+    elif config.human == True:
+        base_path = os.path.join(os.getcwd(), "human_feedback/")
+        base_path += f"{config.env}/dataset.pkl"
+        with open(base_path, "rb") as f:
+            dataset = pkl.load(f)
+            dataset["observations"] = np.array(dataset["observations"])
+            dataset["actions"] = np.array(dataset["actions"])
+            dataset["next_observations"] = np.array(dataset["next_observations"])
+            dataset["rewards"] = np.zeros(len(dataset["observations"]))  # dummy rewards
+            dataset["terminals"] = np.array(dataset["dones"])
+            dataset["images"] = np.array(dataset["images"])
+
+    N = dataset["observations"].shape[0]
+    obs_ = []
+    next_obs_ = []
+    action_ = []
+    reward_ = []
+    done_ = []
+    images_ = []
+
+    dataset["terminals"] = dataset["terminals"].reshape(-1)
+    dataset["rewards"] = dataset["rewards"].reshape(-1)
+
+    for i in range(N):
+        obs = dataset["observations"][i].astype(np.float32)
+        new_obs = dataset["next_observations"][i].astype(np.float32)
+        action = dataset["actions"][i].astype(np.float32)
+        reward = dataset["rewards"][i].astype(np.float32)
+        done_bool = bool(dataset["terminals"][i])
+        obs_.append(obs)
+        next_obs_.append(new_obs)
+        action_.append(action)
+        reward_.append(reward)
+        done_.append(done_bool)
+        if "images" in dataset:
+            images = dataset["images"][i].astype(np.uint8)
+            images_.append(images)
+
+    return_dict = {
+        "observations": np.array(obs_),
+        "actions": np.array(action_),
+        "next_observations": np.array(next_obs_),
+        "rewards": np.array(reward_),
+        "terminals": np.array(done_),
+    }
+    
+    if "images" in dataset:
+        return_dict["images"] = np.array(images_)
+        
+    return return_dict
 
 def MetaWorld_dataset(config):
     """
@@ -51,7 +176,7 @@ def MetaWorld_dataset(config):
             observations: An N x dim_obs array of observations.
             actions: An N x dim_action array of actions.
             next_observations: An N x dim_obs array of next observations.
-            rewards: An N-dim float array of rewards.
+            rewards: An N-dim float array of dummy rewards.
             terminals: An N-dim boolean array of "done" or episode termination flags.
     """
     if config.human == False:
@@ -94,11 +219,11 @@ def MetaWorld_dataset(config):
             dataset["observations"] = np.array(dataset["observations"])
             dataset["actions"] = np.array(dataset["actions"])
             dataset["next_observations"] = np.array(dataset["next_observations"])
-            dataset["rewards"] = np.array(dataset["rewards"])
+            dataset["rewards"] = np.zeros(len(dataset["observations"]))  # dummy rewards
             dataset["terminals"] = np.array(dataset["dones"])
             dataset["images"] = np.array(dataset["images"])
 
-    N = dataset["rewards"].shape[0]
+    N = dataset["observations"].shape[0]
     obs_ = []
     next_obs_ = []
     action_ = []
@@ -106,8 +231,8 @@ def MetaWorld_dataset(config):
     done_ = []
     images_ = []
 
-    dataset["rewards"] = dataset["rewards"].reshape(-1)
     dataset["terminals"] = dataset["terminals"].reshape(-1)
+    dataset["rewards"] = dataset["rewards"].reshape(-1)
 
     for i in range(N):
         obs = dataset["observations"][i].astype(np.float32)
@@ -197,3 +322,80 @@ def DMC_dataset(config):
         "rewards": np.array(reward_),
         "terminals": np.array(done_),
     }
+
+def get_robomimic_env(
+    env_name,
+    render=False,
+    render_offscreen=True,
+    use_image_obs=False,
+    base_path=None,
+    seed=42,
+):
+    """Create a Robomimic environment.
+    
+    Args:
+        env_name: Name of the environment (e.g. "lift", "can")
+        render: Whether to enable rendering (default: False)
+        render_offscreen: Whether to use offscreen rendering (default: True)
+        use_image_obs: Whether to use image observations (default: False)
+        base_path: Base path to look for datasets
+        seed: Random seed for the environment
+        
+    Returns:
+        Robomimic environment wrapped in RobomimicLowdimWrapper
+    """
+    try:
+        import robomimic.utils.file_utils as FileUtils
+        import robomimic.utils.obs_utils as ObsUtils
+        import robomimic.utils.env_utils as EnvUtils
+    except ImportError:
+        raise ImportError("Please install robomimic to use Robomimic environments")
+
+    if base_path is None:
+        import inspect
+        current_file = Path(inspect.getfile(inspect.currentframe()))
+        root = current_file.parent.parent.parent
+        base_path = root / "robomimic" / "robomimic" / "datasets"
+    else:
+        base_path = Path(base_path)
+
+    # dataset_path = base_path / env_name / "mg" / "demo_v15.hdf5"
+    # TODO: hardcode this for now
+    dataset_path = "/scr/matthewh6/robomimic_old/robomimic/datasets/square/ph/demo_v15.hdf5"
+    # dataset_path = "/scr/shared/datasets/robot_pref/square_sawyer/demo_combined.hdf5"
+    env_meta = FileUtils.get_env_metadata_from_dataset(str(dataset_path))
+
+    # to change the embodiment of the robot
+    # env_meta["env_kwargs"]["robots"] = ['Panda']
+
+    obs_modality_dict = {
+        "low_dim": [
+            "robot0_eef_pos",
+            "robot0_eef_quat",
+            "robot0_gripper_qpos",
+            "robot0_joint_pos",
+            "robot0_joint_vel",
+            "object",
+        ],
+        "rgb": ["agentview_image"],
+    }
+
+    # Force EGL for offscreen rendering
+    os.environ["MUJOCO_GL"] = "egl"
+    os.environ["DISPLAY"] = ""  # Clear any display settings
+
+    ObsUtils.initialize_obs_modality_mapping_from_dict(obs_modality_dict)
+    env = EnvUtils.create_env_from_metadata(
+        env_meta=env_meta,
+        render=render,
+        render_offscreen=render_offscreen,
+        use_image_obs=use_image_obs,
+    )
+
+    env.env.hard_reset = False
+
+    from env.robomimic_lowdim import RobomimicLowdimWrapper
+    env = RobomimicLowdimWrapper(env)
+    env.seed(seed)
+
+    return env

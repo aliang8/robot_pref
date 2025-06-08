@@ -267,6 +267,13 @@ def train(config: TrainConfig):
         env = utils_env.make_dmc_env(env_name, config.seed)
         dataset = utils_env.DMC_dataset(config)
         config.threshold *= 0.1  # because reward scaling is different from metaworld
+    elif "robomimic" in config.env:
+        env_name = config.env.replace("robomimic-", "")
+        print("env_name ", env_name)
+        env = utils_env.get_robomimic_env(env_name, seed=config.seed)
+        dataset = utils_env.Robomimic_dataset(config)
+    else:
+        raise ValueError(f"Unsupported environment type: {config.env}")
 
     N = dataset["observations"].shape[0]
     traj_total = N // 500  # each trajectory has 500 steps

@@ -7,6 +7,8 @@ import uuid
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+import multiprocessing as mp
+from functools import partial
 
 import gym
 import numpy as np
@@ -41,7 +43,7 @@ class TrainConfig:
     env: str = "metaworld_box-close-v2"  # environment name
     seed: int = 0  # Sets Gym, PyTorch and Numpy seeds
     eval_freq: int = int(5e3)  # How often (time steps) we evaluate
-    n_episodes: int = 50  # How many episodes run during evaluation
+    n_episodes: int = 10  # How many episodes run during evaluation
     max_timesteps: int = int(1e6)  # Max time steps to run environment
     checkpoints_path: Optional[str] = None  # Save path
     load_model: str = ""  # Model load file name, "" doesn't load
@@ -49,6 +51,9 @@ class TrainConfig:
     trivial_reward: int = (
         0  # 0: GT reward, 1: zero reward, 2: constant reward, 3: negative reward
     )
+    # Video recording
+    record_video: bool = False  # Whether to record evaluation videos
+    video_dir: Optional[str] = None  # Directory to save evaluation videos
     # IQL
     buffer_size: int = 2_000_000  # Replay buffer size
     batch_size: int = 256  # Batch size for all networks
@@ -321,6 +326,75 @@ def wandb_init(config: dict) -> None:
     wandb.run.save()
 
 
+def _eval_episode(env, actor, device, max_steps, seed, record_video=False, video_path=None):
+    """Helper function to evaluate a single episode.
+    
+    Args:
+        env: The environment to evaluate on
+        actor: The actor network to evaluate
+        device: Device to run the actor on
+        max_steps: Maximum number of steps per episode
+        seed: Random seed for evaluation
+        record_video: Whether to record video of the episode
+        video_path: Path to save the video file
+    """
+    env.seed(seed)
+    
+    # Setup video recording if requested
+    video_writer = None
+    if record_video and video_path:
+        try:
+            import imageio
+            import os
+            os.makedirs(os.path.dirname(video_path), exist_ok=True)
+            video_writer = imageio.get_writer(video_path, fps=30)
+        except Exception as e:
+            print(f"Error setting up video recording: {e}")
+            video_writer = None
+    
+    state, info = env.reset()
+    episode_reward = 0.0
+    episode_success = 0
+    steps = 0
+    
+    # Record initial frame if recording
+    if video_writer:
+        try:
+            frame = env.render(mode="rgb_array")
+            video_writer.append_data(frame)
+        except Exception as e:
+            print(f"Warning: Could not capture initial frame: {e}")
+    
+    while steps < max_steps:
+        action = actor.act(state, device)
+        state, reward, terminated, truncated, info = env.step(action)
+        done = terminated or truncated
+        steps += 1
+        episode_reward += reward
+        # if "metaworld" in env.env_name:
+        #     episode_success = max(episode_success, info["success"])
+            
+        # Record frame if recording
+        if video_writer:
+            try:
+                frame = env.render(mode="rgb_array")
+                video_writer.append_data(frame)
+            except Exception as e:
+                print(f"Warning: Could not capture frame: {e}")
+                
+        if done:
+            break
+    
+    # Close video writer if recording
+    if video_writer:
+        try:
+            video_writer.close()
+        except Exception as e:
+            print(f"Warning: Error closing video writer: {e}")
+            
+    return episode_reward, episode_success
+
+
 @torch.no_grad()
 def eval_actor(
     env: gym.Env,
@@ -329,33 +403,111 @@ def eval_actor(
     device: str,
     n_episodes: int,
     seed: int,
+    max_steps: int = 1000,
+    parallel: bool = False,
+    record_video: bool = False,
+    video_dir: str = None,
 ) -> np.ndarray:
-    # env.seed(seed)
+    """Evaluate the actor on the environment."""
     actor.eval()
-    episode_rewards = []
-    episode_success_list = []
-    for _ in range(n_episodes):
-        # perturn initial arm position
-        # state, done = env.reset(), False
-        # TODO
-        (state, info), done = env.reset(), False
-
-        episode_reward = 0.0
-        episode_succes = 0
-        while not done:
-            action = actor.act(state, device)
-            # state, reward, done, info = env.step(action)
-            # TODO: 
-            state, reward, terminated, truncated, info = env.step(action)
-            done = terminated or truncated
-
-            episode_reward += reward
-            if "metaworld" in env_name:
-                episode_succes = max(episode_succes, info["success"])
-
-        episode_rewards.append(episode_reward)
-        episode_success_list.append(episode_succes)
-
+    
+    # Create a wrapper class for the actor to make it picklable
+    class ActorWrapper:
+        def __init__(self, actor, device):
+            self.actor = actor
+            self.device = device
+            
+        def predict(self, obs):
+            with torch.no_grad():
+                action = self.actor.act(obs, self.device)
+            return action
+    
+    # Wrap the actor
+    algo = ActorWrapper(actor, device)
+    
+    # Create video directory if needed
+    if record_video and video_dir:
+        os.makedirs(video_dir, exist_ok=True)
+    
+    # Determine if we should use parallel evaluation
+    use_parallel = parallel and n_episodes > 1
+    
+    if use_parallel:
+        try:
+            from multiprocessing import get_context
+            from utils.eval import evaluate_episode_worker, PicklableEnvCreator
+            
+            # Determine number of workers
+            n_workers = min(n_episodes, mp.cpu_count())
+            print(f"Running parallel evaluation ({n_workers} workers, {n_episodes} episodes)")
+            
+            # Prepare arguments for workers
+            worker_args = []
+            for i in range(n_episodes):
+                # Create a distinct environment creator for each episode with appropriate seed
+                episode_seed = seed + i
+                
+                # Try to determine if this is a MetaWorld environment
+                is_metaworld = False
+                try:
+                    import metaworld
+                    if isinstance(env, metaworld.envs.base.Env) or "metaworld" in env.__class__.__module__:
+                        is_metaworld = True
+                except (ImportError, AttributeError):
+                    if hasattr(env, "model") and hasattr(env, "data"):
+                        is_metaworld = True
+                
+                # Create environment creator with appropriate type
+                env_type = "metaworld" if is_metaworld else None
+                env_creator = PicklableEnvCreator(env_id=env_name, seed=episode_seed, env_type=env_type)
+                
+                # Determine if this episode should be recorded
+                should_record = record_video and i < 5  # Record up to 5 episodes
+                video_path = None
+                if should_record:
+                    video_path = os.path.join(video_dir, f"episode_{i}.mp4")
+                
+                # Add to worker arguments
+                worker_args.append((env_creator, algo, i, should_record, video_path, 30))
+            
+            # Use 'spawn' context for better compatibility across platforms
+            ctx = get_context("spawn")
+            with ctx.Pool(processes=n_workers) as pool:
+                results = list(pool.map(evaluate_episode_worker, worker_args))
+            
+            # Process results
+            episode_rewards = [r["return"] for r in results]
+            episode_success_list = [r["success"] for r in results]
+            
+        except Exception as e:
+            print(f"Error in parallel evaluation: {e}. Falling back to sequential evaluation.")
+            import traceback
+            traceback.print_exc()
+            use_parallel = False
+    
+    # Sequential evaluation (fallback or if parallel not requested)
+    if not use_parallel:
+        episode_rewards = []
+        episode_success_list = []
+        
+        for i in range(n_episodes):
+            # Setup video path for this episode
+            video_path = None
+            if record_video and video_dir:
+                video_path = os.path.join(video_dir, f"episode_{i}.mp4")
+            
+            reward, success = _eval_episode(
+                env, 
+                actor, 
+                device, 
+                max_steps, 
+                seed + i,
+                record_video=record_video,
+                video_path=video_path
+            )
+            episode_rewards.append(reward)
+            episode_success_list.append(success)
+    
     actor.train()
     return np.array(episode_rewards), np.array(episode_success_list)
 
@@ -711,11 +863,16 @@ def train(config: TrainConfig):
     elif "dmc" in config.env:
         env = utils_env.make_dmc_env(config.env, config.seed)
         dataset = utils_env.DMC_dataset(config)
+    elif "robomimic" in config.env:
+        env = utils_env.get_robomimic_env(config.env, seed=config.seed)
+        dataset = utils_env.Robomimic_dataset(config)
     else:
         env = gym.make(config.env)
 
-    state_dim = env.observation_space.shape[0]  # 39 for metaworld
+    # state_dim = env.observation_space.shape[0]  # 39 for metaworld
+    state_dim = env.observation_space["state"].shape[0] # robomimic
     action_dim = env.action_space.shape[0]  # 4 for metaworld
+
 
     if config.normalize:
         state_mean, state_std = compute_mean_std(dataset["observations"], eps=1e-3)
@@ -837,6 +994,7 @@ def train(config: TrainConfig):
         trainer.load_state_dict(torch.load(policy_file))
         actor = trainer.actor
 
+    # Initialize wandb
     wandb_init(asdict(config))
 
     for t in range(int(config.max_timesteps)):
@@ -848,6 +1006,16 @@ def train(config: TrainConfig):
         # Evaluate episode
         if (t + 1) % config.eval_freq == 0:
             print(f"Time steps: {t + 1}")
+            
+            # Create video directory for this evaluation
+            video_dir = None
+            if config.record_video:
+                if config.video_dir:
+                    video_dir = os.path.join(config.video_dir, f"eval_{t}")
+                else:
+                    video_dir = os.path.join("videos", f"eval_{t}")
+                os.makedirs(video_dir, exist_ok=True)
+            
             eval_scores, eval_success = eval_actor(
                 env,
                 config.env,
@@ -855,6 +1023,8 @@ def train(config: TrainConfig):
                 device=config.device,
                 n_episodes=config.n_episodes,
                 seed=config.seed,
+                record_video=config.record_video,
+                video_dir=video_dir,
             )
             eval_score = eval_scores.mean()  # For DMControl
             eval_success = eval_success.mean() * 100  # For MetaWorld
@@ -864,13 +1034,8 @@ def train(config: TrainConfig):
                 f"{eval_score:.3f} , success: {eval_success:.3f}"
             )
             print("---------------------------------------")
-            if (config.checkpoints_path is not None) and (t + 1) % (
-                20 * config.eval_freq
-            ) == 0:
-                torch.save(
-                    trainer.state_dict(),
-                    os.path.join(config.checkpoints_path, f"checkpoint_{t}.pt"),
-                )
+            
+            # Log metrics to wandb
             wandb.log(
                 {
                     "eval/eval_score": eval_score,
@@ -878,6 +1043,32 @@ def train(config: TrainConfig):
                 },
                 step=trainer.total_it,
             )
+            
+            # Log videos to wandb if recording
+            if config.record_video and video_dir:
+                video_files = glob.glob(os.path.join(video_dir, "*.mp4"))
+                if video_files:
+                    # Log each video individually
+                    for video_file in video_files:
+                        episode_num = int(os.path.basename(video_file).split("_")[1].split(".")[0])
+                        wandb.log(
+                            {
+                                f"eval/video_episode_{episode_num}": wandb.Video(
+                                    video_file,
+                                    fps=30,
+                                    format="mp4",
+                                )
+                            },
+                            step=trainer.total_it,
+                        )
+            
+            if (config.checkpoints_path is not None) and (t + 1) % (
+                20 * config.eval_freq
+            ) == 0:
+                torch.save(
+                    trainer.state_dict(),
+                    os.path.join(config.checkpoints_path, f"checkpoint_{t}.pt"),
+                )
 
 
 if __name__ == "__main__":
