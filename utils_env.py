@@ -58,10 +58,7 @@ def Robomimic_dataset(config):
         import h5py
         
         # Load the HDF5 format dataset
-        # path = "/scr/shared/datasets/robot_pref/square_panda/square_panda.hdf5"
-        # path = "/tmp/core_datasets/square/demo_src_square_task_D0_r_Panda/demo.hdf5"
-        # path = "/tmp/core_datasets/square/demo_src_square_task_D0_r_Panda/demo.hdf5"
-        path = "/tmp/core_datasets/lift/demo_src_lift_task_Lift_r_Panda/demo.hdf5"
+        path = "/scr/shared/datasets/robot_pref/lift_panda/lift_panda.hdf5"
         print(f"loading data from: {path}")
         
         dataset = dict()
@@ -366,11 +363,7 @@ def get_robomimic_env(
     else:
         base_path = Path(base_path)
 
-    # dataset_path = base_path / env_name / "mg" / "demo_v15.hdf5"
-    # TODO: hardcode this for now
-    # dataset_path = "/scr/matthewh6/robomimic_old/robomimic/datasets/square/ph/demo_v15.hdf5"
-    # dataset_path = "/tmp/core_datasets/square/demo_src_square_task_D0_r_Panda/demo.hdf5"
-    dataset_path = "/tmp/core_datasets/lift/demo_src_lift_task_Lift_r_Panda/demo_combined.hdf5"
+    dataset_path = "/scr/shared/datasets/robot_pref/lift_panda/lift_panda.hdf5"
     env_meta = FileUtils.get_env_metadata_from_dataset(str(dataset_path))
 
     # to change the embodiment of the robot

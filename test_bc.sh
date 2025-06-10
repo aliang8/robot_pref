@@ -1,4 +1,4 @@
-env=robomimic_square   # ["metaworld_button-press-topdown-v2", "dmc_cheetah-run"]: env name
+env=robomimic_lift   # ["metaworld_button-press-topdown-v2", "dmc_cheetah-run"]: env name
 seed=42             # random seed
 batch_size=256      # batch size for training
 eval_freq=1000      # evaluation frequency

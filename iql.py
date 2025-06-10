@@ -614,16 +614,46 @@ class GaussianPolicy(nn.Module):
         dropout: Optional[float] = None,
     ):
         super().__init__()
-        self.net = MLP(
-            [state_dim, *([hidden_dim] * n_hidden), act_dim],
-            output_activation_fn=nn.Tanh,
+        # Main action network (excluding gripper)
+        self.net = nn.Sequential(
+            nn.Linear(state_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, act_dim - 1),  # Exclude gripper dimension
+            nn.Tanh(),
         )
-        self.log_std = nn.Parameter(torch.zeros(act_dim, dtype=torch.float32))
+    
+        # Separate gripper network - outputs a single value for binary classification
+        self.gripper_net = nn.Sequential(
+            nn.Linear(state_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, 1),
+            nn.Sigmoid(),  # Use sigmoid for binary classification
+        )
+        
+        self.log_std = nn.Parameter(torch.zeros(act_dim - 1, dtype=torch.float32))
         self.max_action = max_action
+        self.min_std = 1e-6  # Minimum standard deviation for numerical stability
 
     def forward(self, obs: torch.Tensor) -> Normal:
-        mean = self.net(obs)
-        std = torch.exp(self.log_std.clamp(LOG_STD_MIN, LOG_STD_MAX))
+        # Get main actions with Gaussian policy
+        main_actions = self.net(obs)
+        main_std = torch.exp(self.log_std.clamp(LOG_STD_MIN, LOG_STD_MAX))
+        main_std = main_std.unsqueeze(0).expand(obs.shape[0], -1)  # [batch_size, act_dim-1]
+        
+        # Get gripper action with binary classification
+        gripper_logits = self.gripper_net(obs)
+        gripper_action = 2 * gripper_logits - 1  # Convert to [-1, 1]
+        
+        # Combine actions
+        mean = torch.cat([main_actions, gripper_action], dim=-1)
+        # Use small positive std for gripper instead of zero
+        gripper_std = torch.full_like(gripper_action, self.min_std)
+        std = torch.cat([main_std, gripper_std], dim=-1)
+        
         return Normal(mean, std)
 
     @torch.no_grad()
@@ -631,6 +661,12 @@ class GaussianPolicy(nn.Module):
         state = torch.tensor(state.reshape(1, -1), device=device, dtype=torch.float32)
         dist = self(state)
         action = dist.mean if not self.training else dist.sample()
+        
+        # Ensure gripper action is exactly -1 or 1
+        main_actions = action[:, :-1]
+        gripper_action = torch.sign(action[:, -1:])
+        action = torch.cat([main_actions, gripper_action], dim=-1)
+        
         action = torch.clamp(
             self.max_action * action, -self.max_action, self.max_action
         )

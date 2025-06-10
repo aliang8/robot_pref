@@ -14,7 +14,7 @@ from tqdm import tqdm
 
 import utils.dtw as dtw
 from models.image_embedder import ImageEmbedder
-from utils.data import load_tensordict, segment_episodes_dynamic
+from utils.data import load_tensordict, segment_episodes_random
 from utils.seed import set_seed
 
 
@@ -156,7 +156,7 @@ def main(cfg: DictConfig):
 
     # Segment episodes
     print(f"\nSegmenting episodes with length {cfg.data.segment_length}")
-    segments, segment_indices = segment_episodes_dynamic(data, cfg.data.segment_length)
+    segments, segment_indices = segment_episodes_random(data, cfg.data.segment_length, num_segments=cfg.data.num_segments)
     
     # Create segment pairs
     segment_indices_array = np.array(segment_indices)

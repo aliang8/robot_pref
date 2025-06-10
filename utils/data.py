@@ -2,6 +2,7 @@ import numpy as np
 import torch
 # from d3rlpy.datasets import MDPDataset
 from tqdm import tqdm
+import random
 
 
 # Define a simple AttrDict class that provides dot access to dictionaries
@@ -217,13 +218,13 @@ def segment_episodes(data, segment_length):
     return segments, segment_indices
 
 
-def segment_episodes_dynamic(data, segment_length, min_segment_overlap=0.2):
+def segment_episodes_random(data, segment_length, num_segments=None):
     """Segment episodes into smaller segments, handling variable episode lengths.
 
     Args:
         data: Raw TensorDict data to segment
         segment_length: Base length of each segment
-        min_segment_overlap: Minimum overlap between segments as a fraction of segment_length
+        num_segments: Number of segments to sample (if None, uses all possible segments)
 
     Returns:
         segments: List of segments
@@ -239,82 +240,77 @@ def segment_episodes_dynamic(data, segment_length, min_segment_overlap=0.2):
     print(f"Found {len(unique_episodes)} episodes")
     print(f"Episode lengths range: min={min(episode_lens.values())}, max={max(episode_lens.values())}")
     
-    segments = []
-    segment_indices = []
-    abs_idx = 0  # Keep track of absolute position in dataset
+    # Create list of valid episodes (those long enough for at least one segment)
+    valid_episodes = []
+    episode_start_indices = {}  # Track start index of each episode
+    current_idx = 0
     
     for episode_idx in unique_episodes:
         episode_len = episode_lens[int(episode_idx)]
-        episode_abs_start = abs_idx
+        if episode_len >= segment_length:
+            valid_episodes.append((episode_idx, episode_len))
+            episode_start_indices[int(episode_idx)] = current_idx
+        current_idx += episode_len
+    
+    print(f"Found {len(valid_episodes)} valid episodes (length >= {segment_length})")
+    
+    if not valid_episodes:
+        raise ValueError(f"No episodes found with length >= {segment_length}")
+    
+    # Sample segments
+    segments = []
+    segment_indices = []
+    
+    # Sample episodes and their segments
+    remaining_segments = num_segments if num_segments is not None else float('inf')
+    attempts = 0
+    max_attempts = len(valid_episodes) * 100  # Increased max attempts
+    
+    while remaining_segments > 0 and valid_episodes and attempts < max_attempts:
+        attempts += 1
         
-        # Skip episodes shorter than segment_length
-        if episode_len < segment_length:
-            print(f"Episode {episode_idx} length ({episode_len}) < segment_length ({segment_length}), skipping")
-            abs_idx += episode_len
+        # Randomly select an episode
+        episode_idx, episode_len = random.choice(valid_episodes)
+        episode_abs_start = episode_start_indices[int(episode_idx)]
+        
+        # Calculate number of segments to take from this episode
+        max_start = episode_len - segment_length
+        if max_start < 0:
             continue
             
-        # Calculate number of segments for this episode
-        # We want segments to overlap by at least min_segment_overlap
-        max_stride = int(segment_length * (1 - min_segment_overlap))
-        num_segments = max(1, (episode_len - segment_length) // max_stride + 1)
+        # Randomly sample a starting point
+        start_idx = random.randint(0, max_start)
+        end_idx = start_idx + segment_length
         
-        # Calculate actual stride to evenly space segments
-        if num_segments > 1:
-            stride = (episode_len - segment_length) / (num_segments - 1)
-        else:
-            stride = 0  # Only one segment, no stride needed
-            
-        print(f"Episode {episode_idx}: length={episode_len}, segments={num_segments}, stride={stride:.1f}")
+        # Compute absolute indices in the full dataset
+        abs_start_idx = episode_abs_start + start_idx
+        abs_end_idx = episode_abs_start + end_idx
         
-        # Create segments
-        for i in range(num_segments):
-            start_idx = int(i * stride)
-            end_idx = start_idx + segment_length
+        # Validate segment length
+        if abs_end_idx - abs_start_idx != segment_length:
+            continue
             
-            # Handle boundary cases to ensure exact segment length
-            if end_idx > episode_len:
-                # If we would exceed episode length, shift the window back
-                end_idx = episode_len
-                start_idx = end_idx - segment_length
-            
-            # Verify segment length
-            if end_idx - start_idx != segment_length:
-                print(f"Warning: Skipping invalid segment with length {end_idx - start_idx} != {segment_length}")
-                continue
-            
-            # Compute absolute indices in the full dataset
-            abs_start_idx = episode_abs_start + start_idx
-            abs_end_idx = episode_abs_start + end_idx
-            
-            # Double check segment length
-            assert abs_end_idx - abs_start_idx == segment_length, \
-                f"Invalid segment length: {abs_end_idx - abs_start_idx} != {segment_length}"
-            
-            segment_indices.append((abs_start_idx, abs_end_idx))
-            
-            # Create segment dictionary
-            segment = {}
-            for key in data.keys():
-                segment_data = data[key][abs_start_idx:abs_end_idx]
-                # Verify the extracted segment has correct length
-                assert len(segment_data) == segment_length, \
-                    f"Segment data length mismatch for key {key}: {len(segment_data)} != {segment_length}"
-                segment[key] = segment_data
-            
-            segments.append(segment)
-            
-        # Print segment statistics
-        if segments:
-            print(f"Created {len(segments)} segments of length {segment_length}")
-            # Verify all segments have the same length
-            for key in data.keys():
-                lengths = [len(s[key]) for s in segments]
-                assert all(l == segment_length for l in lengths), \
-                    f"Inconsistent segment lengths for key {key}: {lengths}"
+        # Create segment dictionary and validate data
+        segment = {}
+        valid_segment = True
+        for key in data.keys():
+            segment_data = data[key][abs_start_idx:abs_end_idx]
+            if len(segment_data) != segment_length:
+                valid_segment = False
+                break
+            segment[key] = segment_data
         
-        abs_idx += episode_len
+        if not valid_segment:
+            continue
+            
+        segment_indices.append((abs_start_idx, abs_end_idx))
+        segments.append(segment)
+        remaining_segments -= 1
     
-    print(f"Created {len(segments)} segments total")
+    if not segments:
+        raise ValueError("Failed to create any valid segments")
+        
+    print(f"Created {len(segments)} valid segments")
     return segments, segment_indices
 
 
