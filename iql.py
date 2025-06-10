@@ -1,32 +1,29 @@
 # source: https://github.com/gwthomas/IQL-PyTorch
 # https://arxiv.org/pdf/2110.06169.pdf
 import copy
+import glob
+import multiprocessing as mp
 import os
 import random
 import uuid
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
-import multiprocessing as mp
-from functools import partial
 
 import gym
 import numpy as np
 import pyrallis
+import rich
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import wandb
 from torch.distributions import Normal
 from torch.optim.lr_scheduler import CosineAnnealingLR
 
-import utils_env
-
-import rich
-import sys
-
 # sys.path.append("./Reward_learning")
 import models.reward_model as reward_model
+import utils_env
+import wandb
 
 TensorBatch = List[torch.Tensor]
 
@@ -43,7 +40,7 @@ class TrainConfig:
     env: str = "metaworld_box-close-v2"  # environment name
     seed: int = 0  # Sets Gym, PyTorch and Numpy seeds
     eval_freq: int = int(5e3)  # How often (time steps) we evaluate
-    n_episodes: int = 10  # How many episodes run during evaluation
+    n_episodes: int = 15  # How many episodes run during evaluation
     max_timesteps: int = int(1e6)  # Max time steps to run environment
     checkpoints_path: Optional[str] = None  # Save path
     load_model: str = ""  # Model load file name, "" doesn't load
@@ -52,7 +49,7 @@ class TrainConfig:
         0  # 0: GT reward, 1: zero reward, 2: constant reward, 3: negative reward
     )
     # Video recording
-    record_video: bool = False  # Whether to record evaluation videos
+    record_video: bool = True  # Whether to record evaluation videos
     video_dir: Optional[str] = None  # Directory to save evaluation videos
     # IQL
     buffer_size: int = 2_000_000  # Replay buffer size
@@ -327,25 +324,15 @@ def wandb_init(config: dict) -> None:
 
 
 def _eval_episode(env, actor, device, max_steps, seed, record_video=False, video_path=None):
-    """Helper function to evaluate a single episode.
-    
-    Args:
-        env: The environment to evaluate on
-        actor: The actor network to evaluate
-        device: Device to run the actor on
-        max_steps: Maximum number of steps per episode
-        seed: Random seed for evaluation
-        record_video: Whether to record video of the episode
-        video_path: Path to save the video file
-    """
+    """Helper function to evaluate a single episode."""
     env.seed(seed)
     
     # Setup video recording if requested
     video_writer = None
     if record_video and video_path:
         try:
-            import imageio
             import os
+            import imageio
             os.makedirs(os.path.dirname(video_path), exist_ok=True)
             video_writer = imageio.get_writer(video_path, fps=30)
         except Exception as e:
@@ -354,7 +341,7 @@ def _eval_episode(env, actor, device, max_steps, seed, record_video=False, video
     
     state, info = env.reset()
     episode_reward = 0.0
-    episode_success = 0
+    episode_success = False
     steps = 0
     
     # Record initial frame if recording
@@ -371,9 +358,12 @@ def _eval_episode(env, actor, device, max_steps, seed, record_video=False, video
         done = terminated or truncated
         steps += 1
         episode_reward += reward
-        # if "metaworld" in env.env_name:
-        #     episode_success = max(episode_success, info["success"])
+        
+        # Check for success
+        if "success" in info:
+            episode_success = episode_success or info["success"]
             
+        
         # Record frame if recording
         if video_writer:
             try:
@@ -381,10 +371,10 @@ def _eval_episode(env, actor, device, max_steps, seed, record_video=False, video
                 video_writer.append_data(frame)
             except Exception as e:
                 print(f"Warning: Could not capture frame: {e}")
-                
-        if done:
+
+        if episode_success:
             break
-    
+                
     # Close video writer if recording
     if video_writer:
         try:
@@ -392,7 +382,7 @@ def _eval_episode(env, actor, device, max_steps, seed, record_video=False, video
         except Exception as e:
             print(f"Warning: Error closing video writer: {e}")
             
-    return episode_reward, episode_success
+    return episode_reward, int(episode_success)
 
 
 @torch.no_grad()
@@ -405,8 +395,8 @@ def eval_actor(
     seed: int,
     max_steps: int = 1000,
     parallel: bool = False,
-    record_video: bool = False,
-    video_dir: str = None,
+    record_video: bool = True,
+    video_dir: str = "/scr/matthewh6/robot_pref/videos",
 ) -> np.ndarray:
     """Evaluate the actor on the environment."""
     actor.eval()
@@ -435,7 +425,8 @@ def eval_actor(
     if use_parallel:
         try:
             from multiprocessing import get_context
-            from utils.eval import evaluate_episode_worker, PicklableEnvCreator
+
+            from utils.eval import PicklableEnvCreator, evaluate_episode_worker
             
             # Determine number of workers
             n_workers = min(n_episodes, mp.cpu_count())
@@ -1053,7 +1044,7 @@ def train(config: TrainConfig):
                         episode_num = int(os.path.basename(video_file).split("_")[1].split(".")[0])
                         wandb.log(
                             {
-                                f"eval/video_episode_{episode_num}": wandb.Video(
+                                f"eval_vids/video_episode_{episode_num}": wandb.Video(
                                     video_file,
                                     fps=30,
                                     format="mp4",

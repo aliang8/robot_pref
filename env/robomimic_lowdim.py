@@ -79,7 +79,14 @@ class RobomimicLowdimWrapper(gym.Env):
         return obs
 
     def unnormalize_action(self, action):
-        action = (action + 1) / 2  # [-1, 1] -> [0, 1]
+        # For gripper actions (last dimension), keep in [-1, 1] range
+        # For other actions, convert to [0, 1] range
+        action = action.copy()
+        if len(action) > 0:
+            # Keep gripper action in [-1, 1] range
+            action[-1] = np.clip(action[-1], -1, 1)
+            # Convert other actions to [0, 1] range
+            action[:-1] = (action[:-1] + 1) / 2
         return action * (self.action_max - self.action_min) + self.action_min
 
     def get_observation(self, raw_obs):
@@ -124,13 +131,16 @@ class RobomimicLowdimWrapper(gym.Env):
         else:
             # random reset
             raw_obs = self.env.reset()
-        return self.get_observation(raw_obs)
+
+        # Return tuple of (observation, info) to match gym interface
+        # return self.get_observation(raw_obs), {}
+        return self.get_observation(raw_obs)["state"], {}
 
     def step(self, action):
         if self.normalize:
             action = self.unnormalize_action(action)
         raw_obs, reward, done, info = self.env.step(action)
-        obs = self.get_observation(raw_obs)
+        obs = self.get_observation(raw_obs)["state"]
 
         info["success"] = self.env.is_success()["task"]
 
@@ -139,7 +149,7 @@ class RobomimicLowdimWrapper(gym.Env):
             video_img = self.render(mode="rgb_array")
             self.video_writer.append_data(video_img)
 
-        return obs, reward, False, info
+        return obs, reward, done, done, info
 
     def render(self, mode="rgb_array"):
         h, w = self.render_hw

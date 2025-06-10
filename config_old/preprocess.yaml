@@ -2,7 +2,7 @@ defaults:
   - _self_
 
 data:
-  data_path: "/scr/shared/datasets/robot_pref/can_mh/can_mh.pt"
+  data_path: "/scr/shared/datasets/robot_pref/square_panda/square_panda.pt"
   segment_length: 32
   use_relative_eef: false
   overwrite: true

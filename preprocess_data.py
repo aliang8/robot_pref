@@ -130,7 +130,7 @@ def compute_image_embeddings(
     return embeddings
 
 
-@hydra.main(config_path="config", config_name="preprocess", version_base=None)
+@hydra.main(config_path="config_old", config_name="preprocess", version_base=None)
 def main(cfg: DictConfig):
     print("\n" + "=" * 50)
     print("Preprocessing trajectory data")

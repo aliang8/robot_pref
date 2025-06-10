@@ -1,18 +1,13 @@
-import numpy as np
-import torch
-import torch.nn.functional as F
-import gym
 import os
-
-import dmc2gym
-import metaworld
-import metaworld.envs.mujoco.env_dict as _env_dict
-from metaworld.envs import ALL_V2_ENVIRONMENTS_GOAL_OBSERVABLE
-
-from gym.wrappers.time_limit import TimeLimit
-from rlkit.envs.wrappers import NormalizedBoxEnv
 import pickle as pkl
 from pathlib import Path
+
+import dmc2gym
+import metaworld.envs.mujoco.env_dict as _env_dict
+import numpy as np
+from gym.wrappers.time_limit import TimeLimit
+
+from rlkit.envs.wrappers import NormalizedBoxEnv
 
 
 def make_metaworld_env(env_name, seed):
@@ -56,12 +51,17 @@ def Robomimic_dataset(config):
             rewards: An N-dim float array of dummy rewards.
             terminals: An N-dim boolean array of "done" or episode termination flags.
     """
+    # TODO: 
+    config.human = False
+
     if config.human == False:
         import h5py
         
         # Load the HDF5 format dataset
-        path = "/scr/shared/datasets/robot_pref/square_panda/demo_combined.hdf5"
+        # path = "/scr/shared/datasets/robot_pref/square_panda/square_panda.hdf5"
         # path = "/tmp/core_datasets/square/demo_src_square_task_D0_r_Panda/demo.hdf5"
+        # path = "/tmp/core_datasets/square/demo_src_square_task_D0_r_Panda/demo.hdf5"
+        path = "/tmp/core_datasets/lift/demo_src_lift_task_Lift_r_Panda/demo.hdf5"
         print(f"loading data from: {path}")
         
         dataset = dict()
@@ -75,6 +75,9 @@ def Robomimic_dataset(config):
             images = []
             
             # Process each demonstration
+            num_trajectories = len(data.keys())
+            print(f"Found {num_trajectories} trajectories in the dataset")
+            
             for demo in sorted(data.keys(), key=lambda x: int(x.split('_')[1])):
                 demo_data = data[demo]
                 
@@ -83,7 +86,7 @@ def Robomimic_dataset(config):
                     demo_data["obs"]["robot0_eef_pos"][:].reshape(-1, 3),
                     demo_data["obs"]["robot0_eef_quat"][:].reshape(-1, 4),
                     demo_data["obs"]["robot0_gripper_qpos"][:].reshape(-1, 2),
-                    demo_data["obs"]["object"][:].reshape(-1, 14)  # obs varies by task
+                    demo_data["obs"]["object"][:].reshape(-1, 10)  # obs varies by task (lift: 10, square: 14)
                 ], axis=1)
                 
                 observations.append(obs)
@@ -117,6 +120,10 @@ def Robomimic_dataset(config):
             # Store images if available
             if len(images) > 0:
                 dataset["images"] = np.concatenate(images, axis=0)
+            
+            # Print total number of transitions
+            print(f"Total number of transitions: {len(dataset['observations'])}")
+            print(f"Average trajectory length: {len(dataset['observations']) / num_trajectories:.2f} steps")
             
     elif config.human == True:
         base_path = os.path.join(os.getcwd(), "human_feedback/")
@@ -345,9 +352,9 @@ def get_robomimic_env(
         Robomimic environment wrapped in RobomimicLowdimWrapper
     """
     try:
+        import robomimic.utils.env_utils as EnvUtils
         import robomimic.utils.file_utils as FileUtils
         import robomimic.utils.obs_utils as ObsUtils
-        import robomimic.utils.env_utils as EnvUtils
     except ImportError:
         raise ImportError("Please install robomimic to use Robomimic environments")
 
@@ -361,12 +368,15 @@ def get_robomimic_env(
 
     # dataset_path = base_path / env_name / "mg" / "demo_v15.hdf5"
     # TODO: hardcode this for now
-    dataset_path = "/scr/matthewh6/robomimic_old/robomimic/datasets/square/ph/demo_v15.hdf5"
-    # dataset_path = "/scr/shared/datasets/robot_pref/square_sawyer/demo_combined.hdf5"
+    # dataset_path = "/scr/matthewh6/robomimic_old/robomimic/datasets/square/ph/demo_v15.hdf5"
+    # dataset_path = "/tmp/core_datasets/square/demo_src_square_task_D0_r_Panda/demo.hdf5"
+    dataset_path = "/tmp/core_datasets/lift/demo_src_lift_task_Lift_r_Panda/demo_combined.hdf5"
     env_meta = FileUtils.get_env_metadata_from_dataset(str(dataset_path))
 
     # to change the embodiment of the robot
     # env_meta["env_kwargs"]["robots"] = ['Panda']
+    # change task
+    # env_meta["env_name"] = 'NutAssemblySquare'
 
     obs_modality_dict = {
         "low_dim": [

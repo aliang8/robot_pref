@@ -12,7 +12,7 @@ iql_deterministic: false
 iql_tau: 0.7
 load_model: ''
 max_timesteps: 250_000
-n_episodes: 50
+n_episodes: 15
 name: IQL
 normalize: true
 normalize_reward: true
