@@ -58,7 +58,7 @@ def Robomimic_dataset(config):
         import h5py
         
         # Load the HDF5 format dataset
-        path = "/scr/shared/datasets/robot_pref/lift_panda/lift_panda.hdf5"
+        path = config.data_path
         print(f"loading data from: {path}")
         
         dataset = dict()

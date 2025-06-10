@@ -1,23 +1,35 @@
-import numpy as np
-import torch
-
-import gym
-
-import pyrallis
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
-
-import random, os, tqdm, copy, rich
-
-import wandb
+import os
+import sys
 import uuid
 from dataclasses import asdict, dataclass
+from typing import List, Optional
+
+import numpy as np
+import pyrallis
+import rich
 
 import reward_utils
-from reward_utils import collect_feedback, collect_human_feedback, consist_test_dataset, collect_dtw_augmentations, compute_acquisition_scores, filter_augmentations_by_acquisition, collect_simple_pairwise_feedback, analyze_dtw_augmentation_quality, compare_baseline_vs_augmented_performance, display_preference_label_stats, plot_baseline_vs_augmented_scatter_analysis, plot_individual_test_example_deltas
+import wandb
 from models.reward_model import RewardModel
-from utils.analyze_rewards_legacy import analyze_rewards_legacy, create_episodes_from_dataset, plot_preference_return_analysis_legacy, plot_segment_return_scatter_analysis_legacy
 
-import sys
+# from reward_utils import (
+#     analyze_dtw_augmentation_quality,
+#     collect_dtw_augmentations,
+#     compare_baseline_vs_augmented_performance,
+#     compute_acquisition_scores,
+#     consist_test_dataset,
+#     display_preference_label_stats,
+#     filter_augmentations_by_acquisition,
+#     get_human_feedbacks,
+#     plot_baseline_vs_augmented_scatter_analysis,
+#     plot_individual_test_example_deltas,
+# )
+from reward_utils import *
+from utils.analyze_rewards_legacy import (
+    analyze_rewards_legacy,
+    create_episodes_from_dataset,
+    plot_preference_return_analysis_legacy,
+)
 
 sys.path.append("../LiRE/algorithms")
 import utils_env
@@ -32,6 +44,7 @@ class TrainConfig:
     checkpoints_path: Optional[str] = None  # checkpoints path
     load_model: str = ""  # Model load file name, "" doesn't load
     # preference learning
+    data_path: str = ""  # Path to the dataset file
     feedback_num: int = 100
     data_quality: float = 5.0  # Replay buffer size (data_quality * 100000)
     segment_size: int = 25
@@ -297,25 +310,27 @@ def train(config: TrainConfig):
     #     multiple_ranked_list = collect_feedback(dataset, traj_total, config)
     # elif config.human == True:
     #     multiple_ranked_list = collect_human_feedback(dataset, config)
-    multiple_ranked_list, segment_indices = collect_simple_pairwise_feedback(dataset, traj_total, config)
+    # multiple_ranked_list, segment_indices = collect_simple_pairwise_feedback(dataset, traj_total, config)
+
+    labels, idx_st_1, idx_st_2 = get_human_feedbacks(config, dataset)
     
-    idx_st_1 = []
-    idx_st_2 = []
-    labels = []
-    # construct the preference pairs
-    for single_ranked_list in multiple_ranked_list:
-        sub_index_set = []
-        for i, group in enumerate(single_ranked_list):
-            for tup in group:
-                sub_index_set.append((tup[0], i, tup[1]))
-        for i in range(len(sub_index_set)):
-            for j in range(i + 1, len(sub_index_set)):
-                idx_st_1.append(sub_index_set[i][0])
-                idx_st_2.append(sub_index_set[j][0])
-                if sub_index_set[i][1] < sub_index_set[j][1]: # TODO: this is not comparing the rewards
-                    labels.append([0, 1])
-                else:
-                    labels.append([0.5, 0.5])
+    # idx_st_1 = []
+    # idx_st_2 = []
+    # labels = []
+    # # construct the preference pairs
+    # for single_ranked_list in multiple_ranked_list:
+    #     sub_index_set = []
+    #     for i, group in enumerate(single_ranked_list):
+    #         for tup in group:
+    #             sub_index_set.append((tup[0], i, tup[1]))
+    #     for i in range(len(sub_index_set)):
+    #         for j in range(i + 1, len(sub_index_set)):
+    #             idx_st_1.append(sub_index_set[i][0])
+    #             idx_st_2.append(sub_index_set[j][0])
+    #             if sub_index_set[i][1] < sub_index_set[j][1]: # TODO: this is not comparing the rewards
+    #                 labels.append([0, 1])
+    #             else:
+    #                 labels.append([0.5, 0.5])
 
     labels = np.array(labels)
     idx_1 = [[j for j in range(i, i + config.segment_size)] for i in idx_st_1]
@@ -326,12 +341,14 @@ def train(config: TrainConfig):
     obs_act_2 = np.concatenate(
         (dataset["observations"][idx_2], dataset["actions"][idx_2]), axis=-1
     )
-    return_1 = dataset["rewards"][idx_1].sum(axis=1)
-    return_2 = dataset["rewards"][idx_2].sum(axis=1)
 
-    # Display stats about the original preference labels
-    display_preference_label_stats(labels, return_1, return_2, config, title="Original Preference Labels")
-    
+    if "rewards" in dataset:
+        return_1 = dataset["rewards"][idx_1].sum(axis=1)
+        return_2 = dataset["rewards"][idx_2].sum(axis=1)
+
+        # Display stats about the original preference labels
+        display_preference_label_stats(labels, return_1, return_2, config, title="Original Preference Labels")
+        
     # test query set (for debug the training, not used for training)
     test_feedback_num = 5000
     test_obs_act_1, test_obs_act_2, test_labels, test_binary_labels = (
@@ -443,7 +460,7 @@ def train(config: TrainConfig):
             # Display stats about combined dataset
             display_preference_label_stats(combined_labels, combined_return_1, combined_return_2, config, title="Combined (Original + DTW) Labels")
             
-            print(f"Combined dataset sizes:")
+            print("Combined dataset sizes:")
             print(f"  Original: {len(obs_act_1)} pairs")
             print(f"  DTW augmentations: {len(dtw_obs_act_1)} pairs")
             print(f"  Combined: {len(combined_obs_act_1)} pairs")
@@ -656,7 +673,7 @@ def train(config: TrainConfig):
                     combined_return_2 = np.concatenate([return_2, filtered_dtw_return_2], axis=0)
                     display_preference_label_stats(combined_labels, combined_return_1, combined_return_2, config, title="Combined (Original + Filtered DTW) Labels")
                 
-                print(f"Combined dataset sizes:")
+                print("Combined dataset sizes:")
                 print(f"  Original: {len(obs_act_1)} pairs")
                 print(f"  DTW augmentations: {len(filtered_dtw_obs_act_1)} pairs")
                 print(f"  Combined: {len(combined_obs_act_1)} pairs")

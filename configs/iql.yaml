@@ -38,3 +38,5 @@ feedback_type: RLT
 model_type: BT
 noise: 0.0
 human: false
+
+data_path: "/scr/shared/datasets/robot_pref/lift_panda/lift_panda.hdf5"

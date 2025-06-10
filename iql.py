@@ -60,7 +60,7 @@ class TrainConfig:
     iql_tau: float = 0.7  # Coefficient for asymmetric loss
     iql_deterministic: bool = False  # Use deterministic actor
     normalize: bool = True  # Normalize states
-    normalize_reward: bool = False  # Normalize reward
+    normalize_reward: bool = True  # Normalize reward
     vf_lr: float = 3e-4  # V function learning rate
     qf_lr: float = 3e-4  # Critic learning rate
     actor_lr: float = 3e-4  # Actor learning rate
@@ -983,15 +983,19 @@ def train(config: TrainConfig):
 
     q_network = TwinQ(state_dim, action_dim).to(config.device)
     v_network = ValueFunction(state_dim).to(config.device)
-    actor = (
-        DeterministicPolicy(
-            state_dim, action_dim, max_action, dropout=config.actor_dropout
-        )
-        if config.iql_deterministic
-        else GaussianPolicy(
-            state_dim, action_dim, max_action, dropout=config.actor_dropout
-        )
-    ).to(config.device)
+    # actor = (
+    #     DeterministicPolicy(
+    #         state_dim, action_dim, max_action, dropout=config.actor_dropout
+    #     )
+    #     if config.iql_deterministic
+    #     else GaussianPolicy(
+    #         state_dim, action_dim, max_action, dropout=config.actor_dropout
+    #     )
+    # ).to(config.device)
+
+    from bc import Actor
+    actor = Actor(state_dim, action_dim, max_action).to(config.device)
+
     v_optimizer = torch.optim.Adam(v_network.parameters(), lr=config.vf_lr)
     q_optimizer = torch.optim.Adam(q_network.parameters(), lr=config.qf_lr)
     actor_optimizer = torch.optim.Adam(actor.parameters(), lr=config.actor_lr)

@@ -1,10 +1,15 @@
-import numpy as np
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
-import gym, random, torch, os, uuid
-import rich
-import wandb
-from tqdm import tqdm
+import os
 import pickle
+import random
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
+
+import gym
+import numpy as np
+import torch
+from tqdm import tqdm
+
+from train_reward_model_old import load_preferences_from_directory
 
 
 def set_seed(
@@ -73,6 +78,48 @@ def consist_test_dataset(
         axis=-1,
     )
     return test_obs_act_1, test_obs_act_2, test_labels, test_binary_labels
+
+def get_human_feedbacks(config, dataset):
+    data_path = Path(config.data_path)
+    seg_indices_path = data_path.parent / "segment_start_end_indices.npy"
+    seg_pairs_path = data_path.parent / "segment_pairs.npy"
+    prefs_path = data_path.parent / "preferences"
+
+    # Load everything
+    seg_indices = np.load(seg_indices_path, allow_pickle=True)
+    seg_pairs = np.load(seg_pairs_path, allow_pickle=True)
+    prefs, _ = load_preferences_from_directory(prefs_path)
+
+    # Initialize lists to store processed data
+    labels = []
+    idx_st_1 = []
+    idx_st_2 = []
+
+    for pref in prefs:
+        pair_ind = pref["pair_index"]
+        preference = pref["preference"]  # Should be 'A' or 'B'
+
+        seg1, seg2 = seg_pairs[pair_ind]
+        
+        # Get the actual segment data using indices
+        seg1_start, seg1_end = seg_indices[seg1]
+        seg2_start, seg2_end = seg_indices[seg2]
+        
+        # Convert preference to binary (0 or 1)
+        # 'A' means first segment preferred, 'B' means second segment preferred
+        binary_pref = 0 if preference == 'B' else 1
+        
+        # Store data in the format used by learn_reward.py
+        labels.append(binary_pref)
+        idx_st_1.append(seg1_start)
+        idx_st_2.append(seg2_start)
+
+    # Convert to numpy arrays
+    labels = np.array(labels)
+    idx_st_1 = np.array(idx_st_1)
+    idx_st_2 = np.array(idx_st_2)
+
+    return labels, idx_st_1, idx_st_2
 
 
 def collect_simple_pairwise_feedback(dataset, traj_total, config):
@@ -353,7 +400,7 @@ def collect_dtw_augmentations(dataset, traj_total, config, original_pairs, origi
     Returns:
         tuple: (multiple_ranked_list, dtw_distances_dict, candidate_segment_indices)
     """
-    print(f"Collecting DTW augmentations using ground truth preference propagation")
+    print("Collecting DTW augmentations using ground truth preference propagation")
     print(f"Input: {len(original_pairs)} original preference pairs")
     
     # Separate pairs by preference type
@@ -369,7 +416,7 @@ def collect_dtw_augmentations(dataset, traj_total, config, original_pairs, origi
         elif np.array_equal(pref, [0.5, 0.5]):  # Equal preference
             equal_pref_pairs.append((pair, pref))
     
-    print(f"Preference type breakdown:")
+    print("Preference type breakdown:")
     print(f"  Segment 1 better: {len(seg1_better_pairs)} pairs")
     print(f"  Segment 2 better: {len(seg2_better_pairs)} pairs")
     print(f"  Equal preference: {len(equal_pref_pairs)} pairs")
@@ -392,7 +439,7 @@ def collect_dtw_augmentations(dataset, traj_total, config, original_pairs, origi
     target_seg2_better = min(target_seg2_better, len(seg2_better_pairs))
     target_equal_pref = min(target_equal_pref, len(equal_pref_pairs))
     
-    print(f"Target sampling counts:")
+    print("Target sampling counts:")
     print(f"  Segment 1 better: {target_seg1_better}/{len(seg1_better_pairs)}")
     print(f"  Segment 2 better: {target_seg2_better}/{len(seg2_better_pairs)}")
     print(f"  Equal preference: {target_equal_pref}/{len(equal_pref_pairs)}")
@@ -534,7 +581,7 @@ def collect_dtw_augmentations(dataset, traj_total, config, original_pairs, origi
         dtw_distances_dict[orig_seg_idx] = distances
     
     # Step 4: Generate DTW augmentations using ground truth preference propagation
-    print(f"Generating DTW augmentations using preference propagation...")
+    print("Generating DTW augmentations using preference propagation...")
     
     dtw_k_augment = getattr(config, 'dtw_k_augment', 5)  # Number of similar segments to find
     augmented_pairs = []
@@ -601,7 +648,7 @@ def collect_dtw_augmentations(dataset, traj_total, config, original_pairs, origi
         
         augmented_multiple_ranked_list.append(single_ranked_list)
     
-    print(f"Completed DTW augmentation collection:")
+    print("Completed DTW augmentation collection:")
     print(f"  - Started with {len(original_pairs)} original preference pairs")
     print(f"  - Used ratio-based sampling with ratios {ratios}")
     print(f"  - Selected {len(pairs_for_dtw)} balanced preference pairs for DTW")
@@ -1238,7 +1285,7 @@ def compute_acquisition_scores(reward_model, obs_act_1, obs_act_2, labels, confi
     
     acquisition_scores = np.array(acquisition_scores)
     
-    print(f"Acquisition score statistics:")
+    print("Acquisition score statistics:")
     print(f"  Method: {config.acquisition_method}")
     print(f"  Min: {acquisition_scores.min():.4f}")
     print(f"  Max: {acquisition_scores.max():.4f}")
@@ -1324,7 +1371,7 @@ def display_preference_label_stats(labels, return_1, return_2, config, title="Pr
     # Compute return deltas (return_1 - return_2)
     return_deltas = return_1 - return_2
     
-    print(f"\n=== Return Delta Statistics ===")
+    print("\n=== Return Delta Statistics ===")
     print(f"Overall return delta - Mean: {np.mean(return_deltas):.3f}, Std: {np.std(return_deltas):.3f}")
     print(f"Overall return delta - Min: {np.min(return_deltas):.3f}, Max: {np.max(return_deltas):.3f}")
     
@@ -1352,7 +1399,7 @@ def display_preference_label_stats(labels, return_1, return_2, config, title="Pr
         print(f"  Return delta - Min: {np.min(equal_deltas):.3f}, Max: {np.max(equal_deltas):.3f}")
         print(f"  Avg return 1: {np.mean(return_1[equal_mask]):.3f}, Avg return 2: {np.mean(return_2[equal_mask]):.3f}")
     
-    print(f"\n=== Threshold Analysis ===")
+    print("\n=== Threshold Analysis ===")
     print(f"Threshold used: {config.threshold}")
     print(f"Segment size: {config.segment_size}")
     print(f"Threshold gap: {config.segment_size * config.threshold}")
@@ -1611,7 +1658,7 @@ def analyze_dtw_augmentation_quality(
         for i in range(len(predicted_labels))
     ])
     
-    print(f"DTW Augmentation Quality Analysis:")
+    print("DTW Augmentation Quality Analysis:")
     print(f"  Acquisition method: {config.acquisition_method}")
     print(f"  DTW propagated vs Ground Truth accuracy: {dtw_vs_gt_accuracy:.3f}")
     print(f"  Reward Model vs Ground Truth accuracy: {rm_vs_gt_accuracy:.3f}") 
@@ -1938,31 +1985,31 @@ def compare_baseline_vs_augmented_performance(
     loss_improvement = baseline_results['mean_loss'] - augmented_results['mean_loss']  # Lower loss is better
     
     # Print results
-    print(f"\nTest Set Performance Comparison:")
+    print("\nTest Set Performance Comparison:")
     print(f"  Test set size: {len(test_obs_act_1)} pairs")
-    print(f"  Test set breakdown:")
+    print("  Test set breakdown:")
     print(f"    Segment 1 better: {baseline_results['seg1_better_total']} pairs")
     print(f"    Segment 2 better: {baseline_results['seg2_better_total']} pairs") 
     print(f"    Equal preference: {baseline_results['equal_pref_total']} pairs")
-    print(f"  Baseline model:")
+    print("  Baseline model:")
     print(f"    Overall accuracy: {baseline_results['accuracy']:.4f}")
     print(f"    Binary accuracy: {baseline_results['binary_accuracy']:.4f}")
-    print(f"    Accuracy by preference type:")
+    print("    Accuracy by preference type:")
     print(f"      Segment 1 better: {baseline_results['seg1_better_acc']:.4f}")
     print(f"      Segment 2 better: {baseline_results['seg2_better_acc']:.4f}")
     print(f"      Equal preference: {baseline_results['equal_pref_acc']:.4f}")
     print(f"    Mean loss: {baseline_results['mean_loss']:.4f} ± {baseline_results['std_loss']:.4f}")
     print(f"    Delta MSE: {baseline_delta_mse:.4f} (normalized: {baseline_delta_mse_normalized:.4f})")
-    print(f"  Augmented model:")
+    print("  Augmented model:")
     print(f"    Overall accuracy: {augmented_results['accuracy']:.4f}")
     print(f"    Binary accuracy: {augmented_results['binary_accuracy']:.4f}")
-    print(f"    Accuracy by preference type:")
+    print("    Accuracy by preference type:")
     print(f"      Segment 1 better: {augmented_results['seg1_better_acc']:.4f}")
     print(f"      Segment 2 better: {augmented_results['seg2_better_acc']:.4f}")
     print(f"      Equal preference: {augmented_results['equal_pref_acc']:.4f}")
     print(f"    Mean loss: {augmented_results['mean_loss']:.4f} ± {augmented_results['std_loss']:.4f}")
     print(f"    Delta MSE: {augmented_delta_mse:.4f} (normalized: {augmented_delta_mse_normalized:.4f})")
-    print(f"  Improvements:")
+    print("  Improvements:")
     print(f"    Overall accuracy: {accuracy_improvement:+.4f} ({accuracy_improvement/baseline_results['accuracy']*100:+.1f}%)")
     print(f"    Binary accuracy: {binary_accuracy_improvement:+.4f} ({binary_accuracy_improvement/baseline_results['binary_accuracy']*100:+.1f}%)")
     print(f"    Seg1 better accuracy: {augmented_results['seg1_better_acc'] - baseline_results['seg1_better_acc']:+.4f}")
@@ -2168,7 +2215,7 @@ def plot_baseline_vs_augmented_scatter_analysis(
     Returns:
         dict: Analysis metrics for both models
     """
-    print(f"Creating baseline vs augmented scatter analysis for individual segments...")
+    print("Creating baseline vs augmented scatter analysis for individual segments...")
     
     # Set random seed for reproducible sampling
     np.random.seed(random_seed)
@@ -2337,7 +2384,7 @@ def plot_individual_test_example_deltas(
     Returns:
         dict: Analysis metrics
     """
-    print(f"Creating individual test example deltas chart...")
+    print("Creating individual test example deltas chart...")
     
     # Set random seed for reproducible sampling
     np.random.seed(random_seed)
@@ -2393,7 +2440,7 @@ def plot_individual_test_example_deltas(
     augmented_mean = np.mean(augmented_pred_deltas)
     augmented_std = np.std(augmented_pred_deltas)
     
-    print(f"    Original scales:")
+    print("    Original scales:")
     print(f"      GT: mean={gt_mean:.3f}, std={gt_std:.3f}")
     print(f"      Baseline: mean={baseline_mean:.3f}, std={baseline_std:.3f}")
     print(f"      Augmented: mean={augmented_mean:.3f}, std={augmented_std:.3f}")
@@ -2420,7 +2467,7 @@ def plot_individual_test_example_deltas(
         augmented_pred_deltas_normalized = augmented_pred_deltas
         sample_augmented_normalized = sample_augmented
     
-    print(f"    After z-score normalization:")
+    print("    After z-score normalization:")
     print(f"      GT: mean={np.mean(gt_deltas_normalized):.3f}, std={np.std(gt_deltas_normalized):.3f}")
     print(f"      Baseline: mean={np.mean(baseline_pred_deltas_normalized):.3f}, std={np.std(baseline_pred_deltas_normalized):.3f}")
     print(f"      Augmented: mean={np.mean(augmented_pred_deltas_normalized):.3f}, std={np.std(augmented_pred_deltas_normalized):.3f}")
@@ -2441,7 +2488,7 @@ def plot_individual_test_example_deltas(
         
         ax.set_xlabel('Test Example (sorted by |GT Delta|)')
         ax.set_ylabel('Normalized Return Delta (Z-Score)')
-        ax.set_title(f'Baseline vs Augmented vs Ground Truth Delta Predictions (All Normalized to Z-Scores)')
+        ax.set_title('Baseline vs Augmented vs Ground Truth Delta Predictions (All Normalized to Z-Scores)')
         ax.legend(loc='upper left')
         ax.grid(True, alpha=0.3)
         
@@ -2487,7 +2534,7 @@ def plot_individual_test_example_deltas(
     full_baseline_corr = np.corrcoef(baseline_pred_deltas_normalized, gt_deltas_normalized)[0, 1] if len(set(gt_deltas_normalized)) > 1 else 0.0
     full_augmented_corr = np.corrcoef(augmented_pred_deltas_normalized, gt_deltas_normalized)[0, 1] if len(set(gt_deltas_normalized)) > 1 else 0.0
     
-    print(f"  Full dataset metrics:")
+    print("  Full dataset metrics:")
     print(f"    Baseline:  MSE={full_baseline_mse:.3f}, MAE={full_baseline_mae:.3f}, r={full_baseline_corr:.3f}")
     print(f"    Augmented: MSE={full_augmented_mse:.3f}, MAE={full_augmented_mae:.3f}, r={full_augmented_corr:.3f}")
     

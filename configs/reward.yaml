@@ -23,3 +23,6 @@ lr: 1e-3
 hidden_sizes: 128
 ensemble_num: 3
 ensemble_method: mean
+
+
+data_path: "/scr/shared/datasets/robot_pref/lift_panda/lift_panda.hdf5"
