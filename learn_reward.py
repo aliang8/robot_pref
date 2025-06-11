@@ -45,6 +45,7 @@ class TrainConfig:
     load_model: str = ""  # Model load file name, "" doesn't load
     # preference learning
     data_path: str = ""  # Path to the dataset file
+    augmentation_data_path: Optional[str] = None  # Path to the dataset file for DTW augmentations
     feedback_num: int = 100
     data_quality: float = 5.0  # Replay buffer size (data_quality * 100000)
     segment_size: int = 25
@@ -71,6 +72,7 @@ class TrainConfig:
     # Cache paths for reproducibility
     segment_indices_path: Optional[str] = None  # Path to save/load segment indices
     dtw_matrix_path: Optional[str] = None  # Path to save/load DTW matrix
+    precomputed_dtw_matrix_path: Optional[str] = None  # Path to pre-computed DTW matrix for a different dataset
     # MLP
     epochs: int = int(1e3)
     batch_size: int = 256
@@ -265,11 +267,19 @@ def combine_segments_side_by_side(images1, images2, preference=None):
     return None
 
 
+def get_segment_rewards(dataset, indices, default_value=0.0):
+    """Safely get rewards for segments, returning default value if rewards not available."""
+    if "rewards" not in dataset:
+        return np.array([default_value] * len(indices))
+    return dataset["rewards"][indices].sum(axis=1)
+
+
 @pyrallis.wrap()
 def train(config: TrainConfig):
     rich.print(config)
     reward_utils.set_seed(config.seed)
 
+    # Load main dataset
     if "metaworld" in config.env:
         env_name = config.env.replace("metaworld-", "")
         env = utils_env.make_metaworld_env(env_name, config.seed)
@@ -287,6 +297,31 @@ def train(config: TrainConfig):
         dataset = utils_env.Robomimic_dataset(config)
     else:
         raise ValueError(f"Unsupported environment type: {config.env}")
+
+    # Load augmentation dataset if specified
+    augmentation_dataset = None
+    if config.use_dtw_augmentations and config.augmentation_data_path:
+        print(f"\nLoading augmentation dataset from {config.augmentation_data_path}")
+        # Create a copy of config with the augmentation data path
+        aug_config = TrainConfig(**asdict(config))
+        aug_config.data_path = config.augmentation_data_path
+        if "metaworld" in config.env:
+            augmentation_dataset = utils_env.MetaWorld_dataset(aug_config)
+        elif "dmc" in config.env:
+            augmentation_dataset = utils_env.DMC_dataset(aug_config)
+        elif "robomimic" in config.env:
+            augmentation_dataset = utils_env.Robomimic_dataset(aug_config)
+        
+        if augmentation_dataset is not None:
+            print(f"Loaded augmentation dataset with {augmentation_dataset['observations'].shape[0]} timesteps")
+            # Normalize augmentation dataset using main dataset's statistics
+            if config.normalize:
+                augmentation_dataset["observations"] = reward_utils.normalize_states(
+                    augmentation_dataset["observations"], state_mean, state_std
+                )
+                augmentation_dataset["next_observations"] = reward_utils.normalize_states(
+                    augmentation_dataset["next_observations"], state_mean, state_std
+                )
 
     N = dataset["observations"].shape[0]
     traj_total = N // 500  # each trajectory has 500 steps
@@ -314,24 +349,46 @@ def train(config: TrainConfig):
 
     labels, idx_st_1, idx_st_2 = get_human_feedbacks(config, dataset)
     
-    # idx_st_1 = []
-    # idx_st_2 = []
-    # labels = []
-    # # construct the preference pairs
-    # for single_ranked_list in multiple_ranked_list:
-    #     sub_index_set = []
-    #     for i, group in enumerate(single_ranked_list):
-    #         for tup in group:
-    #             sub_index_set.append((tup[0], i, tup[1]))
-    #     for i in range(len(sub_index_set)):
-    #         for j in range(i + 1, len(sub_index_set)):
-    #             idx_st_1.append(sub_index_set[i][0])
-    #             idx_st_2.append(sub_index_set[j][0])
-    #             if sub_index_set[i][1] < sub_index_set[j][1]: # TODO: this is not comparing the rewards
-    #                 labels.append([0, 1])
-    #             else:
-    #                 labels.append([0.5, 0.5])
-
+    # Convert human feedback format to multiple_ranked_list format
+    multiple_ranked_list = []
+    for i in range(len(labels)):
+        # Get rewards for this pair
+        idx_1 = [[j for j in range(idx_st_1[i], idx_st_1[i] + config.segment_size)]]
+        idx_2 = [[j for j in range(idx_st_2[i], idx_st_2[i] + config.segment_size)]]
+        reward_1 = np.round(get_segment_rewards(dataset, idx_1), 2).item()
+        reward_2 = np.round(get_segment_rewards(dataset, idx_2), 2).item()
+        
+        # Create a single ranking list for this comparison
+        single_ranked_list = []
+        
+        if labels[i] == 1:  # First segment preferred
+            group_1 = [(idx_st_1[i], reward_1)]  # Higher ranked (preferred)
+            group_2 = [(idx_st_2[i], reward_2)]  # Lower ranked
+            single_ranked_list.append(group_2)  # Lower rank first
+            single_ranked_list.append(group_1)  # Higher rank second
+        elif labels[i] == 0:  # Second segment preferred
+            group_1 = [(idx_st_1[i], reward_1)]  # Lower ranked
+            group_2 = [(idx_st_2[i], reward_2)]  # Higher ranked (preferred)
+            single_ranked_list.append(group_1)  # Lower rank first
+            single_ranked_list.append(group_2)  # Higher rank second
+        else:  # Equal preference (labels[i] == 0.5)
+            # Put both segments in the same group to indicate equal preference
+            group = [(idx_st_1[i], reward_1), (idx_st_2[i], reward_2)]
+            single_ranked_list.append(group)
+        
+        multiple_ranked_list.append(single_ranked_list)
+    
+    # Convert labels to the format expected by the rest of the code
+    labels = []
+    for i in range(len(multiple_ranked_list)):
+        if len(multiple_ranked_list[i]) == 1:  # Equal preference
+            labels.append([0.5, 0.5])
+        else:  # Clear preference
+            if multiple_ranked_list[i][1][0][0] == idx_st_1[i]:  # First segment is preferred
+                labels.append([1, 0])
+            else:  # Second segment is preferred
+                labels.append([0, 1])
+    
     labels = np.array(labels)
     idx_1 = [[j for j in range(i, i + config.segment_size)] for i in idx_st_1]
     idx_2 = [[j for j in range(i, i + config.segment_size)] for i in idx_st_2]
@@ -343,8 +400,8 @@ def train(config: TrainConfig):
     )
 
     if "rewards" in dataset:
-        return_1 = dataset["rewards"][idx_1].sum(axis=1)
-        return_2 = dataset["rewards"][idx_2].sum(axis=1)
+        return_1 = get_segment_rewards(dataset, idx_1)
+        return_2 = get_segment_rewards(dataset, idx_2)
 
         # Display stats about the original preference labels
         display_preference_label_stats(labels, return_1, return_2, config, title="Original Preference Labels")
@@ -372,8 +429,8 @@ def train(config: TrainConfig):
     test_idx_st_2 = test_idx[test_feedback_num:]
     test_idx_1 = [[j for j in range(i, i + config.segment_size)] for i in test_idx_st_1]
     test_idx_2 = [[j for j in range(i, i + config.segment_size)] for i in test_idx_st_2]
-    test_gt_return_1 = dataset["rewards"][test_idx_1].sum(axis=1)
-    test_gt_return_2 = dataset["rewards"][test_idx_2].sum(axis=1)
+    test_gt_return_1 = get_segment_rewards(dataset, test_idx_1)
+    test_gt_return_2 = get_segment_rewards(dataset, test_idx_2)
 
     wandb_init(asdict(config))
 
@@ -399,8 +456,8 @@ def train(config: TrainConfig):
         # Prepare original preference pairs for DTW augmentation
         original_pairs = list(zip(idx_st_1, idx_st_2))
         original_preferences = labels.tolist()
-        
-        # Collect DTW augmentations
+        import ipdb; ipdb.set_trace()
+        # Collect DTW augmentations using augmentation dataset if available
         dtw_multiple_ranked_list, dtw_distances_dict, candidate_segment_indices = collect_dtw_augmentations(
             dataset, 
             traj_total, 
@@ -409,6 +466,7 @@ def train(config: TrainConfig):
             original_preferences,
             use_relative_eef=config.use_relative_eef,
             use_goal_pos=config.use_goal_pos,
+            augmentation_dataset=augmentation_dataset  # Pass the augmentation dataset
         )
 
         
@@ -442,8 +500,8 @@ def train(config: TrainConfig):
             dtw_obs_act_2 = np.concatenate(
                 (dataset["observations"][dtw_idx_2], dataset["actions"][dtw_idx_2]), axis=-1
             )
-            dtw_return_1 = dataset["rewards"][dtw_idx_1].sum(axis=1)
-            dtw_return_2 = dataset["rewards"][dtw_idx_2].sum(axis=1)
+            dtw_return_1 = get_segment_rewards(dataset, dtw_idx_1)
+            dtw_return_2 = get_segment_rewards(dataset, dtw_idx_2)
             
             # Display stats about DTW augmentation labels
             display_preference_label_stats(dtw_labels, dtw_return_1, dtw_return_2, config, title="DTW Augmentation Labels")
@@ -552,8 +610,8 @@ def train(config: TrainConfig):
             original_obs_act_2 = np.concatenate(
                 (dataset["observations"][idx_2], dataset["actions"][idx_2]), axis=-1
             )
-            original_return_1 = dataset["rewards"][idx_1].sum(axis=1)
-            original_return_2 = dataset["rewards"][idx_2].sum(axis=1)
+            original_return_1 = get_segment_rewards(dataset, idx_1)
+            original_return_2 = get_segment_rewards(dataset, idx_2)
             
             # Combine both segments and returns into single arrays
             all_segments = np.concatenate([original_obs_act_1, original_obs_act_2], axis=0)
@@ -629,8 +687,8 @@ def train(config: TrainConfig):
                 dtw_obs_act_2 = np.concatenate(
                     (dataset["observations"][dtw_idx_2], dataset["actions"][dtw_idx_2]), axis=-1
                 )
-                dtw_return_1 = dataset["rewards"][dtw_idx_1].sum(axis=1)
-                dtw_return_2 = dataset["rewards"][dtw_idx_2].sum(axis=1)
+                dtw_return_1 = get_segment_rewards(dataset, dtw_idx_1)
+                dtw_return_2 = get_segment_rewards(dataset, dtw_idx_2)
                 
                 # Display stats about DTW augmentation labels
                 display_preference_label_stats(dtw_labels, dtw_return_1, dtw_return_2, config, title="DTW Augmentation Labels")
@@ -760,8 +818,8 @@ def train(config: TrainConfig):
                 original_obs_act_2 = np.concatenate(
                     (dataset["observations"][idx_2], dataset["actions"][idx_2]), axis=-1
                 )
-                original_return_1 = dataset["rewards"][idx_1].sum(axis=1)
-                original_return_2 = dataset["rewards"][idx_2].sum(axis=1)
+                original_return_1 = get_segment_rewards(dataset, idx_1)
+                original_return_2 = get_segment_rewards(dataset, idx_2)
                 
                 # Combine both segments and returns into single arrays
                 all_segments = np.concatenate([original_obs_act_1, original_obs_act_2], axis=0)
@@ -819,8 +877,8 @@ def train(config: TrainConfig):
         obs_act_2 = np.concatenate(
             (dataset["observations"][idx_2], dataset["actions"][idx_2]), axis=-1
         )
-        return_1 = dataset["rewards"][idx_1].sum(axis=1)
-        return_2 = dataset["rewards"][idx_2].sum(axis=1)
+        return_1 = get_segment_rewards(dataset, idx_1)
+        return_2 = get_segment_rewards(dataset, idx_2)
         
         # Generate preference return analysis plot
         preference_return_path = os.path.join(config.checkpoints_path, f"preference_return_analysis_seed_{config.seed}.png")

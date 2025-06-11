@@ -102,6 +102,8 @@ class TrainConfig:
     group: str = "IQL-MetaWorld"
     name: str = "IQL"
 
+    data_path: str = ""
+
     def __post_init__(self):
         # Set default equal ratios for DTW preference sampling if not specified
         if self.dtw_preference_ratios is None:

@@ -11,7 +11,7 @@ group: iql-$env-multiseed-v0
 iql_deterministic: false
 iql_tau: 0.7
 load_model: ''
-max_timesteps: 250_000
+max_timesteps: 100_000
 n_episodes: 20
 name: IQL
 normalize: true

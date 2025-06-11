@@ -97,7 +97,7 @@ def get_human_feedbacks(config, dataset):
 
     for pref in prefs:
         pair_ind = pref["pair_index"]
-        preference = pref["preference"]  # Should be 'A' or 'B'
+        preference = pref["preference"]  # Should be 'A', 'B', or 'equal'
 
         seg1, seg2 = seg_pairs[pair_ind]
         
@@ -105,9 +105,12 @@ def get_human_feedbacks(config, dataset):
         seg1_start, seg1_end = seg_indices[seg1]
         seg2_start, seg2_end = seg_indices[seg2]
         
-        # Convert preference to binary (0 or 1)
-        # 'A' means first segment preferred, 'B' means second segment preferred
-        binary_pref = 0 if preference == 'B' else 1
+        # Convert preference to numeric value
+        # 'A' means first segment preferred, 'B' means second segment preferred, 'equal' means equal preference
+        if preference == 'equal':
+            binary_pref = 0.5
+        else:
+            binary_pref = 0 if preference == 'B' else 1
         
         # Store data in the format used by learn_reward.py
         labels.append(binary_pref)
@@ -384,280 +387,168 @@ def generate_feedback_from_indices(dataset, segment_indices: List[int], config):
     return multiple_ranked_list
 
 
-def collect_dtw_augmentations(dataset, traj_total, config, original_pairs, original_preferences, use_relative_eef=True, use_goal_pos=True):
+def load_precomputed_dtw_matrix(dtw_matrix_path: str) -> Tuple[np.ndarray, List[int]]:
     """
-    Collect DTW-guided augmentations using ground truth preference propagation.
-    Takes original preference pairs and creates augmentations by finding DTW-similar segments.
+    Load a pre-computed DTW matrix and its corresponding segment indices.
     
     Args:
-        dataset: The dataset containing observations, actions, rewards
-        traj_total: Total number of trajectories 
-        config: Configuration object (uses dtw_preference_ratios to control sampling ratios by preference type)
-        original_pairs: List of tuples (idx_st_1, idx_st_2) representing original segment pairs
-        original_preferences: List of preference labels [0, 1], [1, 0], or [0.5, 0.5] for each pair
-        use_relative_eef: Whether to use relative EEF positions for DTW
+        dtw_matrix_path: Path to the pre-computed DTW matrix file
         
     Returns:
-        tuple: (multiple_ranked_list, dtw_distances_dict, candidate_segment_indices)
+        tuple: (dtw_matrix, segment_indices)
+            dtw_matrix: Matrix of DTW distances between segments
+            segment_indices: List of segment start indices corresponding to matrix rows/columns
     """
-    print("Collecting DTW augmentations using ground truth preference propagation")
-    print(f"Input: {len(original_pairs)} original preference pairs")
+    print(f"Loading pre-computed DTW matrix from: {dtw_matrix_path}")
+    with open(dtw_matrix_path, 'rb') as f:
+        dtw_matrix, segment_indices = pickle.load(f)
+    print(f"Loaded DTW matrix of shape {dtw_matrix.shape} with {len(segment_indices)} segments")
+    return dtw_matrix, segment_indices
+
+def collect_dtw_augmentations(
+    dataset, 
+    traj_total, 
+    config,
+    original_pairs,
+    original_preferences,
+    use_relative_eef=True,
+    use_goal_pos=True,
+    augmentation_dataset=None
+):
+    """Collect DTW augmentations using original dataset for DTW matrix but augmentation dataset for segments."""
+    print("\nCollecting DTW augmentations...")
     
-    # Separate pairs by preference type
-    seg1_better_pairs = []
-    seg2_better_pairs = []
-    equal_pref_pairs = []
+    # Get segment indices for DTW matrix computation (from original dataset)
+    segment_indices = load_segment_indices(config.segment_indices_path, config)
+    # if segment_indices is None:
+    #     print("Computing new segment indices...")
+    #     segment_indices = get_indices(traj_total, config)
+    #     save_segment_indices(segment_indices, config.segment_indices_path, config)
     
-    for pair, pref in zip(original_pairs, original_preferences):
-        if np.array_equal(pref, [1, 0]):  # Segment 1 better
-            seg1_better_pairs.append((pair, pref))
-        elif np.array_equal(pref, [0, 1]):  # Segment 2 better
-            seg2_better_pairs.append((pair, pref))
-        elif np.array_equal(pref, [0.5, 0.5]):  # Equal preference
-            equal_pref_pairs.append((pair, pref))
-    
-    print("Preference type breakdown:")
-    print(f"  Segment 1 better: {len(seg1_better_pairs)} pairs")
-    print(f"  Segment 2 better: {len(seg2_better_pairs)} pairs")
-    print(f"  Equal preference: {len(equal_pref_pairs)} pairs")
-    
-    # Apply ratio-based sampling to balance preference types
-    ratios = getattr(config, 'dtw_preference_ratios', [1.0/3.0, 1.0/3.0, 1.0/3.0])
-    print(f"Using DTW preference ratios: [seg1_better: {ratios[0]:.3f}, seg2_better: {ratios[1]:.3f}, equal_pref: {ratios[2]:.3f}]")
-    
-    # Calculate target numbers for each preference type
-    # Use the minimum available count to avoid oversampling
-    available_counts = [len(seg1_better_pairs), len(seg2_better_pairs), len(equal_pref_pairs)]
-    max_total_pairs = min(sum(available_counts), config.dtw_augmentation_size // (2 * getattr(config, 'dtw_k_augment', 5)))
-    
-    target_seg1_better = int(max_total_pairs * ratios[0])
-    target_seg2_better = int(max_total_pairs * ratios[1])  
-    target_equal_pref = int(max_total_pairs * ratios[2])
-    
-    # Adjust targets if we don't have enough pairs of a certain type
-    target_seg1_better = min(target_seg1_better, len(seg1_better_pairs))
-    target_seg2_better = min(target_seg2_better, len(seg2_better_pairs))
-    target_equal_pref = min(target_equal_pref, len(equal_pref_pairs))
-    
-    print("Target sampling counts:")
-    print(f"  Segment 1 better: {target_seg1_better}/{len(seg1_better_pairs)}")
-    print(f"  Segment 2 better: {target_seg2_better}/{len(seg2_better_pairs)}")
-    print(f"  Equal preference: {target_equal_pref}/{len(equal_pref_pairs)}")
-    
-    # Sample from each preference type
-    filtered_pairs = []
-    filtered_preferences = []
-    
-    if target_seg1_better > 0:
-        sampled_seg1 = random.sample(seg1_better_pairs, target_seg1_better)
-        for pair, pref in sampled_seg1:
-            filtered_pairs.append(pair)
-            filtered_preferences.append(pref)
-    
-    if target_seg2_better > 0:
-        sampled_seg2 = random.sample(seg2_better_pairs, target_seg2_better)
-        for pair, pref in sampled_seg2:
-            filtered_pairs.append(pair)
-            filtered_preferences.append(pref)
-    
-    if target_equal_pref > 0:
-        sampled_equal = random.sample(equal_pref_pairs, target_equal_pref)
-        for pair, pref in sampled_equal:
-            filtered_pairs.append(pair)
-            filtered_preferences.append(pref)
-    
-    print(f"After ratio-based sampling: {len(filtered_pairs)} pairs selected for DTW augmentation")
-    
-    if len(filtered_pairs) == 0:
-        print("Warning: No pairs available for DTW augmentation after ratio-based sampling")
-        return [], {}, []
-    
-    # Use filtered pairs for DTW augmentation
-    pairs_for_dtw = filtered_pairs
-    preferences_for_dtw = filtered_preferences
-    
-    # Step 1: Get unique segments from filtered preference pairs
-    original_segments_set = set()
-    for i, j in pairs_for_dtw:
-        original_segments_set.add(i)
-        original_segments_set.add(j)
-    original_segments = list(original_segments_set)
-    print(f"Found {len(original_segments)} unique segments in filtered preference pairs")
-    
-    # Step 2: Sample candidate segments for DTW comparison
-    dtw_sample_size = getattr(config, 'dtw_subsample_size', 10000)
-    print(f"Sampling {dtw_sample_size} candidate segments for DTW comparison...")
-    
-    # Set random seed for reproducible DTW segment selection
-    if hasattr(config, 'seed'):
-        np.random.seed(config.seed + 1000)  # Different seed than feedback collection
-        random.seed(config.seed + 1000)
-        print(f"Set DTW random seed to {config.seed + 1000} for reproducible DTW segment selection")
-    
-    candidate_segments = []
-    candidate_segment_indices = []
-    used_indices = set(original_segments)  # Include original segments to avoid duplicates
-    
-    for i in tqdm(range(dtw_sample_size), desc="Sampling candidate segments"):
-        max_attempts = 100  # Prevent infinite loop
-        attempts = 0
-        
-        while attempts < max_attempts:
-            # Get random trajectory segment using same logic as feedback collection
-            idx = get_indices(traj_total, config)
-            idx_st = idx[0][0]
-            
-            # Avoid duplicate segments (including original segments)
-            if idx_st not in used_indices:
-                used_indices.add(idx_st)
-                break
-                
-            attempts += 1
-        
-        if attempts >= max_attempts:
-            print(f"Warning: Could not find unique segment after {max_attempts} attempts for candidate sample {i+1}")
-            # Use the last generated segment anyway
-        
-        # Create segment indices
-        segment_idx = [j for j in range(idx_st, idx_st + config.segment_size)]
-        
-        # Extract observations for this segment
-        obs = dataset["observations"][segment_idx]  # [segment_size, obs_dim]
-        
-        # Convert to torch tensor and create segment dict
+    # Prepare segments for DTW matrix computation (from original dataset)
+    segments = []
+    for idx in segment_indices:
         segment = {
-            "obs": torch.from_numpy(obs).float(),
-            "start_idx": idx_st
+            "observations": dataset["observations"][idx:idx + config.segment_size],
+            "actions": dataset["actions"][idx:idx + config.segment_size]
         }
-        candidate_segments.append(segment)
-        candidate_segment_indices.append(idx_st)
-
-    print(f"Sampled {len(candidate_segments)} unique candidate segments")
-
-    # Step 3: Compute DTW distances from each original segment to all candidate segments
-    print(f"Computing DTW distances from {len(original_segments)} original segments to {len(candidate_segments)} candidates...")
+        segments.append(segment)
     
-    # Import DTW module
-    try:
-        from utils import dtw
-        print("Using custom DTW implementation")
-    except ImportError:
-        raise ImportError("DTW module not found. Make sure robot_pref.utils.dtw is available.")
+    # Compute DTW matrix using original dataset
+    dtw_matrix = load_or_compute_dtw_matrix(
+        segments, 
+        use_relative_eef, 
+        config.dtw_matrix_path, 
+        config
+    )
     
-    # Compute DTW distances for each original segment
-    dtw_distances_dict = {}  # original_segment_idx -> list of (candidate_idx, distance)
-    
-    for orig_seg_idx in tqdm(original_segments, desc="Computing DTW distances"):
-        # Extract observations for original segment
-        orig_segment_idx = [j for j in range(orig_seg_idx, orig_seg_idx + config.segment_size)]
-        orig_obs = dataset["observations"][orig_segment_idx]
-        orig_pos = orig_obs[:, :3]  # EE positions
-
-        if use_goal_pos:
-            print("Using goal positions in DTW computation")
-            orig_pos = np.concatenate((orig_pos, orig_obs[:, 36:]), axis=-1)
+    # Prepare segments from augmentation dataset if available
+    aug_segments = []
+    if augmentation_dataset is not None:
+        aug_N = augmentation_dataset["observations"].shape[0]
+        aug_traj_total = aug_N // 500  # each trajectory has 500 steps
         
-        # Use relative positions (of eef/goal) if requested
-        if use_relative_eef:
-            orig_pos = orig_pos[1:] - orig_pos[:-1]
-
-        distances = []
-        for cand_idx, candidate in enumerate(candidate_segments):
-            cand_obs = dataset["observations"][orig_segment_idx]
-            cand_pos = cand_obs[:, :3]  # EE positions
-
-            if use_goal_pos:
-                cand_pos = np.concatenate((cand_pos, cand_obs[:, 36:]), axis=-1)
+        # Get random segment indices from augmentation dataset
+        aug_segment_indices = []
+        for _ in range(config.dtw_subsample_size):
+            traj_idx = np.random.randint(0, aug_traj_total)
+            start_idx = 500 * traj_idx + np.random.randint(0, 500 - config.segment_size)
+            aug_segment_indices.append(start_idx)
+        
+        # Create segments from augmentation dataset
+        for idx in aug_segment_indices:
+            segment = {
+                "observations": augmentation_dataset["observations"][idx:idx + config.segment_size],
+                "actions": augmentation_dataset["actions"][idx:idx + config.segment_size]
+            }
+            aug_segments.append(segment)
+    
+    # If no augmentation dataset, use original dataset for segments
+    if not aug_segments:
+        aug_segments = segments
+    
+    # Create mapping from segment indices to matrix indices
+    segment_to_matrix_idx = {idx: i for i, idx in enumerate(segment_indices)}
+    
+    # Initialize DTW distances dictionary
+    dtw_distances_dict = {}
+    
+    # For each original pair, find similar segments from augmentation dataset
+    multiple_ranked_list = []
+    candidate_segment_indices = []
+    
+    for pair_idx, (idx1, idx2) in enumerate(original_pairs):
+        if pair_idx % 100 == 0:
+            print(f"Processing pair {pair_idx}/{len(original_pairs)}")
+        
+        # Get DTW distances for this pair from the matrix
+        if idx1 in segment_to_matrix_idx and idx2 in segment_to_matrix_idx:
+            matrix_idx1 = segment_to_matrix_idx[idx1]
+            matrix_idx2 = segment_to_matrix_idx[idx2]
             
-            # Use relative positions (of eef/goal) if requested
-            if use_relative_eef:
-                cand_pos = cand_pos[1:] - cand_pos[:-1]
+            # Get distances for both segments
+            distances1 = dtw_matrix[matrix_idx1]
+            distances2 = dtw_matrix[matrix_idx2]
             
-            cost, _ = dtw.get_single_match(orig_pos, cand_pos)            
-            distances.append((candidate_segment_indices[cand_idx], cost))
-        
-        # Sort by distance and store
-        distances.sort(key=lambda x: x[1])
-        dtw_distances_dict[orig_seg_idx] = distances
-    
-    # Step 4: Generate DTW augmentations using ground truth preference propagation
-    print("Generating DTW augmentations using preference propagation...")
-    
-    dtw_k_augment = getattr(config, 'dtw_k_augment', 5)  # Number of similar segments to find
-    augmented_pairs = []
-    augmented_preferences = []
-    
-    # Take a subset of original pairs for augmentation to control the total size
-    max_original_pairs = min(config.dtw_augmentation_size // (2 * dtw_k_augment), len(pairs_for_dtw))
-    selected_original_indices = random.sample(range(len(pairs_for_dtw)), max_original_pairs)
-    
-    print(f"Using {len(selected_original_indices)} filtered pairs for DTW augmentation")
-    
-    for orig_idx in tqdm(selected_original_indices, desc="Creating DTW augmentations"):
-        i, j = pairs_for_dtw[orig_idx]  # Get the segment start indices
-        pref = preferences_for_dtw[orig_idx]  # Get the preference label
-        
-        # Get K most similar segments to both i and j from DTW distances
-        similar_to_i = [seg_idx for seg_idx, _ in dtw_distances_dict[i][:dtw_k_augment]]
-        similar_to_j = [seg_idx for seg_idx, _ in dtw_distances_dict[j][:dtw_k_augment]]
-        
-        # Add augmented pairs: if i > j, then similar_to_i > j and i > similar_to_j
-        for sim_segment_idx in similar_to_i:
-            if sim_segment_idx != i and sim_segment_idx != j:  # Avoid duplicates
-                augmented_pairs.append((sim_segment_idx, j))
-                augmented_preferences.append(pref)  # Same preference as original
-        
-        for sim_segment_idx in similar_to_j:
-            if sim_segment_idx != i and sim_segment_idx != j:  # Avoid duplicates
-                augmented_pairs.append((i, sim_segment_idx))
-                augmented_preferences.append(pref)  # Same preference as original
-    
-    print(f"Generated {len(augmented_pairs)} DTW augmentation pairs")
-    
-    # Step 5: Convert augmented pairs back to ranking list format
-    augmented_multiple_ranked_list = []
-    
-    for (idx_st_1, idx_st_2), pref in zip(augmented_pairs, augmented_preferences):
-        # Calculate segment rewards for ranking
-        idx_1 = [[j for j in range(idx_st_1, idx_st_1 + config.segment_size)]]
-        idx_2 = [[j for j in range(idx_st_2, idx_st_2 + config.segment_size)]]
-        reward_1 = np.round(np.sum(dataset["rewards"][idx_1], axis=1), 2).item()
-        reward_2 = np.round(np.sum(dataset["rewards"][idx_2], axis=1), 2).item()
-        
-        # Create ranking list for this comparison
-        single_ranked_list = []
-        
-        if np.array_equal(pref, [1, 0]):
-            # Segment 1 is preferred over segment 2
-            group_1 = [(idx_st_1, reward_1)]  # Higher ranked (preferred)
-            group_2 = [(idx_st_2, reward_2)]  # Lower ranked  
-            single_ranked_list.append(group_2)  # Lower rank first
-            single_ranked_list.append(group_1)  # Higher rank second
+            # Store distances for analysis
+            dtw_distances_dict[idx1] = list(zip(segment_indices, distances1))
+            dtw_distances_dict[idx2] = list(zip(segment_indices, distances2))
             
-        elif np.array_equal(pref, [0.5, 0.5]):
-            # Segments are considered equal
-            group = [(idx_st_1, reward_1), (idx_st_2, reward_2)]
-            single_ranked_list.append(group)
+            # Find similar segments from augmentation dataset
+            similar_segments = []
+            for i, aug_segment in enumerate(aug_segments):
+                # Compute DTW distance to both original segments
+                dist1 = compute_dtw_distance(segments[matrix_idx1], aug_segment, use_relative_eef, use_goal_pos)
+                dist2 = compute_dtw_distance(segments[matrix_idx2], aug_segment, use_relative_eef, use_goal_pos)
+                
+                # Store segment and its distances
+                similar_segments.append((i, dist1, dist2))
             
-        elif np.array_equal(pref, [0, 1]):
-            # Segment 2 is preferred over segment 1
-            group_1 = [(idx_st_1, reward_1)]  # Lower ranked
-            group_2 = [(idx_st_2, reward_2)]  # Higher ranked (preferred)
-            single_ranked_list.append(group_1)  # Lower rank first
-            single_ranked_list.append(group_2)  # Higher rank second
-        
-        augmented_multiple_ranked_list.append(single_ranked_list)
+            # Sort by average distance to both original segments
+            similar_segments.sort(key=lambda x: (x[1] + x[2]) / 2)
+            
+            # Take top K similar segments
+            top_k = min(config.dtw_k_augment, len(similar_segments))
+            top_segments = similar_segments[:top_k]
+            
+            # Create ranking list for this pair
+            single_ranked_list = []
+            
+            # Add original segments first
+            if original_preferences[pair_idx] == [1, 0]:  # First segment preferred
+                group1 = [(idx1, 1.0)]  # Higher ranked
+                group2 = [(idx2, 0.0)]  # Lower ranked
+                single_ranked_list.append(group2)
+                single_ranked_list.append(group1)
+            elif original_preferences[pair_idx] == [0, 1]:  # Second segment preferred
+                group1 = [(idx1, 0.0)]  # Lower ranked
+                group2 = [(idx2, 1.0)]  # Higher ranked
+                single_ranked_list.append(group1)
+                single_ranked_list.append(group2)
+            else:  # Equal preference
+                group = [(idx1, 0.5), (idx2, 0.5)]
+                single_ranked_list.append(group)
+            
+            # Add similar segments based on their distances
+            for seg_idx, dist1, dist2 in top_segments:
+                aug_idx = aug_segment_indices[seg_idx]
+                candidate_segment_indices.append(aug_idx)
+                
+                # Determine preference based on distances
+                if abs(dist1 - dist2) < 0.1:  # Similar distances
+                    # Add to existing group with equal preference
+                    single_ranked_list[0].append((aug_idx, 0.5))
+                else:
+                    # Create new group based on which original segment it's closer to
+                    if dist1 < dist2:
+                        single_ranked_list.append([(aug_idx, 1.0)])
+                    else:
+                        single_ranked_list.append([(aug_idx, 0.0)])
+            
+            multiple_ranked_list.append(single_ranked_list)
     
-    print("Completed DTW augmentation collection:")
-    print(f"  - Started with {len(original_pairs)} original preference pairs")
-    print(f"  - Used ratio-based sampling with ratios {ratios}")
-    print(f"  - Selected {len(pairs_for_dtw)} balanced preference pairs for DTW")
-    print(f"  - Final selection: {len(selected_original_indices)} pairs for augmentation")
-    print(f"  - {len(original_segments)} unique original segments")
-    print(f"  - Sampled {len(candidate_segments)} candidate segments")
-    print(f"  - Created {len(augmented_multiple_ranked_list)} DTW-augmented preference comparisons")
-    
-    return augmented_multiple_ranked_list, dtw_distances_dict, candidate_segment_indices
+    print(f"Generated {len(multiple_ranked_list)} DTW augmentation pairs")
+    return multiple_ranked_list, dtw_distances_dict, candidate_segment_indices
 
 
 def load_or_compute_dtw_matrix(segments: List[Dict], use_relative_eef: bool, dtw_matrix_path: str, config) -> np.ndarray:
