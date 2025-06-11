@@ -1,14 +1,13 @@
-import time
-import random
-import torch
 import inspect
-import numpy as np
+import random
+import time
+
 from env.robomimic_lowdim import RobomimicLowdimWrapper
 
 try:
+    import robomimic.utils.env_utils as EnvUtils
     import robomimic.utils.file_utils as FileUtils
     import robomimic.utils.obs_utils as ObsUtils
-    import robomimic.utils.env_utils as EnvUtils
 except:
     pass
 import os
@@ -26,8 +25,8 @@ def get_metaworld_env(env_name, seed=42):
         MetaWorld environment instance
     """
     from metaworld.envs import (
-        ALL_V2_ENVIRONMENTS_GOAL_OBSERVABLE,
         ALL_V2_ENVIRONMENTS_GOAL_HIDDEN,
+        ALL_V2_ENVIRONMENTS_GOAL_OBSERVABLE,
     )
 
     # Try to find the environment in the goal observable environments
@@ -87,12 +86,11 @@ class RobomimicEnvCreator:
         return get_robomimic_env(self.env_name, seed=unique_seed)
 
 
-from pathlib import Path
 
 def get_robomimic_env(
     env_name,
-    render=True,
-    render_offscreen=True,
+    render=False,
+    render_offscreen=False,
     use_image_obs=True,
     base_path=None,
     seed=42,
@@ -126,7 +124,6 @@ def get_robomimic_env(
     env = EnvUtils.create_env_from_metadata(
         env_meta=env_meta,
         render=render,
-        # only way to not show collision geometry is to enable render_offscreen, which uses a lot of RAM.
         render_offscreen=render_offscreen,
         use_image_obs=use_image_obs,
     )

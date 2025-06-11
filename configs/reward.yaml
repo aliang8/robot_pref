@@ -6,7 +6,7 @@ load_model: null
 # preference
 feedback_num: 1000
 data_quality: 5.0
-segment_size: 25
+segment_size: 32
 normalize: true
 threshold: 0.5
 data_aug: none
@@ -24,6 +24,5 @@ hidden_sizes: 128
 ensemble_num: 3
 ensemble_method: mean
 
-
 data_path: "/scr/shared/datasets/robot_pref/lift_panda/lift_panda.hdf5"
-augmentation_data_path: "/scr/shared/datasets/robot_pref/lift_sawyer/lift_sawyer.hdf5"
+target_data_path: "/scr/shared/datasets/robot_pref/lift_sawyer/lift_sawyer.hdf5"

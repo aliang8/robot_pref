@@ -23,7 +23,7 @@ human=False         # [True, False]: use human feedback or not
 use_dtw_augmentations=True
 dtw_subsample_size=20000
 dtw_augmentation_size=2000
-dtw_k_augment=10
+dtw_k_augment=1
 acquisition_threshold_low=0.25
 acquisition_threshold_high=0.75
 dtw_augment_before_training=True
@@ -40,11 +40,11 @@ CUDA_VISIBLE_DEVICES=0 python3 learn_reward.py --config=configs/reward.yaml --en
 --dtw_k_augment=$dtw_k_augment --acquisition_threshold_low=$acquisition_threshold_low --acquisition_threshold_high=$acquisition_threshold_high \
 --dtw_augment_before_training=$dtw_augment_before_training --use_goal_pos=$use_goal_pos --use_relative_eef=$use_relative_eef
 
-# Offline IQL with reward model
-python3 iql.py --use_reward_model=True --config=configs/iql.yaml --env=$env \
---data_quality=$data_quality --feedback_num=$feedback_num --q_budget=$q_budget --feedback_type=$feedback_type --model_type=$model_type \
---threshold=$threshold --activation=$activation --epochs=$epochs --noise=$noise --seed=$seed \
---segment_size=$segment_size --data_aug=$data_aug --ensemble_num=$ensemble_num --ensemble_method=$ensemble_method \
---use_dtw_augmentations=$use_dtw_augmentations --dtw_subsample_size=$dtw_subsample_size --dtw_augmentation_size=$dtw_augmentation_size \
---dtw_k_augment=$dtw_k_augment --acquisition_threshold_low=$acquisition_threshold_low --acquisition_threshold_high=$acquisition_threshold_high \
---dtw_augment_before_training=$dtw_augment_before_training
+# # Offline IQL with reward model
+# python3 iql.py --use_reward_model=True --config=configs/iql.yaml --env=$env \
+# --data_quality=$data_quality --feedback_num=$feedback_num --q_budget=$q_budget --feedback_type=$feedback_type --model_type=$model_type \
+# --threshold=$threshold --activation=$activation --epochs=$epochs --noise=$noise --seed=$seed \
+# --segment_size=$segment_size --data_aug=$data_aug --ensemble_num=$ensemble_num --ensemble_method=$ensemble_method \
+# --use_dtw_augmentations=$use_dtw_augmentations --dtw_subsample_size=$dtw_subsample_size --dtw_augmentation_size=$dtw_augmentation_size \
+# --dtw_k_augment=$dtw_k_augment --acquisition_threshold_low=$acquisition_threshold_low --acquisition_threshold_high=$acquisition_threshold_high \
+# --dtw_augment_before_training=$dtw_augment_before_training

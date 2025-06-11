@@ -2455,3 +2455,167 @@ def plot_individual_test_example_deltas(
         "n_examples_shown": n_examples,
         "n_total_examples": len(gt_deltas_normalized)
     }
+
+
+def compute_dtw_matrix_cross(main_dataset, seg_indices, augmentation_dataset, target_seg_indices, config, use_relative_eef=True, use_goal_pos=False):
+    """
+    Compute DTW distance matrix between main dataset segments and target dataset segments.
+    
+    Args:
+        main_dataset: Main dataset dictionary containing observations and actions
+        seg_indices: Array of shape (N, 2) containing start and end indices for main segments
+        augmentation_dataset: Augmentation dataset dictionary containing observations and actions
+        target_seg_indices: Array of shape (N, 2) containing start and end indices for target segments
+        config: Configuration object containing segment_size and other parameters
+        use_relative_eef: Whether to use relative EEF positions
+        use_goal_pos: Whether to include goal positions in DTW computation
+        
+    Returns:
+        distance_matrix: Matrix of DTW distances between segments
+        main_segment_indices: List of main dataset segment start indices
+        target_segment_indices: List of target dataset segment start indices
+    """
+    print("\nComputing cross-dataset DTW matrix...")
+    
+    # Import DTW module
+    try:
+        from utils import dtw
+        print("Using custom DTW implementation")
+    except ImportError:
+        raise ImportError("DTW module not found. Make sure robot_pref.utils.dtw is available.")
+
+    seg_indices = seg_indices[:, 0]  # Use only start indices for segments
+    target_seg_indices = target_seg_indices[:, 0]
+
+    # Initialize distance matrix
+    n_main = len(seg_indices)
+    n_target = len(target_seg_indices)
+    distance_matrix = np.zeros((n_main, n_target))
+    
+    # Compute statistics for progress tracking
+    min_dist = float("inf")
+    max_dist = float("-inf")
+    sum_dist = 0
+    count = 0
+    non_finite_count = 0
+    
+    total_comparisons = n_main * n_target
+    with tqdm(total=total_comparisons, desc="Computing cross-dataset DTW distances") as pbar:
+        for i, main_idx in enumerate(seg_indices):
+            for j, target_idx in enumerate(target_seg_indices):
+                # Extract EE positions (assuming first 3 dimensions are EE positions)
+                main_query = main_dataset["observations"][main_idx:main_idx + config.segment_size, :3]
+                target_ref = augmentation_dataset["observations"][target_idx:target_idx + config.segment_size, :3]
+                
+                if use_goal_pos:
+                    main_query = np.concatenate((main_query, main_dataset["observations"][main_idx:main_idx + config.segment_size, 36:]), axis=1)
+                    target_ref = np.concatenate((target_ref, augmentation_dataset["observations"][target_idx:target_idx + config.segment_size, 36:]), axis=1)
+                
+                # Use relative positions if requested
+                if use_relative_eef:
+                    main_query = main_query[1:] - main_query[:-1]
+                    target_ref = target_ref[1:] - target_ref[:-1]
+                
+                try:
+                    cost, _ = dtw.get_single_match(main_query, target_ref)
+                except:
+                    assert False, "DTW failed"
+                
+                distance_matrix[i, j] = cost
+                
+                # Update statistics
+                if np.isfinite(cost):
+                    min_dist = min(min_dist, cost)
+                    max_dist = max(max_dist, cost)
+                    sum_dist += cost
+                    count += 1
+                else:
+                    non_finite_count += 1
+                
+                pbar.update(1)
+    
+    if count > 0:
+        avg_dist = sum_dist / count
+        print(f"Cross-dataset DTW distance statistics - Min: {min_dist:.2f}, Max: {max_dist:.2f}, Avg: {avg_dist:.2f}")
+    if non_finite_count > 0:
+        print(f"WARNING: {non_finite_count} cross-dataset DTW distances were non-finite")
+    
+    return distance_matrix
+
+
+def create_augmented_preferences_from_dtw(
+    cross_dtw_matrix,
+    labels,
+    idx_st_1,
+    idx_st_2,
+    seg_indices,
+    target_seg_indices,
+    config,
+):
+    """
+    Create augmented preferences based on the best DTW matches from the cross-dtw matrix.
+    
+    Args:
+        cross_dtw_matrix: Matrix of DTW distances between main and target segments
+        labels: Original preference labels
+        idx_st_1: Start indices for first segments in original pairs (absolute indices in dataset)
+        idx_st_2: Start indices for second segments in original pairs (absolute indices in dataset)
+        seg_indices: Array of shape (N, 2) containing start and end indices for main dataset segments
+        target_seg_indices: Array of shape (N, 2) containing start and end indices for target segments
+        config: Configuration object containing parameters
+        k_augment: Number of top matches to use for augmentation
+        
+    Returns:
+        tuple: (augmented_labels, augmented_idx_st_1, augmented_idx_st_2)
+            augmented_labels: New preference labels for augmented pairs
+            augmented_idx_st_1: Start indices for first segments in augmented pairs
+            augmented_idx_st_2: Start indices for second segments in augmented pairs
+    """
+    print("\nCreating augmented preferences from DTW matches...")
+    
+    # Build mapping from absolute start index to row index in seg_indices
+    seg_start_to_row = {start: i for i, (start, end) in enumerate(seg_indices)}
+    
+    # Initialize lists for augmented data
+    augmented_labels = []
+    augmented_idx_st_1 = []
+    augmented_idx_st_2 = []
+    
+    for label, abs_idx1, abs_idx2 in zip(labels, idx_st_1, idx_st_2):
+        # Map absolute indices to row indices in seg_indices
+        row1 = seg_start_to_row.get(abs_idx1, None)
+        row2 = seg_start_to_row.get(abs_idx2, None)
+        if row1 is None or row2 is None:
+            print(f"Warning: Could not find segment for indices {abs_idx1}, {abs_idx2}")
+            continue
+
+        # First index corresponds to the main segment, second index corresponds to the augmentation segment
+        distances1 = cross_dtw_matrix[row1]
+        distances2 = cross_dtw_matrix[row2]
+        
+        # Find top k matches for each segment
+        top_k_idx1 = np.argsort(distances1)[:config.dtw_k_augment]
+        top_k_idx2 = np.argsort(distances2)[:config.dtw_k_augment]
+        
+        # Get corresponding target segment indices (start indices)
+        top_k_target1 = target_seg_indices[top_k_idx1, 0]
+        top_k_target2 = target_seg_indices[top_k_idx2, 0]
+        
+        # Create augmented pairs
+        for t1 in top_k_target1:
+            for t2 in top_k_target2:
+                if t1 != t2:
+                    augmented_labels.append(label)
+                    augmented_idx_st_1.append(t1)
+                    augmented_idx_st_2.append(t2)
+    
+    # Convert to numpy arrays
+    augmented_labels = np.array(augmented_labels)
+    augmented_idx_st_1 = np.array(augmented_idx_st_1)
+    augmented_idx_st_2 = np.array(augmented_idx_st_2)
+    
+    print(f"Created {len(augmented_labels)} augmented preference pairs")
+    print(f"Original preference distribution: {np.bincount(np.argmax(labels, axis=1))}")
+    print(f"Augmented preference distribution: {np.bincount(np.argmax(augmented_labels, axis=1))}")
+    
+    return augmented_labels, augmented_idx_st_1, augmented_idx_st_2

@@ -29,7 +29,7 @@ use_reward_model: false
 feedback_num: 1000
 threshold: 0.5
 data_aug: none
-segment_size: 25
+segment_size: 32
 hidden_sizes: 128
 ensemble_num: 3
 ensemble_method: mean
