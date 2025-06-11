@@ -11,24 +11,10 @@ import rich
 import reward_utils
 import wandb
 from models.reward_model import RewardModel
-
-# from reward_utils import (
-#     analyze_dtw_augmentation_quality,
-#     collect_dtw_augmentations,
-#     compare_baseline_vs_augmented_performance,
-#     compute_acquisition_scores,
-#     consist_test_dataset,
-#     display_preference_label_stats,
-#     filter_augmentations_by_acquisition,
-#     get_human_feedbacks,
-#     plot_baseline_vs_augmented_scatter_analysis,
-#     plot_individual_test_example_deltas,
-# )
 from reward_utils import *
 from utils.analyze_rewards_legacy import (
     analyze_rewards_legacy,
     create_episodes_from_dataset,
-    plot_preference_return_analysis_legacy,
 )
 
 sys.path.append("../LiRE/algorithms")
@@ -46,7 +32,10 @@ class TrainConfig:
     # preference learning
     data_path: str = ""  # Path to the dataset file
     target_data_path: Optional[str] = None  # Path to the dataset file for DTW augmentations
-    feedback_num: int = 100
+
+    feedback_num: int = 100 
+    test_feedback_num: int = 100 
+
     data_quality: float = 5.0  # Replay buffer size (data_quality * 100000)
     segment_size: int = 25
     normalize: bool = True
@@ -293,30 +282,27 @@ def train(config: TrainConfig):
     elif "robomimic" in config.env:
         env_name = config.env.replace("robomimic-", "")
         print("env_name ", env_name)
-        env = utils_env.get_robomimic_env(env_name, seed=config.seed)
+        env = utils_env.get_robomimic_env(config.data_path, seed=config.seed)
         dataset = utils_env.Robomimic_dataset(config)
     else:
         raise ValueError(f"Unsupported environment type: {config.env}")
 
-    # Load augmentation dataset if specified
-    augmentation_dataset = None
+    # Load target dataset if specified
+    target_dataset = None
     if config.use_dtw_augmentations and config.target_data_path:
         print(f"\nLoading augmentation dataset from {config.target_data_path}")
         # Create a copy of config with the augmentation data path
         aug_config = TrainConfig(**asdict(config))
         aug_config.data_path = config.target_data_path
         if "metaworld" in config.env:
-            augmentation_dataset = utils_env.MetaWorld_dataset(aug_config)
+            target_dataset = utils_env.MetaWorld_dataset(aug_config)
         elif "dmc" in config.env:
-            augmentation_dataset = utils_env.DMC_dataset(aug_config)
+            target_dataset = utils_env.DMC_dataset(aug_config)
         elif "robomimic" in config.env:
-            augmentation_dataset = utils_env.Robomimic_dataset(aug_config)
-        print(f"Loaded augmentation dataset with {augmentation_dataset['observations'].shape[0]} timesteps")
-        
+            target_dataset = utils_env.Robomimic_dataset(aug_config)
+        print(f"Loaded augmentation dataset with {target_dataset['observations'].shape[0]} timesteps")
 
-    N = dataset["observations"].shape[0]
-    traj_total = N // 500  # each trajectory has 500 steps
-
+    # Normalize dataset observations if required
     if config.normalize:
         state_mean, state_std = reward_utils.compute_mean_std(
             dataset["observations"], eps=1e-3
@@ -331,52 +317,39 @@ def train(config: TrainConfig):
         dataset["next_observations"], state_mean, state_std
     )
 
-    if augmentation_dataset is not None:
+    if target_dataset is not None:
         # Normalize augmentation dataset using main dataset's statistics
         if config.normalize:
-            augmentation_dataset["observations"] = reward_utils.normalize_states(
-                augmentation_dataset["observations"], state_mean, state_std
+            target_dataset["observations"] = reward_utils.normalize_states(
+                target_dataset["observations"], state_mean, state_std
             )
-            augmentation_dataset["next_observations"] = reward_utils.normalize_states(
-                augmentation_dataset["next_observations"], state_mean, state_std
+            target_dataset["next_observations"] = reward_utils.normalize_states(
+                target_dataset["next_observations"], state_mean, state_std
             )
 
-    assert config.q_budget >= 1
-    # if config.human == False:
-    #     multiple_ranked_list = collect_feedback(dataset, traj_total, config)
-    # elif config.human == True:
-    #     multiple_ranked_list = collect_human_feedback(dataset, config)
-    # multiple_ranked_list, segment_indices = collect_simple_pairwise_feedback(dataset, traj_total, config)
-
+    # Get source dataset preferences for augmentation
+    labels, idx_st_1, idx_st_2 = get_human_feedbacks(config.data_path, config.feedback_num)
+    target_labels, target_idx_st_1, target_idx_st_2 = get_human_feedbacks(config.target_data_path, config.test_feedback_num)
     
-
-    labels, idx_st_1, idx_st_2 = get_human_feedbacks(config, dataset)
-    
-    # Convert human feedback format to multiple_ranked_list format
+    # Convert human feedback format to multiple_ranked_list format for source dataset
     multiple_ranked_list = []
     for i in range(len(labels)):
-        # Get rewards for this pair
-        idx_1 = [[j for j in range(idx_st_1[i], idx_st_1[i] + config.segment_size)]]
-        idx_2 = [[j for j in range(idx_st_2[i], idx_st_2[i] + config.segment_size)]]
-        reward_1 = np.round(get_segment_rewards(dataset, idx_1), 2).item()
-        reward_2 = np.round(get_segment_rewards(dataset, idx_2), 2).item()
-        
         # Create a single ranking list for this comparison
         single_ranked_list = []
         
         if labels[i] == 1:  # First segment preferred
-            group_1 = [(idx_st_1[i], reward_1)]  # Higher ranked (preferred)
-            group_2 = [(idx_st_2[i], reward_2)]  # Lower ranked
+            group_1 = [(idx_st_1[i], 0)]  # Higher ranked (preferred)
+            group_2 = [(idx_st_2[i], 0)]  # Lower ranked
             single_ranked_list.append(group_2)  # Lower rank first
             single_ranked_list.append(group_1)  # Higher rank second
         elif labels[i] == 0:  # Second segment preferred
-            group_1 = [(idx_st_1[i], reward_1)]  # Lower ranked
-            group_2 = [(idx_st_2[i], reward_2)]  # Higher ranked (preferred)
+            group_1 = [(idx_st_1[i], 0)]  # Lower ranked
+            group_2 = [(idx_st_2[i], 0)]  # Higher ranked (preferred)
             single_ranked_list.append(group_1)  # Lower rank first
             single_ranked_list.append(group_2)  # Higher rank second
         else:  # Equal preference (labels[i] == 0.5)
             # Put both segments in the same group to indicate equal preference
-            group = [(idx_st_1[i], reward_1), (idx_st_2[i], reward_2)]
+            group = [(idx_st_1[i], 0), (idx_st_2[i], 0)]
             single_ranked_list.append(group)
         
         multiple_ranked_list.append(single_ranked_list)
@@ -393,86 +366,30 @@ def train(config: TrainConfig):
                 labels.append([0, 1])
     
     labels = np.array(labels)
-    idx_1 = [[j for j in range(i, i + config.segment_size)] for i in idx_st_1]
-    idx_2 = [[j for j in range(i, i + config.segment_size)] for i in idx_st_2]
-    obs_act_1 = np.concatenate(
-        (dataset["observations"][idx_1], dataset["actions"][idx_1]), axis=-1
+    obs_act = np.concatenate(
+        (dataset["observations"][0], dataset["actions"][0]), axis=-1
     )
-    obs_act_2 = np.concatenate(
-        (dataset["observations"][idx_2], dataset["actions"][idx_2]), axis=-1
-    )
-
-    if "rewards" in dataset:
-        return_1 = get_segment_rewards(dataset, idx_1)
-        return_2 = get_segment_rewards(dataset, idx_2)
-
-        # Display stats about the original preference labels
-        display_preference_label_stats(labels, return_1, return_2, config, title="Original Preference Labels")
-        
-    # test query set (for debug the training, not used for training)
-    test_feedback_num = 5000
-    test_obs_act_1, test_obs_act_2, test_labels, test_binary_labels = (
-        consist_test_dataset(
-            dataset,
-            test_feedback_num,
-            traj_total,
-            segment_size=config.segment_size,
-            threshold=config.threshold,
-        )
-    )
-    
-    # Compute test ground truth returns by recreating the test indices
-    # (using same logic as consist_test_dataset)
-    np.random.seed(config.seed)  # Use same seed as test dataset creation
-    test_traj_idx = np.random.choice(traj_total, 2 * test_feedback_num, replace=True)
-    test_idx = [
-        500 * i + np.random.randint(0, 500 - config.segment_size) for i in test_traj_idx
-    ]
-    test_idx_st_1 = test_idx[:test_feedback_num]
-    test_idx_st_2 = test_idx[test_feedback_num:]
-    test_idx_1 = [[j for j in range(i, i + config.segment_size)] for i in test_idx_st_1]
-    test_idx_2 = [[j for j in range(i, i + config.segment_size)] for i in test_idx_st_2]
-    test_gt_return_1 = get_segment_rewards(dataset, test_idx_1)
-    test_gt_return_2 = get_segment_rewards(dataset, test_idx_2)
+    obs_act_dim = obs_act.shape[-1]
+    print(f"Observation-action dimension: {obs_act_dim}")
 
     wandb_init(asdict(config))
 
-    dimension = obs_act_1.shape[-1]
-    reward_model = RewardModel(config, obs_act_1, obs_act_2, labels, dimension)
-
-    reward_model.save_test_dataset(
-        test_obs_act_1, test_obs_act_2, test_labels, test_binary_labels
-    )
-
-    # Load segment indices for main dataset
+    # Load segment indices
     data_path = Path(config.data_path)
     seg_indices_path = data_path.parent / "segment_start_end_indices.npy"
     seg_indices = np.load(seg_indices_path, allow_pickle=True)
 
-    # Load embodiment B indices and pairs for DTW matrix computation
+    # Load target segment indices
     target_data_path = Path(config.target_data_path)
     seg_indices_path = target_data_path.parent / "segment_start_end_indices.npy"
-    seg_pairs_path = target_data_path.parent / "segment_pairs.npy"
     target_seg_indices = np.load(seg_indices_path, allow_pickle=True)
-    target_seg_pairs = np.load(seg_pairs_path, allow_pickle=True)
     
     # DTW Augmentation Strategy
-    # if config.use_dtw_augmentations and config.dtw_augment_before_training: # TODO: don't worry about this for now
     if config.use_dtw_augmentations:        
-        # First, train a baseline model on original data only for comparison
-        print("Step 1: Training baseline model on original data only...")
-        baseline_reward_model = RewardModel(config, obs_act_1, obs_act_2, labels, dimension)
-        baseline_reward_model.save_test_dataset(
-            test_obs_act_1, test_obs_act_2, test_labels, test_binary_labels
-        )
-        baseline_reward_model.train_model()
+        # Compute cross-embodiment DTW matrix
+        cross_dtw_matrix = compute_dtw_matrix_cross(dataset, seg_indices, target_dataset, target_seg_indices, config)
         
-        # Prepare original preference pairs for DTW augmentation
-        original_pairs = list(zip(idx_st_1, idx_st_2))
-        original_preferences = labels.tolist()
-
-        cross_dtw_matrix = compute_dtw_matrix_cross(dataset, seg_indices, augmentation_dataset, target_seg_indices, config)
-
+        # Create augmented preferences from DTW matrix
         augmented_labels, augmented_idx_st_1, augmented_idx_st_2 = create_augmented_preferences_from_dtw(
             cross_dtw_matrix,
             labels,
@@ -483,42 +400,15 @@ def train(config: TrainConfig):
             config,
         )
 
-        # Log original queries to wandb
-        if "images" in dataset:
-            print("Logging original query videos to wandb...")
-            
-            # Log first 10 original queries
-            for i, (idx1, idx2) in enumerate(zip(idx_st_1, idx_st_2)):
-                # Get image sequences for both segments
-                images1 = dataset["images"][idx1:idx1 + config.segment_size]
-                images2 = dataset["images"][idx2:idx2 + config.segment_size]
-                
-                # Get preference for this pair
-                preference = 2  # Default to equal preference
-                if i < len(labels):
-                    if labels[i][0] == 0 and labels[i][1] == 1:  # Second segment preferred
-                        preference = 1
-                    elif labels[i][0] == 1 and labels[i][1] == 0:  # First segment preferred
-                        preference = 0
-
-                # Combine segments side by side with preference border
-                combined_images = combine_segments_side_by_side(images1, images2, preference)
-                if combined_images is not None:
-                    log_video_to_wandb(combined_images, f"original_queries/query_{i}")
-                
-                # Only log first 10 queries
-                if i >= 9:
-                    break
-
         # Log augmented preferences to wandb
-        if "images" in augmentation_dataset:
+        if "images" in target_dataset:
             print("Logging augmented preference videos to wandb...")
             
             # Log first 10 augmented pairs
             for i, (idx1, idx2) in enumerate(zip(augmented_idx_st_1, augmented_idx_st_2)):
                 # Get image sequences for both segments
-                images1 = augmentation_dataset["images"][idx1:idx1 + config.segment_size]
-                images2 = augmentation_dataset["images"][idx2:idx2 + config.segment_size]
+                images1 = target_dataset["images"][idx1:idx1 + config.segment_size]
+                images2 = target_dataset["images"][idx2:idx2 + config.segment_size]
                 
                 # Get preference for this pair
                 preference = 2  # Default to equal preference
@@ -539,337 +429,64 @@ def train(config: TrainConfig):
 
         # Process augmented preferences for training
         if len(augmented_idx_st_1) > 0:
-            # Create indices for augmented segments
+            # Create indices for augmented segments\
             aug_idx_1 = [[j for j in range(i, i + config.segment_size)] for i in augmented_idx_st_1]
             aug_idx_2 = [[j for j in range(i, i + config.segment_size)] for i in augmented_idx_st_2]
             
             # Get observations and actions for augmented segments
-            aug_obs_act_1 = np.concatenate(
-                (augmentation_dataset["observations"][aug_idx_1], augmentation_dataset["actions"][aug_idx_1]), axis=-1
+            target_obs_act_1 = np.concatenate(
+                (target_dataset["observations"][aug_idx_1], target_dataset["actions"][aug_idx_1]), axis=-1
             )
-            aug_obs_act_2 = np.concatenate(
-                (augmentation_dataset["observations"][aug_idx_2], augmentation_dataset["actions"][aug_idx_2]), axis=-1
-            )
-            
-            # Get rewards for augmented segments if available
-            aug_return_1 = get_segment_rewards(augmentation_dataset, aug_idx_1)
-            aug_return_2 = get_segment_rewards(augmentation_dataset, aug_idx_2)
-            
-            # Display stats about augmented preference labels
-            display_preference_label_stats(augmented_labels, aug_return_1, aug_return_2, config, title="Cross-Embodiment Augmentation Labels")
-            
-            # Combine original data with augmented data
-            print("Combining original data with cross-embodiment augmentations...")
-            combined_obs_act_1 = np.concatenate([obs_act_1, aug_obs_act_1], axis=0)
-            combined_obs_act_2 = np.concatenate([obs_act_2, aug_obs_act_2], axis=0)
-            combined_labels = np.concatenate([labels, augmented_labels], axis=0)
-            combined_return_1 = np.concatenate([return_1, aug_return_1], axis=0)
-            combined_return_2 = np.concatenate([return_2, aug_return_2], axis=0)
-            
-            # Display stats about combined dataset
-            display_preference_label_stats(combined_labels, combined_return_1, combined_return_2, config, title="Combined (Original + Cross-Embodiment) Labels")
-            
-            print("Combined dataset sizes:")
-            print(f"  Original: {len(obs_act_1)} pairs")
-            print(f"  Cross-embodiment augmentations: {len(aug_obs_act_1)} pairs")
-            print(f"  Combined: {len(combined_obs_act_1)} pairs")
-            
-            # Create reward model with combined data
-            print("Training augmented reward model with combined data...")
-            reward_model = RewardModel(config, combined_obs_act_1, combined_obs_act_2, combined_labels, dimension)
-            reward_model.save_test_dataset(
-                test_obs_act_1, test_obs_act_2, test_labels, test_binary_labels
+            target_obs_act_2 = np.concatenate(
+                (target_dataset["observations"][aug_idx_2], target_dataset["actions"][aug_idx_2]), axis=-1
             )
             
-            # Update variables for analysis
-            obs_act_1, obs_act_2, labels = combined_obs_act_1, combined_obs_act_2, combined_labels
-            return_1, return_2 = combined_return_1, combined_return_2
+            # Create reward model with augmented preferences
+            print("Training reward model with augmented preferences...")
+            reward_model = RewardModel(config, target_obs_act_1, target_obs_act_2, augmented_labels, obs_act_dim)
+            
+            # Use target dataset preferences for testing
+            if target_labels is not None:
+                # Create indices for target segments
+                target_idx_1 = [[j for j in range(i, i + config.segment_size)] for i in target_idx_st_1]
+                target_idx_2 = [[j for j in range(i, i + config.segment_size)] for i in target_idx_st_2]
+                
+                # Get observations and actions for target segments
+                test_obs_act_1 = np.concatenate(
+                    (target_dataset["observations"][target_idx_1], target_dataset["actions"][target_idx_1]), axis=-1
+                )
+                test_obs_act_2 = np.concatenate(
+                    (target_dataset["observations"][target_idx_2], target_dataset["actions"][target_idx_2]), axis=-1
+                )
+
+                import ipdb; ipdb.set_trace()
+                
+                # Convert target labels to binary format
+                test_labels = []
+                for label in target_labels:
+                    if label == 1:  # First segment preferred
+                        test_labels.append([1, 0])
+                    elif label == 0:  # Second segment preferred
+                        test_labels.append([0, 1])
+                    else:  # Equal preference
+                        test_labels.append([0.5, 0.5])
+                test_labels = np.array(test_labels)
+                
+                # Save test dataset
+                reward_model.save_test_dataset(
+                    test_obs_act_1, test_obs_act_2, test_labels, test_labels
+                )
+            
+            # Train the model
+            reward_model.train_model()
             
             # Save cross-embodiment DTW matrix for analysis
             if config.checkpoints_path:
                 np.save(os.path.join(config.checkpoints_path, "cross_dtw_matrix.npy"), cross_dtw_matrix)
                 print(f"Saved cross-embodiment DTW matrix to {config.checkpoints_path}")
         else:
-            print("No cross-embodiment augmentations generated, using baseline model as final model")
-            reward_model = baseline_reward_model
-        
-        # Train the augmented model
-        print("Training augmented reward model...")
-        reward_model.train_model()
-        
-        # Compare baseline vs augmented model performance
-        if len(augmented_idx_st_1) > 0:
-            print("Comparing baseline vs augmented model performance...")
-            comparison_path = os.path.join(config.checkpoints_path, f"baseline_vs_augmented_comparison_seed_{config.seed}.png") if config.checkpoints_path else None
-            comparison_results = compare_baseline_vs_augmented_performance(
-                baseline_reward_model=baseline_reward_model,
-                augmented_reward_model=reward_model,
-                test_obs_act_1=test_obs_act_1,
-                test_obs_act_2=test_obs_act_2,
-                test_labels=test_labels,
-                test_binary_labels=test_binary_labels,
-                test_gt_return_1=test_gt_return_1,
-                test_gt_return_2=test_gt_return_2,
-                config=config,
-                output_path=comparison_path,
-                wandb_run=wandb.run if wandb.run else None
-            )
-            
-            # Create individual test example deltas chart
-            print("Creating individual test example deltas chart...")
-            deltas_chart_path = os.path.join(config.checkpoints_path, f"individual_test_deltas_seed_{config.seed}.png") if config.checkpoints_path else None
-            deltas_results = plot_individual_test_example_deltas(
-                baseline_reward_model=baseline_reward_model,
-                augmented_reward_model=reward_model,
-                test_obs_act_1=test_obs_act_1,
-                test_obs_act_2=test_obs_act_2,
-                test_gt_return_1=test_gt_return_1,
-                test_gt_return_2=test_gt_return_2,
-                output_file=deltas_chart_path,
-                max_examples=200,
-                wandb_run=wandb.run if wandb.run else None,
-                random_seed=config.seed
-            )
-            
-            # Create baseline vs augmented scatter analysis
-            print("Creating baseline vs augmented scatter analysis...")
-            scatter_comparison_path = os.path.join(config.checkpoints_path, f"baseline_vs_augmented_scatter_seed_{config.seed}.png") if config.checkpoints_path else None
-            
-            # Use original data for fair comparison
-            original_obs_act_1 = np.concatenate(
-                (dataset["observations"][idx_1], dataset["actions"][idx_1]), axis=-1
-            )
-            original_obs_act_2 = np.concatenate(
-                (dataset["observations"][idx_2], dataset["actions"][idx_2]), axis=-1
-            )
-            original_return_1 = get_segment_rewards(dataset, idx_1)
-            original_return_2 = get_segment_rewards(dataset, idx_2)
-            
-            # Combine segments and returns
-            all_segments = np.concatenate([original_obs_act_1, original_obs_act_2], axis=0)
-            all_returns = np.concatenate([original_return_1, original_return_2], axis=0)
-            
-            scatter_results = plot_baseline_vs_augmented_scatter_analysis(
-                baseline_reward_model=baseline_reward_model,
-                augmented_reward_model=reward_model,
-                obs_act_segments=all_segments,
-                gt_returns=all_returns,
-                segment_size=config.segment_size,
-                output_file=scatter_comparison_path,
-                max_samples=5000,
-                wandb_run=wandb.run if wandb.run else None,
-                random_seed=config.seed
-            )
-
-    else:
-        # Original approach: Train first, then optionally augment
-        print("\nStrategy: Training FIRST, then optional DTW augmentations...")
-        
-        # Stage 1: Initial training (this serves as our baseline)
-        print("Stage 1: Initial reward model training (baseline)...")
-        reward_model.train_model()
-        baseline_reward_model = reward_model  # Keep reference to baseline
-        
-        # Stage 2: DTW augmentations with acquisition filtering (if enabled)
-        if config.use_dtw_augmentations:
-            print("\nStage 2: DTW augmentations with acquisition filtering...")
-            
-            # Prepare original preference pairs for DTW augmentation
-            original_pairs = list(zip(idx_st_1, idx_st_2))
-            original_preferences = labels.tolist()
-            
-            # Collect DTW augmentations
-            dtw_multiple_ranked_list, dtw_distances_dict, candidate_segment_indices = collect_dtw_augmentations(
-                dataset, 
-                traj_total, 
-                config,
-                original_pairs,
-                original_preferences,
-                use_relative_eef=config.use_relative_eef,
-                use_goal_pos=config.use_goal_pos,
-            )
-            
-            # Extract augmentation data in the same format as original training data
-            dtw_idx_st_1 = []
-            dtw_idx_st_2 = []
-            dtw_labels = []
-            
-            # Process DTW ranking lists to extract pairs
-            for single_ranked_list in dtw_multiple_ranked_list:
-                dtw_sub_index_set = []
-                for i, group in enumerate(single_ranked_list):
-                    for tup in group:
-                        dtw_sub_index_set.append((tup[0], i, tup[1]))
-                for i in range(len(dtw_sub_index_set)):
-                    for j in range(i + 1, len(dtw_sub_index_set)):
-                        dtw_idx_st_1.append(dtw_sub_index_set[i][0])
-                        dtw_idx_st_2.append(dtw_sub_index_set[j][0])
-                        if dtw_sub_index_set[i][1] < dtw_sub_index_set[j][1]:
-                            dtw_labels.append([0, 1])
-                        else:
-                            dtw_labels.append([0.5, 0.5])
-            
-            if len(dtw_idx_st_1) > 0:
-                dtw_labels = np.array(dtw_labels)
-                dtw_idx_1 = [[j for j in range(i, i + config.segment_size)] for i in dtw_idx_st_1]
-                dtw_idx_2 = [[j for j in range(i, i + config.segment_size)] for i in dtw_idx_st_2]
-                dtw_obs_act_1 = np.concatenate(
-                    (dataset["observations"][dtw_idx_1], dataset["actions"][dtw_idx_1]), axis=-1
-                )
-                dtw_obs_act_2 = np.concatenate(
-                    (dataset["observations"][dtw_idx_2], dataset["actions"][dtw_idx_2]), axis=-1
-                )
-                dtw_return_1 = get_segment_rewards(dataset, dtw_idx_1)
-                dtw_return_2 = get_segment_rewards(dataset, dtw_idx_2)
-                
-                # Display stats about DTW augmentation labels
-                display_preference_label_stats(dtw_labels, dtw_return_1, dtw_return_2, config, title="DTW Augmentation Labels")
-                
-                # Compute acquisition scores for DTW augmentations
-                print("Computing acquisition scores for DTW augmentations...")
-                acquisition_scores = compute_acquisition_scores(
-                    reward_model, dtw_obs_act_1, dtw_obs_act_2, dtw_labels, config
-                )
-                
-                # Filter augmentations based on acquisition scores
-                print("Filtering DTW augmentations based on acquisition scores...")
-                filtered_dtw_ranked_list, filtered_dtw_obs_act_1, filtered_dtw_obs_act_2, filtered_dtw_labels = filter_augmentations_by_acquisition(
-                    dtw_multiple_ranked_list,
-                    dtw_obs_act_1,
-                    dtw_obs_act_2, 
-                    dtw_labels,
-                    acquisition_scores,
-                    threshold_low=config.acquisition_threshold_low,
-                    threshold_high=config.acquisition_threshold_high
-                )
-                
-                # Display stats about filtered DTW augmentation labels
-                if len(filtered_dtw_obs_act_1) > 0:
-                    # Compute returns for filtered augmentations
-                    filtered_dtw_return_1 = dtw_return_1[acquisition_scores >= np.percentile(acquisition_scores, config.acquisition_threshold_low * 100)]
-                    filtered_dtw_return_2 = dtw_return_2[acquisition_scores >= np.percentile(acquisition_scores, config.acquisition_threshold_low * 100)]
-                    display_preference_label_stats(filtered_dtw_labels, filtered_dtw_return_1, filtered_dtw_return_2, config, title="Filtered DTW Augmentation Labels")
-                
-                # Combine original data with filtered augmentations
-                print("Combining original data with filtered DTW augmentations...")
-                combined_obs_act_1 = np.concatenate([obs_act_1, filtered_dtw_obs_act_1], axis=0)
-                combined_obs_act_2 = np.concatenate([obs_act_2, filtered_dtw_obs_act_2], axis=0)  
-                combined_labels = np.concatenate([labels, filtered_dtw_labels], axis=0)
-                combined_multiple_ranked_list = multiple_ranked_list + filtered_dtw_ranked_list
-                
-                # Display stats about combined dataset
-                if len(filtered_dtw_obs_act_1) > 0:
-                    combined_return_1 = np.concatenate([return_1, filtered_dtw_return_1], axis=0)
-                    combined_return_2 = np.concatenate([return_2, filtered_dtw_return_2], axis=0)
-                    display_preference_label_stats(combined_labels, combined_return_1, combined_return_2, config, title="Combined (Original + Filtered DTW) Labels")
-                
-                print("Combined dataset sizes:")
-                print(f"  Original: {len(obs_act_1)} pairs")
-                print(f"  DTW augmentations: {len(filtered_dtw_obs_act_1)} pairs")
-                print(f"  Combined: {len(combined_obs_act_1)} pairs")
-                
-                # Create new reward model with combined data
-                print("Retraining reward model with augmented data...")
-                combined_reward_model = RewardModel(config, combined_obs_act_1, combined_obs_act_2, combined_labels, dimension)
-                combined_reward_model.save_test_dataset(
-                    test_obs_act_1, test_obs_act_2, test_labels, test_binary_labels
-                )
-                combined_reward_model.train_model()
-                
-                # Compare baseline vs augmented model performance
-                print("Comparing baseline vs augmented model performance...")
-                comparison_path = os.path.join(config.checkpoints_path, f"baseline_vs_augmented_comparison_seed_{config.seed}.png") if config.checkpoints_path else None
-                comparison_results = compare_baseline_vs_augmented_performance(
-                    baseline_reward_model=baseline_reward_model,
-                    augmented_reward_model=combined_reward_model,
-                    test_obs_act_1=test_obs_act_1,
-                    test_obs_act_2=test_obs_act_2,
-                    test_labels=test_labels,
-                    test_binary_labels=test_binary_labels,
-                    test_gt_return_1=test_gt_return_1,
-                    test_gt_return_2=test_gt_return_2,
-                    config=config,
-                    output_path=comparison_path,
-                    wandb_run=wandb.run if wandb.run else None
-                )
-                
-                # Create individual test example deltas chart
-                print("Creating individual test example deltas chart...")
-                deltas_chart_path = os.path.join(config.checkpoints_path, f"individual_test_deltas_seed_{config.seed}.png") if config.checkpoints_path else None
-                deltas_results = plot_individual_test_example_deltas(
-                    baseline_reward_model=baseline_reward_model,
-                    augmented_reward_model=combined_reward_model,
-                    test_obs_act_1=test_obs_act_1,
-                    test_obs_act_2=test_obs_act_2,
-                    test_gt_return_1=test_gt_return_1,
-                    test_gt_return_2=test_gt_return_2,
-                    output_file=deltas_chart_path,
-                    max_examples=200,  # Show more examples in dedicated chart
-                    wandb_run=wandb.run if wandb.run else None,
-                    random_seed=config.seed
-                )
-                
-                # Use the combined model for final results
-                reward_model = combined_reward_model
-                obs_act_1, obs_act_2, labels = combined_obs_act_1, combined_obs_act_2, combined_labels
-                return_1 = np.concatenate([return_1, dtw_return_1[acquisition_scores >= np.percentile(acquisition_scores, config.acquisition_threshold_low * 100)]], axis=0)
-                return_2 = np.concatenate([return_2, dtw_return_2[acquisition_scores >= np.percentile(acquisition_scores, config.acquisition_threshold_low * 100)]], axis=0)
-                
-                # Analyze DTW augmentation quality after retraining
-                print("Analyzing DTW augmentation quality after retraining...")
-                dtw_analysis_path = os.path.join(config.checkpoints_path, f"dtw_augmentation_analysis_seed_{config.seed}.png") if config.checkpoints_path else None
-                analyze_dtw_augmentation_quality(
-                    reward_model=combined_reward_model,
-                    dtw_obs_act_1=dtw_obs_act_1,
-                    dtw_obs_act_2=dtw_obs_act_2,
-                    dtw_labels=dtw_labels,
-                    dataset=dataset,
-                    segment_start_indices_1=dtw_idx_st_1,
-                    segment_start_indices_2=dtw_idx_st_2,
-                    config=config,
-                    output_path=dtw_analysis_path,
-                    wandb_run=wandb.run if wandb.run else None
-                )
-                
-                # Save DTW matrix and acquisition scores for analysis
-                if config.checkpoints_path:
-                    np.save(os.path.join(config.checkpoints_path, "dtw_matrix.npy"), dtw_distances_dict)
-                    np.save(os.path.join(config.checkpoints_path, "acquisition_scores.npy"), acquisition_scores)
-                    np.save(os.path.join(config.checkpoints_path, "dtw_segment_indices.npy"), candidate_segment_indices)
-                    print(f"Saved DTW analysis data to {config.checkpoints_path}")
-                
-                # Create baseline vs augmented scatter analysis
-                print("Creating baseline vs augmented scatter analysis...")
-                scatter_comparison_path = os.path.join(config.checkpoints_path, f"baseline_vs_augmented_scatter_seed_{config.seed}.png") if config.checkpoints_path else None
-                
-                # Use original data for fair comparison (both models see same data)
-                # Combine both segments from pairs into individual segments
-                original_obs_act_1 = np.concatenate(
-                    (dataset["observations"][idx_1], dataset["actions"][idx_1]), axis=-1
-                )
-                original_obs_act_2 = np.concatenate(
-                    (dataset["observations"][idx_2], dataset["actions"][idx_2]), axis=-1
-                )
-                original_return_1 = get_segment_rewards(dataset, idx_1)
-                original_return_2 = get_segment_rewards(dataset, idx_2)
-                
-                # Combine both segments and returns into single arrays
-                all_segments = np.concatenate([original_obs_act_1, original_obs_act_2], axis=0)
-                all_returns = np.concatenate([original_return_1, original_return_2], axis=0)
-                
-                scatter_results = plot_baseline_vs_augmented_scatter_analysis(
-                    baseline_reward_model=baseline_reward_model,
-                    augmented_reward_model=combined_reward_model,
-                    obs_act_segments=all_segments,
-                    gt_returns=all_returns,
-                    segment_size=config.segment_size,
-                    output_file=scatter_comparison_path,
-                    max_samples=5000,
-                    wandb_run=wandb.run if wandb.run else None,
-                    random_seed=config.seed
-                )
-            else:
-                print("No DTW augmentations generated, using baseline model")
+            print("No cross-embodiment augmentations generated")
+            return
 
     # Save final model
     reward_model.save_model(config.checkpoints_path)
@@ -880,13 +497,6 @@ def train(config: TrainConfig):
     # Create episodes from the dataset for analysis
     episodes = create_episodes_from_dataset(dataset, device=config.device, episode_length=500)
     
-    # Determine reward range for normalization if rewards are available
-    reward_min = None
-    reward_max = None
-    if "rewards" in dataset:
-        reward_min = dataset["rewards"].min()
-        reward_max = dataset["rewards"].max()
-    
     # Generate reward analysis plot
     if config.checkpoints_path:
         reward_grid_path = os.path.join(config.checkpoints_path, f"reward_analysis_seed_{config.seed}.png")
@@ -895,37 +505,10 @@ def train(config: TrainConfig):
             episodes=episodes,
             output_file=reward_grid_path,
             num_episodes=min(9, len(episodes)),
-            reward_min=reward_min,
-            reward_max=reward_max,
             wandb_run=wandb.run if wandb.run else None,
             random_seed=config.seed
         )
         print(f"Reward analysis saved to: {reward_grid_path}")
-        
-        # only compute returns for the original data
-        obs_act_1 = np.concatenate(
-            (dataset["observations"][idx_1], dataset["actions"][idx_1]), axis=-1
-        )
-        obs_act_2 = np.concatenate(
-            (dataset["observations"][idx_2], dataset["actions"][idx_2]), axis=-1
-        )
-        return_1 = get_segment_rewards(dataset, idx_1)
-        return_2 = get_segment_rewards(dataset, idx_2)
-        
-        # Generate preference return analysis plot
-        preference_return_path = os.path.join(config.checkpoints_path, f"preference_return_analysis_seed_{config.seed}.png")
-        plot_preference_return_analysis_legacy(
-            reward_model=reward_model,
-            obs_act_1=obs_act_1,
-            obs_act_2=obs_act_2,
-            labels=labels,
-            gt_return_1=return_1,
-            gt_return_2=return_2,
-            segment_size=config.segment_size,
-            output_file=preference_return_path,
-            wandb_run=wandb.run if wandb.run else None
-        )
-        print(f"Preference return analysis saved to: {preference_return_path}")
 
     # After collecting feedback and before training
     if "images" in dataset:
@@ -942,8 +525,8 @@ def train(config: TrainConfig):
             if i < len(labels):
                 if labels[i][0] == 0 and labels[i][1] == 1:  # Second segment preferred
                     preference = 1
-                # elif labels[i][0] == 1 and labels[i][1] == 0:  # First segment preferred
-                #     preference = 0
+                elif labels[i][0] == 1 and labels[i][1] == 0:  # First segment preferred
+                    preference = 0
 
             # Combine segments side by side with preference border
             combined_images = combine_segments_side_by_side(images1, images2, preference)
@@ -953,71 +536,6 @@ def train(config: TrainConfig):
             # Only log first 10 queries to avoid overwhelming wandb
             if i >= 9:
                 break
-        
-        # If using DTW augmentations, log videos for each query's top K augmentations
-        if config.use_dtw_augmentations and len(dtw_idx_st_1) > 0:
-            print("Logging DTW augmented video sequences...")
-            
-            # Group augmented pairs by their original query segment
-            augmented_by_query = {}  # query_idx -> list of (aug_idx1, aug_idx2, pref, dist)
-            
-            for i, (idx1, idx2) in enumerate(zip(dtw_idx_st_1, dtw_idx_st_2)):
-                # Find which original query this augmentation came from
-                for query_idx, (query_idx1, query_idx2) in enumerate(zip(idx_st_1, idx_st_2)):
-                    if idx1 == query_idx1 or idx1 == query_idx2 or idx2 == query_idx1 or idx2 == query_idx2:
-                        if query_idx not in augmented_by_query:
-                            augmented_by_query[query_idx] = []
-                        
-                        # Get preference and distance for this pair
-                        pref = 2 # Default to equal preference
-                        if i < len(dtw_labels):
-                            if dtw_labels[i][0] == 0 and dtw_labels[i][1] == 1:
-                                pref = 1
-                            # elif dtw_labels[i][0] == 1 and dtw_labels[i][1] == 0:
-                            #     pref = 0
-                        
-                        # Get DTW distance if available
-                        dist = None
-                        # if hasattr(config, 'dtw_distances_dict'):
-                        if dtw_distances_dict is not None:
-                            # Find the distance in the DTW matrix
-                            for orig_idx, distances in dtw_distances_dict.items():
-                                for cand_idx, d in distances:
-                                    if (cand_idx == idx1 or cand_idx == idx2) and (orig_idx == query_idx1 or orig_idx == query_idx2):
-                                        dist = d
-                                        break
-                        
-                        augmented_by_query[query_idx].append((idx1, idx2, pref, dist))
-                        break
-            
-            # Log top K augmentations for first 10 queries
-            for query_idx in range(10):
-                if query_idx not in augmented_by_query:
-                    continue
-                
-                augmentations = augmented_by_query[query_idx]
-                
-                # Sort augmentations by DTW distance if available
-                if augmentations[0][3] is not None:  # Check if distance is available
-                    augmentations.sort(key=lambda x: x[3])  # Sort by distance
-                
-                # Take top K augmentations
-                top_k = min(config.dtw_k_augment, len(augmentations))
-                top_augmentations = augmentations[:top_k]
-                
-                # Log videos for top K augmentations
-                for aug_idx, (idx1, idx2, pref, dist) in enumerate(top_augmentations):
-                    # Get image sequences for both segments
-                    images1 = dataset["images"][idx1:idx1 + config.segment_size]
-                    images2 = dataset["images"][idx2:idx2 + config.segment_size]
-                    
-                    # Combine segments side by side with preference border
-                    combined_images = combine_segments_side_by_side(images1, images2, pref)
-                    if combined_images is not None:
-                        log_video_to_wandb(combined_images, f"dtw_augs/query_{query_idx}")
-
-
-
 
 
 if __name__ == "__main__":

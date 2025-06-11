@@ -328,11 +328,10 @@ def DMC_dataset(config):
     }
 
 def get_robomimic_env(
-    env_name,
+    data_path,
     render=False,
     render_offscreen=True,
     use_image_obs=False,
-    base_path=None,
     seed=42,
 ):
     """Create a Robomimic environment.
@@ -355,21 +354,8 @@ def get_robomimic_env(
     except ImportError:
         raise ImportError("Please install robomimic to use Robomimic environments")
 
-    if base_path is None:
-        import inspect
-        current_file = Path(inspect.getfile(inspect.currentframe()))
-        root = current_file.parent.parent.parent
-        base_path = root / "robomimic" / "robomimic" / "datasets"
-    else:
-        base_path = Path(base_path)
-
-    dataset_path = "/scr/shared/datasets/robot_pref/lift_panda/lift_panda.hdf5"
-    env_meta = FileUtils.get_env_metadata_from_dataset(str(dataset_path))
-
-    # to change the embodiment of the robot
-    # env_meta["env_kwargs"]["robots"] = ['Panda']
-    # change task
-    # env_meta["env_name"] = 'NutAssemblySquare'
+    env_meta = FileUtils.get_env_metadata_from_dataset(str(data_path))
+    env_meta["ignore_mesh_errors"] = True # TODO: have to do this for now
 
     obs_modality_dict = {
         "low_dim": [

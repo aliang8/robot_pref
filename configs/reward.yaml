@@ -4,7 +4,9 @@ seed: 0
 checkpoints_path: logs/
 load_model: null
 # preference
-feedback_num: 1000
+feedback_num: 100 # Number of human preferences from the source dataset to use for augmentation
+test_feedback_num: 100 # Number of human preferences from the target dataset to use for testing
+
 data_quality: 5.0
 segment_size: 32
 normalize: true

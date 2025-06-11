@@ -49,6 +49,8 @@ class TrainConfig:
     group: str = "BC-Robomimic"
     name: str = "BC"
 
+    data_path: str = ""
+
     def __post_init__(self):
         self.name = f"{self.name}-{self.env}-{str(uuid.uuid4())[:8]}"
         if self.checkpoints_path is not None:
@@ -307,7 +309,7 @@ def train(config: TrainConfig):
         env = utils_env.make_dmc_env(config.env, config.seed)
         dataset = utils_env.DMC_dataset(config)
     elif "robomimic" in config.env:
-        env = utils_env.get_robomimic_env(config.env, seed=config.seed)
+        env = utils_env.get_robomimic_env(config.data_path, seed=config.seed)
         dataset = utils_env.Robomimic_dataset(config)
     else:
         env = gym.make(config.env)

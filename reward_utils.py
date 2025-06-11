@@ -43,7 +43,7 @@ def get_indices(traj_total, config):
 
 
 def consist_test_dataset(
-    dataset, test_feedback_num, traj_total, segment_size, threshold
+    dataset, test_feedback_num, traj_total, segment_size, threshold, labels=None
 ):
     test_traj_idx = np.random.choice(traj_total, 2 * test_feedback_num, replace=True)
     test_idx = [
@@ -60,6 +60,7 @@ def consist_test_dataset(
         segment_size=segment_size,
         threshold=threshold,
         noise=0.0,
+        labels=labels,
     )
     test_binary_labels = obtain_labels(
         dataset,
@@ -68,6 +69,7 @@ def consist_test_dataset(
         segment_size=segment_size,
         threshold=0,
         noise=0.0,
+        labels= labels,
     )
     test_obs_act_1 = np.concatenate(
         (dataset["observations"][test_idx_1], dataset["actions"][test_idx_1]),
@@ -79,8 +81,8 @@ def consist_test_dataset(
     )
     return test_obs_act_1, test_obs_act_2, test_labels, test_binary_labels
 
-def get_human_feedbacks(config, dataset):
-    data_path = Path(config.data_path)
+def get_human_feedbacks(data_path, num_prefs):
+    data_path = Path(data_path)
     seg_indices_path = data_path.parent / "segment_start_end_indices.npy"
     seg_pairs_path = data_path.parent / "segment_pairs.npy"
     prefs_path = data_path.parent / "preferences"
@@ -95,7 +97,7 @@ def get_human_feedbacks(config, dataset):
     idx_st_1 = []
     idx_st_2 = []
 
-    for pref in prefs:
+    for pref in prefs[:num_prefs]:
         pair_ind = pref["pair_index"]
         preference = pref["preference"]  # Should be 'A', 'B', or 'equal'
 
@@ -960,14 +962,17 @@ def collect_human_feedback(dataset, config):
     return multiple_ranked_list
 
 
-def obtain_labels(dataset, idx_1, idx_2, segment_size=25, threshold=0.5, noise=0.0):
+def obtain_labels(dataset, idx_1, idx_2, segment_size=25, threshold=0.5, noise=0.0, labels=None):
     idx_1 = np.array(idx_1)
     idx_2 = np.array(idx_2)
-    labels = []
-    reward_1 = np.sum(dataset["rewards"][idx_1], axis=1)
-    reward_2 = np.sum(dataset["rewards"][idx_2], axis=1)
-    labels = np.where(reward_1 < reward_2, 1, 0)
-    labels = np.array([[1, 0] if i == 0 else [0, 1] for i in labels]).astype(float)
+
+    if labels is not None: # if human feedback labels are not provided rely on gt rewards
+        labels = []
+        reward_1 = np.sum(dataset["rewards"][idx_1], axis=1)
+        reward_2 = np.sum(dataset["rewards"][idx_2], axis=1)
+        labels = np.where(reward_1 < reward_2, 1, 0)
+        labels = np.array([[1, 0] if i == 0 else [0, 1] for i in labels]).astype(float)
+        
     gap = segment_size * threshold
 
     equal_labels = np.where(
