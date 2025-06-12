@@ -1,5 +1,5 @@
 batch_size: 256
-buffer_size: 250000
+buffer_size: 1_000_000
 checkpoints_path: checkpoints
 device: cuda
 discount: 0.99

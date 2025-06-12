@@ -1,4 +1,3 @@
-import glob
 import os
 import random
 import uuid
@@ -39,7 +38,7 @@ class TrainConfig:
     video_dir: Optional[str] = None  # Directory to save videos, if None, uses "bc_videos"
 
     # BC
-    buffer_size: int = 200027  # Replay buffer size
+    buffer_size: int = 1_000_000  # Replay buffer size
     frac: float = 0.1  # Best data fraction to use
     max_traj_len: int = 1000  # Max trajectory length
     normalize: bool = False  # Normalize states
@@ -320,7 +319,7 @@ def train(config: TrainConfig):
 
 
     if config.normalize:
-        state_mean, state_std = compute_mean_std(dataset["observations"], eps=1e-3)
+        state_mean, state_std = compute_mean_std(dataset["observations"].cpu().numpy(), eps=1e-3)
     else:
         state_mean, state_std = 0, 1
 
@@ -384,18 +383,9 @@ def train(config: TrainConfig):
         wandb.log(log_dict, step=trainer.total_it)
         # Evaluate episode
         if (t + 1) % config.eval_freq == 0:
-            print(f"Time steps: {t + 1}")
+            print(f"Eval at step: {t + 1}")
             
-            # Create video directory for this evaluation
-            video_dir = None
-            if config.record_video:
-                if config.video_dir:
-                    video_dir = os.path.join(config.video_dir, f"eval_{t}")
-                else:
-                    video_dir = os.path.join("videos_bc", f"eval_{t}")
-                os.makedirs(video_dir, exist_ok=True)
-            
-            eval_scores, eval_success = eval_actor(
+            eval_scores, eval_success, eval_frames = eval_actor(
                 env,
                 config.env,
                 actor,
@@ -403,7 +393,6 @@ def train(config: TrainConfig):
                 n_episodes=config.n_episodes,
                 seed=config.seed,
                 record_video=config.record_video,
-                video_dir=video_dir,
             )
             eval_score = eval_scores.mean()  # For DMControl
             eval_success = eval_success.mean() * 100  # For MetaWorld
@@ -424,16 +413,16 @@ def train(config: TrainConfig):
             )
             
             # Log videos to wandb if recording
-            if config.record_video and video_dir:
-                video_files = glob.glob(os.path.join(video_dir, "*.mp4"))
-                if video_files:
-                    # Log each video individually
-                    for video_file in video_files:
-                        episode_num = int(os.path.basename(video_file).split("_")[1].split(".")[0])
+            if config.record_video:
+                for i, frames in enumerate(eval_frames):
+                    if frames is not None:
+                        # Convert frames list to numpy array and transpose to (T, C, H, W)
+                        frames_array = np.stack(frames)  # (T, H, W, C)
+                        frames_array = np.transpose(frames_array, (0, 3, 1, 2))  # (T, C, H, W)
                         wandb.log(
                             {
-                                f"eval_vids/video_episode_{episode_num}": wandb.Video(
-                                    video_file,
+                                f"eval_vids/video_episode_{i+1}": wandb.Video(
+                                    frames_array,
                                     fps=30,
                                     format="mp4",
                                 )

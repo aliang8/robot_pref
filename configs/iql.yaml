@@ -1,4 +1,4 @@
-actor_lr: 3e-4
+actor_lr: 1e-4
 batch_size: 256
 beta: 3.0
 buffer_size: 10000000

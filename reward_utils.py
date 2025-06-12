@@ -82,6 +82,13 @@ def consist_test_dataset(
     return test_obs_act_1, test_obs_act_2, test_labels, test_binary_labels
 
 def get_human_feedbacks(data_path, num_prefs):
+    """Get human feedbacks from the dataset.
+    
+    Args:
+        data_path: Path to the dataset
+        num_prefs: Number of preferences to return. If None, return all preferences.
+                   If less than total available, randomly sample num_prefs.
+    """
     data_path = Path(data_path)
     seg_indices_path = data_path.parent / "segment_start_end_indices.npy"
     seg_pairs_path = data_path.parent / "segment_pairs.npy"
@@ -92,12 +99,17 @@ def get_human_feedbacks(data_path, num_prefs):
     seg_pairs = np.load(seg_pairs_path, allow_pickle=True)
     prefs, _ = load_preferences_from_directory(prefs_path)
 
+    # Randomly sample preferences if needed
+    if num_prefs is not None and len(prefs) > num_prefs:
+        indices = np.random.choice(len(prefs), num_prefs, replace=False)
+        prefs = [prefs[i] for i in indices]
+
     # Initialize lists to store processed data
     labels = []
     idx_st_1 = []
     idx_st_2 = []
 
-    for pref in prefs[:num_prefs]:
+    for pref in prefs:
         pair_ind = pref["pair_index"]
         preference = pref["preference"]  # Should be 'A', 'B', or 'equal'
 
@@ -123,7 +135,6 @@ def get_human_feedbacks(data_path, num_prefs):
     labels = np.array(labels)
     idx_st_1 = np.array(idx_st_1)
     idx_st_2 = np.array(idx_st_2)
-
     return labels, idx_st_1, idx_st_2
 
 
@@ -2462,7 +2473,7 @@ def plot_individual_test_example_deltas(
     }
 
 
-def compute_dtw_matrix_cross(main_dataset, seg_indices, augmentation_dataset, target_seg_indices, config, use_relative_eef=True, use_goal_pos=False):
+def compute_dtw_matrix_cross(main_dataset, seg_indices, augmentation_dataset, target_seg_indices, config, use_relative_eef=False, use_goal_pos=False):
     """
     Compute DTW distance matrix between main dataset segments and target dataset segments.
     
@@ -2483,11 +2494,7 @@ def compute_dtw_matrix_cross(main_dataset, seg_indices, augmentation_dataset, ta
     print("\nComputing cross-dataset DTW matrix...")
     
     # Import DTW module
-    try:
-        from utils import dtw
-        print("Using custom DTW implementation")
-    except ImportError:
-        raise ImportError("DTW module not found. Make sure robot_pref.utils.dtw is available.")
+    from utils import dtw
 
     seg_indices = seg_indices[:, 0]  # Use only start indices for segments
     target_seg_indices = target_seg_indices[:, 0]
@@ -2502,7 +2509,6 @@ def compute_dtw_matrix_cross(main_dataset, seg_indices, augmentation_dataset, ta
     max_dist = float("-inf")
     sum_dist = 0
     count = 0
-    non_finite_count = 0
     
     total_comparisons = n_main * n_target
     with tqdm(total=total_comparisons, desc="Computing cross-dataset DTW distances") as pbar:
@@ -2516,7 +2522,6 @@ def compute_dtw_matrix_cross(main_dataset, seg_indices, augmentation_dataset, ta
                     main_query = np.concatenate((main_query, main_dataset["observations"][main_idx:main_idx + config.segment_size, 36:]), axis=1)
                     target_ref = np.concatenate((target_ref, augmentation_dataset["observations"][target_idx:target_idx + config.segment_size, 36:]), axis=1)
                 
-                # Use relative positions if requested
                 if use_relative_eef:
                     main_query = main_query[1:] - main_query[:-1]
                     target_ref = target_ref[1:] - target_ref[:-1]
@@ -2529,22 +2534,16 @@ def compute_dtw_matrix_cross(main_dataset, seg_indices, augmentation_dataset, ta
                 distance_matrix[i, j] = cost
                 
                 # Update statistics
-                if np.isfinite(cost):
-                    min_dist = min(min_dist, cost)
-                    max_dist = max(max_dist, cost)
-                    sum_dist += cost
-                    count += 1
-                else:
-                    non_finite_count += 1
-                
+                min_dist = min(min_dist, cost)
+                max_dist = max(max_dist, cost)
+                sum_dist += cost
+                count += 1
+
                 pbar.update(1)
     
-    if count > 0:
-        avg_dist = sum_dist / count
-        print(f"Cross-dataset DTW distance statistics - Min: {min_dist:.2f}, Max: {max_dist:.2f}, Avg: {avg_dist:.2f}")
-    if non_finite_count > 0:
-        print(f"WARNING: {non_finite_count} cross-dataset DTW distances were non-finite")
-    
+    avg_dist = sum_dist / count
+    print(f"Cross-dataset DTW distance statistics - Min: {min_dist:.2f}, Max: {max_dist:.2f}, Avg: {avg_dist:.2f}")
+
     return distance_matrix
 
 

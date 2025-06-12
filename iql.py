@@ -1,7 +1,6 @@
 # source: https://github.com/gwthomas/IQL-PyTorch
 # https://arxiv.org/pdf/2110.06169.pdf
 import copy
-import glob
 import multiprocessing as mp
 import os
 import random
@@ -68,6 +67,7 @@ class TrainConfig:
     # reward model
     feedback_num: int = 1000
     use_reward_model: bool = False
+    use_gt_aug_prefs: bool = False  # Use ground truth preferences for reward learning
     epochs: int = 0
     batch_size: int = 256
     activation: str = "tanh"
@@ -130,7 +130,8 @@ class TrainConfig:
                 f"e{self.epochs}",  # Shorter epochs
                 f"th{self.threshold}",  # Shorter threshold
                 f"tr{self.trivial_reward}",  # Shorter trivial reward
-                f"cw{int(self.use_class_weights)}"  # Shorter class weights
+                f"cw{int(self.use_class_weights)}",  # Shorter class weights
+                f"gt{int(self.use_gt_aug_prefs)}"  # Add ground truth preference flag
             ]
             
             # Add DTW components if enabled (much shorter version)
@@ -152,7 +153,8 @@ class TrainConfig:
                 f"m_{self.model_type}",
                 f"n_{self.noise}",
                 f"e_{self.epochs}",
-                f"th_{self.threshold}"
+                f"th_{self.threshold}",
+                f"gt_{int(self.use_gt_aug_prefs)}"  # Add ground truth preference flag
             ]
             
             # Add DTW components if enabled (match learn_reward.py format)
@@ -225,11 +227,15 @@ class ReplayBuffer:
         action_dim: int,
         buffer_size: int,
         device: str = "cpu",
+        val_split: float = 0.1,  # 10% validation split
     ):
         self._buffer_size = buffer_size
         self._pointer = 0
         self._size = 0
+        self._val_split = val_split
+        self._val_size = 0
 
+        # Training data
         self._states = torch.zeros(
             (buffer_size, state_dim), dtype=torch.float32, device=device
         )
@@ -243,29 +249,18 @@ class ReplayBuffer:
             (buffer_size, state_dim), dtype=torch.float32, device=device
         )
         self._dones = torch.zeros((buffer_size, 1), dtype=torch.float32, device=device)
+        
+        # Validation data
+        self._val_states = None
+        self._val_actions = None
+        self._val_rewards = None
+        self._val_next_states = None
+        self._val_dones = None
+        
         self._device = device
 
     def _to_tensor(self, data: np.ndarray) -> torch.Tensor:
         return torch.tensor(data, dtype=torch.float32, device=self._device)
-
-    # Loads data in d4rl format, i.e. from Dict[str, np.array].
-    def load_d4rl_dataset(self, data: Dict[str, np.ndarray]):
-        if self._size != 0:
-            raise ValueError("Trying to load data into non-empty replay buffer")
-        n_transitions = data["observations"].shape[0]
-        if n_transitions > self._buffer_size:
-            raise ValueError(
-                "Replay buffer is smaller than the dataset you are trying to load!"
-            )
-        self._states[:n_transitions] = self._to_tensor(data["observations"])
-        self._actions[:n_transitions] = self._to_tensor(data["actions"])
-        self._rewards[:n_transitions] = self._to_tensor(data["rewards"][..., None])
-        self._next_states[:n_transitions] = self._to_tensor(data["next_observations"])
-        self._dones[:n_transitions] = self._to_tensor(data["terminals"][..., None])
-        self._size += n_transitions
-        self._pointer = min(self._size, n_transitions)
-
-        print(f"Dataset size: {n_transitions}")
 
     def load_dataset(self, data: Dict[str, np.ndarray]):
         if self._size != 0:
@@ -275,15 +270,48 @@ class ReplayBuffer:
             raise ValueError(
                 "Replay buffer is smaller than the dataset you are trying to load!"
             )
-        self._states[:n_transitions] = self._to_tensor(data["observations"])
-        self._actions[:n_transitions] = self._to_tensor(data["actions"])
-        self._rewards[:n_transitions] = self._to_tensor(data["rewards"][..., None])
-        self._next_states[:n_transitions] = self._to_tensor(data["next_observations"])
-        self._dones[:n_transitions] = self._to_tensor(data["terminals"][..., None])
-        self._size += n_transitions
-        self._pointer = min(self._size, n_transitions)
+            
+        # Calculate validation split
+        val_size = int(n_transitions * self._val_split)
+        train_size = n_transitions - val_size
+        
+        # Split data into train and validation
+        indices = np.random.permutation(n_transitions)
+        train_indices = indices[:train_size]
+        val_indices = indices[train_size:]
+        
+        # Load training data
+        self._states[:train_size] = self._to_tensor(data["observations"][train_indices])
+        self._actions[:train_size] = self._to_tensor(data["actions"][train_indices])
+        self._rewards[:train_size] = self._to_tensor(data["rewards"][train_indices, None])
+        self._next_states[:train_size] = self._to_tensor(data["next_observations"][train_indices])
+        self._dones[:train_size] = self._to_tensor(data["terminals"][train_indices, None])
+        self._size = train_size
+        self._pointer = train_size
+        
+        # Load validation data
+        self._val_states = self._to_tensor(data["observations"][val_indices])
+        self._val_actions = self._to_tensor(data["actions"][val_indices])
+        self._val_rewards = self._to_tensor(data["rewards"][val_indices, None])
+        self._val_next_states = self._to_tensor(data["next_observations"][val_indices])
+        self._val_dones = self._to_tensor(data["terminals"][val_indices, None])
+        self._val_size = val_size
 
-        print(f"Dataset size: {n_transitions}")
+        print(f"Dataset size: {n_transitions} (train: {train_size}, val: {val_size})")
+
+    def normalize_observations(self, state_mean: np.ndarray, state_std: np.ndarray):
+        """Normalize both training and validation observations."""
+        # Convert numpy arrays to tensors on the same device as the data
+        state_mean = torch.tensor(state_mean, device=self._states.device)
+        state_std = torch.tensor(state_std, device=self._states.device)
+        
+        # Normalize training observations
+        self._states = (self._states - state_mean) / state_std
+        self._next_states = (self._next_states - state_mean) / state_std
+        
+        # Normalize validation observations
+        self._val_states = (self._val_states - state_mean) / state_std
+        self._val_next_states = (self._val_next_states - state_mean) / state_std
 
     def sample(self, batch_size: int) -> TensorBatch:
         indices = np.random.randint(0, min(self._size, self._pointer), size=batch_size)
@@ -293,11 +321,16 @@ class ReplayBuffer:
         next_states = self._next_states[indices]
         dones = self._dones[indices]
         return [states, actions, rewards, next_states, dones]
-
-    def add_transition(self):
-        # Use this method to add new data into the replay buffer during fine-tuning.
-        # I left it unimplemented since now we do not do fine-tuning.
-        raise NotImplementedError
+        
+    def get_validation_batch(self) -> TensorBatch:
+        """Get the entire validation set."""
+        return [
+            self._val_states,
+            self._val_actions,
+            self._val_rewards,
+            self._val_next_states,
+            self._val_dones,
+        ]
 
 
 def set_seed(
@@ -325,36 +358,29 @@ def wandb_init(config: dict) -> None:
     wandb.run.save()
 
 
-def _eval_episode(env, actor, device, max_steps, seed, record_video=False, video_path=None):
+def _eval_episode(env, actor, device, max_steps, seed, record_video=False, state_mean=None, state_std=None):
     """Helper function to evaluate a single episode."""
     env.seed(seed)
     
     # Setup video recording if requested
-    video_writer = None
-    if record_video and video_path:
+    frames = []
+    if record_video:
         try:
-            import os
-            import imageio
-            os.makedirs(os.path.dirname(video_path), exist_ok=True)
-            video_writer = imageio.get_writer(video_path, fps=30)
+            frame = env.render(mode="rgb_array")
+            frames.append(frame)
         except Exception as e:
-            print(f"Error setting up video recording: {e}")
-            video_writer = None
+            print(f"Warning: Could not capture initial frame: {e}")
     
     state, info = env.reset()
     episode_reward = 0.0
     episode_success = False
     steps = 0
     
-    # Record initial frame if recording
-    if video_writer:
-        try:
-            frame = env.render(mode="rgb_array")
-            video_writer.append_data(frame)
-        except Exception as e:
-            print(f"Warning: Could not capture initial frame: {e}")
-    
     while steps < max_steps:
+        # Normalize state if normalization parameters are provided
+        if state_mean is not None and state_std is not None:
+            state = (state - state_mean) / state_std
+            
         action = actor.act(state, device)
         state, reward, terminated, truncated, info = env.step(action)
         done = terminated or truncated
@@ -365,26 +391,18 @@ def _eval_episode(env, actor, device, max_steps, seed, record_video=False, video
         if "success" in info:
             episode_success = episode_success or info["success"]
             
-        
         # Record frame if recording
-        if video_writer:
+        if record_video:
             try:
                 frame = env.render(mode="rgb_array")
-                video_writer.append_data(frame)
+                frames.append(frame)
             except Exception as e:
                 print(f"Warning: Could not capture frame: {e}")
 
         if episode_success:
             break
                 
-    # Close video writer if recording
-    if video_writer:
-        try:
-            video_writer.close()
-        except Exception as e:
-            print(f"Warning: Error closing video writer: {e}")
-            
-    return episode_reward, int(episode_success)
+    return episode_reward, int(episode_success), frames if record_video else None
 
 
 @torch.no_grad()
@@ -395,11 +413,12 @@ def eval_actor(
     device: str,
     n_episodes: int,
     seed: int,
-    max_steps: int = 1000,
+    max_steps: int = 500,
     parallel: bool = False,
     record_video: bool = True,
-    video_dir: str = "/scr/matthewh6/robot_pref/videos",
-) -> np.ndarray:
+    state_mean: Optional[np.ndarray] = None,
+    state_std: Optional[np.ndarray] = None,
+) -> Tuple[np.ndarray, np.ndarray, List[np.ndarray]]:
     """Evaluate the actor on the environment."""
     actor.eval()
     
@@ -416,10 +435,6 @@ def eval_actor(
     
     # Wrap the actor
     algo = ActorWrapper(actor, device)
-    
-    # Create video directory if needed
-    if record_video and video_dir:
-        os.makedirs(video_dir, exist_ok=True)
     
     # Determine if we should use parallel evaluation
     use_parallel = parallel and n_episodes > 1
@@ -456,12 +471,9 @@ def eval_actor(
                 
                 # Determine if this episode should be recorded
                 should_record = record_video and i < 5  # Record up to 5 episodes
-                video_path = None
-                if should_record:
-                    video_path = os.path.join(video_dir, f"episode_{i}.mp4")
                 
                 # Add to worker arguments
-                worker_args.append((env_creator, algo, i, should_record, video_path, 30))
+                worker_args.append((env_creator, algo, i, should_record, None, 30))
             
             # Use 'spawn' context for better compatibility across platforms
             ctx = get_context("spawn")
@@ -471,6 +483,7 @@ def eval_actor(
             # Process results
             episode_rewards = [r["return"] for r in results]
             episode_success_list = [r["success"] for r in results]
+            episode_frames = [r.get("frames", None) for r in results]
             
         except Exception as e:
             print(f"Error in parallel evaluation: {e}. Falling back to sequential evaluation.")
@@ -482,27 +495,25 @@ def eval_actor(
     if not use_parallel:
         episode_rewards = []
         episode_success_list = []
+        episode_frames = []
         
         for i in range(n_episodes):
-            # Setup video path for this episode
-            video_path = None
-            if record_video and video_dir:
-                video_path = os.path.join(video_dir, f"episode_{i}.mp4")
-            
-            reward, success = _eval_episode(
+            reward, success, frames = _eval_episode(
                 env, 
                 actor, 
                 device, 
                 max_steps, 
                 seed + i,
-                record_video=record_video,
-                video_path=video_path
+                record_video=record_video and i < 5,  # Record up to 5 episodes
+                state_mean=state_mean,
+                state_std=state_std,
             )
             episode_rewards.append(reward)
             episode_success_list.append(success)
+            episode_frames.append(frames)
     
     actor.train()
-    return np.array(episode_rewards), np.array(episode_success_list)
+    return np.array(episode_rewards), np.array(episode_success_list), episode_frames
 
 
 def return_reward_range(dataset, max_episode_steps):
@@ -772,6 +783,18 @@ class ImplicitQLearning:
         self.total_it = 0
         self.device = device
 
+    def _compute_gripper_accuracy(self, pred_actions: torch.Tensor, target_actions: torch.Tensor) -> float:
+        """Compute accuracy of gripper actions (last dimension)."""
+        pred_gripper = torch.sign(pred_actions[:, -1])
+        target_gripper = target_actions[:, -1]
+        accuracy = (pred_gripper == target_gripper).float().mean().item()
+        return accuracy
+
+    def _compute_arm_loss(self, pred_actions: torch.Tensor, target_actions: torch.Tensor) -> float:
+        """Compute MSE loss for arm actions (all dimensions except last)."""
+        arm_loss = F.mse_loss(pred_actions[:, :-1], target_actions[:, :-1]).item()
+        return arm_loss
+
     def _update_v(self, observations, actions, log_dict) -> torch.Tensor:
         # Update value function
         with torch.no_grad():
@@ -816,15 +839,21 @@ class ImplicitQLearning:
         log_dict: Dict,
     ):
         exp_adv = torch.exp(self.beta * adv.detach()).clamp(max=EXP_ADV_MAX)
-        policy_out = self.actor(observations)
-        if isinstance(policy_out, torch.distributions.Distribution):
-            bc_losses = -policy_out.log_prob(actions).sum(-1, keepdim=False)
-        elif torch.is_tensor(policy_out):
-            if policy_out.shape != actions.shape:
-                raise RuntimeError("Actions shape missmatch")
-            bc_losses = torch.sum((policy_out - actions) ** 2, dim=1)
-        else:
-            raise NotImplementedError
+        # policy_out = self.actor(observations)
+        # if isinstance(policy_out, torch.distributions.Distribution):
+        #     bc_losses = -policy_out.log_prob(actions).sum(-1, keepdim=False)
+        # elif torch.is_tensor(policy_out):
+        #     if policy_out.shape != actions.shape:
+        #         raise RuntimeError("Actions shape missmatch")
+        #     bc_losses = torch.sum((policy_out - actions) ** 2, dim=1)
+        # else:
+        #     raise NotImplementedError
+
+        bc_losses, loss_dict = self.actor.compute_loss(observations, actions)
+
+        # update log_dict
+        log_dict.update(loss_dict)
+
         policy_loss = torch.mean(exp_adv * bc_losses)
         log_dict["actor_loss"] = policy_loss.item()
         self.actor_optimizer.zero_grad()
@@ -832,7 +861,7 @@ class ImplicitQLearning:
         self.actor_optimizer.step()
         self.actor_lr_schedule.step()
 
-    def train(self, batch: TensorBatch) -> Dict[str, float]:
+    def train(self, batch: TensorBatch, val_batch: Optional[TensorBatch] = None) -> Dict[str, float]:
         self.total_it += 1
         (
             observations,
@@ -853,6 +882,18 @@ class ImplicitQLearning:
         self._update_q(next_v, observations, actions, rewards, dones, log_dict)
         # Update actor
         self._update_policy(adv, observations, actions, log_dict)
+
+        # Compute validation metrics if validation batch is provided
+        if val_batch is not None:
+            val_obs, val_actions = val_batch[0], val_batch[1]
+            with torch.no_grad():
+                val_pred_actions = self.actor(val_obs)
+                if isinstance(val_pred_actions, torch.distributions.Distribution):
+                    val_pred_actions = val_pred_actions.mean
+                gripper_accuracy = self._compute_gripper_accuracy(val_pred_actions, val_actions)
+                arm_loss = self._compute_arm_loss(val_pred_actions, val_actions)
+                log_dict["val/gripper_accuracy"] = gripper_accuracy
+                log_dict["val/arm_loss"] = arm_loss
 
         return log_dict
 
@@ -893,7 +934,7 @@ def train(config: TrainConfig):
         env = utils_env.make_dmc_env(config.env, config.seed)
         dataset = utils_env.DMC_dataset(config)
     elif "robomimic" in config.env:
-        env = utils_env.get_robomimic_env(config.env, seed=config.seed)
+        env = utils_env.get_robomimic_env(config.data_path, seed=config.seed)
         dataset = utils_env.Robomimic_dataset(config)
     else:
         env = gym.make(config.env)
@@ -904,7 +945,7 @@ def train(config: TrainConfig):
 
 
     if config.normalize:
-        state_mean, state_std = compute_mean_std(dataset["observations"], eps=1e-3)
+        state_mean, state_std = compute_mean_std(dataset["observations"], eps=1e-5)
     else:
         state_mean, state_std = 0, 1
 
@@ -933,7 +974,8 @@ def train(config: TrainConfig):
             f"m_{config.model_type}",
             f"n_{config.noise}",
             f"e_{config.epochs}",
-            f"th_{config.threshold}"
+            f"th_{config.threshold}",
+            f"gt_{int(config.use_gt_aug_prefs)}"  # Add ground truth preference flag
         ]
         
         # Add DTW components if enabled (match learn_reward.py format)
@@ -971,6 +1013,7 @@ def train(config: TrainConfig):
         config.device,
     )
     replay_buffer.load_dataset(dataset)
+    replay_buffer.normalize_observations(state_mean, state_std)
 
     max_action = float(env.action_space.high[0])
 
@@ -1033,12 +1076,18 @@ def train(config: TrainConfig):
     for t in range(int(config.max_timesteps)):
         batch = replay_buffer.sample(config.batch_size)
         batch = [b.to(config.device) for b in batch]
-        log_dict = trainer.train(batch)
-        if (t + 1) % 5000 == 0:
-            wandb.log(log_dict, step=trainer.total_it)
+        
+        # Get validation batch
+        val_batch = replay_buffer.get_validation_batch()
+        val_batch = [b.to(config.device) for b in val_batch]
+        
+        log_dict = trainer.train(batch, val_batch)
+
+        # Log training/validation metrics
+        wandb.log(log_dict, step=trainer.total_it)
         # Evaluate episode
         if (t + 1) % config.eval_freq == 0:
-            print(f"Time steps: {t + 1}")
+            print(f"Eval at step: {t + 1}")
             
             # Create video directory for this evaluation
             video_dir = None
@@ -1049,7 +1098,7 @@ def train(config: TrainConfig):
                     video_dir = os.path.join("videos", f"eval_{t}")
                 os.makedirs(video_dir, exist_ok=True)
             
-            eval_scores, eval_success = eval_actor(
+            eval_scores, eval_success, eval_frames = eval_actor(
                 env,
                 config.env,
                 actor,
@@ -1057,7 +1106,8 @@ def train(config: TrainConfig):
                 n_episodes=config.n_episodes,
                 seed=config.seed,
                 record_video=config.record_video,
-                video_dir=video_dir,
+                state_mean=state_mean if config.normalize else None,
+                state_std=state_std if config.normalize else None,
             )
             eval_score = eval_scores.mean()  # For DMControl
             eval_success = eval_success.mean() * 100  # For MetaWorld
@@ -1079,15 +1129,16 @@ def train(config: TrainConfig):
             
             # Log videos to wandb if recording
             if config.record_video and video_dir:
-                video_files = glob.glob(os.path.join(video_dir, "*.mp4"))
-                if video_files:
-                    # Log each video individually
-                    for video_file in video_files:
-                        episode_num = int(os.path.basename(video_file).split("_")[1].split(".")[0])
+                for i, frames in enumerate(eval_frames):
+                    if frames is not None:
+                        episode_num = i + 1
+                        # Convert frames list to numpy array and transpose to (T, C, H, W)
+                        frames_array = np.stack(frames)  # (T, H, W, C)
+                        frames_array = np.transpose(frames_array, (0, 3, 1, 2))  # (T, C, H, W)
                         wandb.log(
                             {
                                 f"eval_vids/video_episode_{episode_num}": wandb.Video(
-                                    video_file,
+                                    frames_array,
                                     fps=30,
                                     format="mp4",
                                 )

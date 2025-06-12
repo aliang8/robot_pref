@@ -1,6 +1,5 @@
 import os
 import pickle as pkl
-from pathlib import Path
 
 import dmc2gym
 import metaworld.envs.mujoco.env_dict as _env_dict
@@ -39,7 +38,7 @@ def make_dmc_env(env_name, seed):
     )
     return env
 
-def Robomimic_dataset(config):
+def Robomimic_dataset(data_path):
     """
     Load and process Robomimic datasets in HDF5 format.
     
@@ -52,87 +51,87 @@ def Robomimic_dataset(config):
             terminals: An N-dim boolean array of "done" or episode termination flags.
     """
     # TODO: 
-    config.human = False
+    # config.human = False
 
-    if config.human == False:
-        import h5py
+    # if config.human == False:
+    import h5py
+    
+    # Load the HDF5 format dataset
+    path = data_path
+    print(f"loading data from: {path}")
+    
+    dataset = dict()
+    with h5py.File(path, 'r') as f:
+        data = f["data"]
         
-        # Load the HDF5 format dataset
-        path = config.data_path
-        print(f"loading data from: {path}")
+        # Initialize lists to store data
+        observations = []
+        actions = []
+        episodes = []
+        images = []
         
-        dataset = dict()
-        with h5py.File(path, 'r') as f:
-            data = f["data"]
+        # Process each demonstration
+        num_trajectories = len(data.keys())
+        print(f"Found {num_trajectories} trajectories in the dataset")
+        
+        for demo in sorted(data.keys(), key=lambda x: int(x.split('_')[1])):
+            demo_data = data[demo]
             
-            # Initialize lists to store data
-            observations = []
-            actions = []
-            episodes = []
-            images = []
+            # Get observations
+            obs = np.concatenate([
+                demo_data["obs"]["robot0_eef_pos"][:].reshape(-1, 3),
+                demo_data["obs"]["robot0_eef_quat"][:].reshape(-1, 4),
+                demo_data["obs"]["robot0_gripper_qpos"][:].reshape(-1, 2),
+                demo_data["obs"]["object"][:].reshape(-1, 10)  # obs varies by task (lift: 10, square: 14)
+            ], axis=1)
             
-            # Process each demonstration
-            num_trajectories = len(data.keys())
-            print(f"Found {num_trajectories} trajectories in the dataset")
+            observations.append(obs)
+            actions.append(demo_data["actions"][:])
+            episodes.append(np.full((len(demo_data["actions"]),), int(demo.split('_')[1])))
             
-            for demo in sorted(data.keys(), key=lambda x: int(x.split('_')[1])):
-                demo_data = data[demo]
-                
-                # Get observations
-                obs = np.concatenate([
-                    demo_data["obs"]["robot0_eef_pos"][:].reshape(-1, 3),
-                    demo_data["obs"]["robot0_eef_quat"][:].reshape(-1, 4),
-                    demo_data["obs"]["robot0_gripper_qpos"][:].reshape(-1, 2),
-                    demo_data["obs"]["object"][:].reshape(-1, 10)  # obs varies by task (lift: 10, square: 14)
-                ], axis=1)
-                
-                observations.append(obs)
-                actions.append(demo_data["actions"][:])
-                episodes.append(np.full((len(demo_data["actions"]),), int(demo.split('_')[1])))
-                
-                # Get images if available
-                if "agentview_image" in demo_data["obs"]:
-                    images.append(demo_data["obs"]["agentview_image"][:])
-            
-            # Convert lists to numpy arrays
-            dataset["observations"] = np.concatenate(observations, axis=0)
-            dataset["actions"] = np.concatenate(actions, axis=0)
-            episodes = np.concatenate(episodes, axis=0)
-            
-            # Create next_observations by shifting observations
-            dataset["next_observations"] = np.roll(dataset["observations"], -1, axis=0)
-            
-            # Create terminals based on episode boundaries
-            dataset["terminals"] = np.zeros(len(dataset["observations"]), dtype=bool)
-            # Mark the last step of each episode as terminal
-            for i in range(len(episodes)-1):
-                if episodes[i] != episodes[i+1]:
-                    dataset["terminals"][i] = True
-            # Mark the very last step as terminal
-            dataset["terminals"][-1] = True
-            
-            # Create dummy rewards
-            dataset["rewards"] = np.zeros(len(dataset["observations"]))
-            
-            # Store images if available
-            if len(images) > 0:
-                dataset["images"] = np.concatenate(images, axis=0)
-            
-            # Print total number of transitions
-            print(f"Total number of transitions: {len(dataset['observations'])}")
-            print(f"Average trajectory length: {len(dataset['observations']) / num_trajectories:.2f} steps")
-            
-    elif config.human == True:
-        base_path = os.path.join(os.getcwd(), "human_feedback/")
-        base_path += f"{config.env}/dataset.pkl"
-        with open(base_path, "rb") as f:
-            dataset = pkl.load(f)
-            dataset["observations"] = np.array(dataset["observations"])
-            dataset["actions"] = np.array(dataset["actions"])
-            dataset["next_observations"] = np.array(dataset["next_observations"])
-            dataset["rewards"] = np.zeros(len(dataset["observations"]))  # dummy rewards
-            dataset["terminals"] = np.array(dataset["dones"])
-            dataset["images"] = np.array(dataset["images"])
+            # Get images if available
+            if "agentview_image" in demo_data["obs"]:
+                images.append(demo_data["obs"]["agentview_image"][:])
+        
+        # Convert lists to numpy arrays
+        dataset["observations"] = np.concatenate(observations, axis=0)
+        dataset["actions"] = np.concatenate(actions, axis=0)
+        episodes = np.concatenate(episodes, axis=0)
+        
+        # Create next_observations by shifting observations
+        dataset["next_observations"] = np.roll(dataset["observations"], -1, axis=0)
+        
+        # Create terminals based on episode boundaries
+        dataset["terminals"] = np.zeros(len(dataset["observations"]), dtype=bool)
+        # Mark the last step of each episode as terminal
+        for i in range(len(episodes)-1):
+            if episodes[i] != episodes[i+1]:
+                dataset["terminals"][i] = True
+        # Mark the very last step as terminal
+        dataset["terminals"][-1] = True
+        
+        # Create dummy rewards
+        dataset["rewards"] = np.zeros(len(dataset["observations"]))
+        
+        # Store images if available
+        if len(images) > 0:
+            dataset["images"] = np.concatenate(images, axis=0)
+        
+        # Print total number of transitions
+        print(f"Total number of transitions: {len(dataset['observations'])}")
+        print(f"Average trajectory length: {len(dataset['observations']) / num_trajectories:.2f} steps")
+        
+    # elif config.human == True:
+    #     base_path = os.path.join(os.getcwd(), "human_feedback/")
+    #     base_path += f"{config.env}/dataset.pkl"
+    #     with open(base_path, "rb") as f:
+    #         dataset = pkl.load(f)
+    #         dataset["observations"] = np.array(dataset["observations"])
+    #         dataset["actions"] = np.array(dataset["actions"])
+    #         dataset["next_observations"] = np.array(dataset["next_observations"])
+    #         dataset["rewards"] = np.zeros(len(dataset["observations"]))  # dummy rewards
+    #         dataset["terminals"] = np.array(dataset["dones"])
+    #         dataset["images"] = np.array(dataset["images"])
 
     N = dataset["observations"].shape[0]
     obs_ = []
@@ -170,6 +169,8 @@ def Robomimic_dataset(config):
     
     if "images" in dataset:
         return_dict["images"] = np.array(images_)
+
+    print(f"Total transitions: {len(return_dict['observations'])}")
         
     return return_dict
 
@@ -354,8 +355,8 @@ def get_robomimic_env(
     except ImportError:
         raise ImportError("Please install robomimic to use Robomimic environments")
 
-    env_meta = FileUtils.get_env_metadata_from_dataset(str(data_path))
-    env_meta["ignore_mesh_errors"] = True # TODO: have to do this for now
+    env_meta = FileUtils.get_env_metadata_from_dataset(data_path)
+ 
 
     obs_modality_dict = {
         "low_dim": [
