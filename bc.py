@@ -4,7 +4,10 @@ import uuid
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
-
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from typing import Dict, Tuple
 import gym
 import numpy as np
 import pyrallis
@@ -34,7 +37,7 @@ class TrainConfig:
     batch_size: int = 256  # Batch size for all networks
     discount: float = 0.99  # Discount factor
     # Video recording
-    record_video: bool = False  # Whether to record evaluation videos
+    record_video: bool = True  # Whether to record evaluation videos
     video_dir: Optional[str] = None  # Directory to save videos, if None, uses "bc_videos"
 
     # BC
@@ -174,81 +177,117 @@ def keep_best_trajectories(
     dataset["terminals"] = dataset["terminals"][order]
 
 
+
 class Actor(nn.Module):
-    def __init__(self, state_dim: int, action_dim: int, max_action: float, pos_weight: float = 1.0):
-        super(Actor, self).__init__()
+    """
+    Arm:  continuous actions in [-max_action, max_action]^6
+    Gripper: discrete {-1, 1}  (open / close)
+    """
 
-        # Main action network (excluding gripper)
-        self.net = nn.Sequential(
-            nn.Linear(state_dim, 256),
-            nn.ReLU(),
-            nn.Linear(256, 256),
-            nn.ReLU(),
-            nn.Linear(256, action_dim - 1),  # Exclude gripper dimension
-            nn.Tanh(),
+    def __init__(
+        self,
+        state_dim:   int,
+        action_dim:  int,
+        max_action:  float = 1.0,
+        pos_weight:  float = 5 # To punish false negatives (close grippers)
+    ):
+        super().__init__()
+
+        # ------- shared hyper‑params -------
+        hidden = 256
+
+        # ------- arm head -------
+        self.arm_net = nn.Sequential(
+            nn.Linear(state_dim, hidden), nn.ReLU(),
+            nn.Linear(hidden,  hidden),   nn.ReLU(),
+            nn.Linear(hidden,  action_dim - 1)           # 6 dims
         )
 
-        # Separate gripper network - outputs a single value for binary classification
+        # ------- gripper head (logits) -------
         self.gripper_net = nn.Sequential(
-            nn.Linear(state_dim, 256),
-            nn.ReLU(),
-            nn.Linear(256, 256),
-            nn.ReLU(),
-            nn.Linear(256, 1),
-            nn.Sigmoid(),  # Use sigmoid for binary classification
+            nn.Linear(state_dim, hidden), nn.ReLU(),
+            nn.Linear(hidden,  hidden),   nn.ReLU(),
+            nn.Linear(hidden,  1)                         # raw logits
         )
 
-        self.max_action = max_action
-        self.pos_weight = pos_weight  # Weight for gripper loss
+        self.max_action = float(max_action)
+        # buffer so it moves with the model between CPU / GPU
+        self.register_buffer("bce_pos_weight",
+                             torch.tensor(pos_weight, dtype=torch.float32))
 
-    def forward(self, state: torch.Tensor) -> torch.Tensor:
-        main_actions = self.net(state)
-        gripper_logits = self.gripper_net(state)
-        # Convert sigmoid output (0-1) to -1 or 1
-        gripper_action = 2 * gripper_logits - 1
-        return torch.cat([main_actions, gripper_action], dim=-1)
+    # --------------------------------------------------------------------- #
+    # Forward                                                                #
+    # --------------------------------------------------------------------- #
+    def forward(self, state: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Returns:
+            arm_actions      -- shape (B, 6), scaled to [-max_action, max_action]
+            gripper_logits   -- shape (B, 1), un‑activated
+        """
+        arm_actions    = torch.tanh(self.arm_net(state)) * self.max_action
+        gripper_logits = self.gripper_net(state)          # raw
+        return arm_actions, gripper_logits
 
-    def compute_loss(self, state: torch.Tensor, target_action: torch.Tensor) -> Tuple[torch.Tensor, Dict[str, float]]:
-        pi = self(state)
-        
-        # Split actions into main actions and gripper
-        arm_actions = target_action[:, :-1]
-        gripper_action = target_action[:, -1:]
-        arm_pi = pi[:, :-1]
-        gripper_pi = pi[:, -1:]
-        
-        # Compute separate losses
-        arm_loss = F.mse_loss(arm_pi, arm_actions)
-        
-        # Convert target gripper action from [-1,1] to [0,1] for BCE
-        gripper_target = (gripper_action + 1) / 2
-        # Convert predicted gripper action from [-1,1] to [0,1] for BCE
-        gripper_pred = (gripper_pi + 1) / 2
-        gripper_loss = F.binary_cross_entropy(gripper_pred, gripper_target)
-        
-        # Combine losses with gripper weight
-        total_loss = arm_loss + self.pos_weight * gripper_loss
-        
-        log_dict = {
-            "arm_loss": arm_loss.item(),
-            "gripper_loss": gripper_loss.item(),
-            "total_loss": total_loss.item()
+    # --------------------------------------------------------------------- #
+    # Loss                                                                   #
+    # --------------------------------------------------------------------- #
+    def compute_loss(
+        self, state: torch.Tensor, target_action: torch.Tensor
+    ) -> Tuple[torch.Tensor, Dict[str, float]]:
+
+        arm_pred, grip_logits = self(state)
+
+        # Split labelled targets
+        arm_target     = target_action[:, :-1]                 # (B, 6)
+        grip_target_01 = (target_action[:, -1:] + 1) / 2       # {-1,1} -> {0,1}
+
+        # Losses
+        arm_loss = F.mse_loss(arm_pred, arm_target)
+
+        grip_loss = F.binary_cross_entropy_with_logits(
+            grip_logits,
+            grip_target_01,
+            pos_weight=self.bce_pos_weight
+        )
+
+        total = arm_loss + grip_loss
+
+        return total, {
+            "arm_mse":   arm_loss.item(),
+            "grip_bce":  grip_loss.item(),
+            "total":     total.item()
         }
-        
-        return total_loss, log_dict
 
+    # --------------------------------------------------------------------- #
+    # Act (no‑grad)                                                          #
+    # --------------------------------------------------------------------- #
     @torch.no_grad()
-    def act(self, state: np.ndarray, device: str = "cuda") -> np.ndarray:
-        state = torch.tensor(state.reshape(1, -1), device=device, dtype=torch.float32)
-        actions = self(state)
-        
-        # Round gripper action to -1 or 1
-        main_actions = actions[:, :-1]
-        gripper_action = actions[:, -1:]
-        gripper_action = torch.sign(gripper_action)  # This will give -1 or 1
-        
-        actions = torch.cat([main_actions, gripper_action], dim=-1)
-        return actions.cpu().data.numpy().flatten()
+    def act(self, state: torch.Tensor) -> torch.Tensor:
+        """
+        Args
+        ----
+        state : torch.Tensor | np.ndarray
+          shape (state_dim,) or (B, state_dim)
+
+        Returns
+        -------
+        np.ndarray shape (action_dim,) or (B, action_dim)
+        """
+        if not torch.is_tensor(state):
+            state = torch.as_tensor(state, dtype=torch.float32)
+        if state.dim() == 1:
+            state = state[None]                              # add batch
+
+        state = state.to(next(self.parameters()).device)
+
+        arm, grip_logits = self(state)
+
+        grip_bin = torch.where(grip_logits > 0.0,  # >0 -> close (1)
+                               torch.tensor(1.0,  device=grip_logits.device),
+                               torch.tensor(-1.0, device=grip_logits.device))
+
+        actions = torch.cat([arm, grip_bin], dim=-1)
+        return actions.cpu().numpy().squeeze()
 
 
 class BC:

@@ -48,7 +48,7 @@ class TrainConfig:
         0  # 0: GT reward, 1: zero reward, 2: constant reward, 3: negative reward
     )
     # Video recording
-    record_video: bool = False  # Whether to record evaluation videos
+    record_video: bool = True  # Whether to record evaluation videos
     video_dir: Optional[str] = None  # Directory to save evaluation videos
     # IQL
     buffer_size: int = 2_000_000  # Replay buffer size
@@ -363,7 +363,7 @@ def _eval_episode(env, actor, device, max_steps, seed, record_video=False, state
         if state_mean is not None and state_std is not None:
             state = (state - state_mean) / state_std
             
-        action = actor.act(state, device)
+        action = actor.act(state)
         state, reward, terminated, truncated, info = env.step(action)
         done = terminated or truncated
         steps += 1
@@ -412,7 +412,7 @@ def eval_actor(
             
         def predict(self, obs):
             with torch.no_grad():
-                action = self.actor.act(obs, self.device)
+                action = self.actor.act(obs)
             return action
     
     # Wrap the actor

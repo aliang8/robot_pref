@@ -445,6 +445,8 @@ def train(config: TrainConfig):
             target_seg_indices,
             config,
         )
+
+        log_query_videos_to_wandb(target_dataset, aug_idx_st_1, aug_idx_st_2, aug_labels, config, prefix="aug_prefs")
         
         # Create indices for augmented segments
         aug_idx_1 = [[j for j in range(i, i + config.segment_size)] for i in aug_idx_st_1]

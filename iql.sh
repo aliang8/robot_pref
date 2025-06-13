@@ -44,6 +44,6 @@ for seed in "${seeds[@]}"; do
     --data_quality=$data_quality --feedback_num=$feedback_num --q_budget=$q_budget --feedback_type=$feedback_type --model_type=$model_type \
     --threshold=$threshold --activation=$activation --epochs=$epochs --noise=$noise --seed=$seed \
     --segment_size=$segment_size --data_aug=$data_aug --ensemble_num=$ensemble_num --ensemble_method=$ensemble_method \
-    --use_dtw_augmentations=$use_dtw_augmentations --dtw_k_augment=$dtw_k_augment --data_path=$data_path --eef_rm=$eef_rm --use_gt_prefs=$use_gt_prefs
+    --use_dtw_augmentations=$use_dtw_augmentations --dtw_k_augment=$dtw_k_augment --data_path=$target_data_path --eef_rm=$eef_rm --use_gt_prefs=$use_gt_prefs
 
 done
