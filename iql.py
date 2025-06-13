@@ -48,7 +48,7 @@ class TrainConfig:
         0  # 0: GT reward, 1: zero reward, 2: constant reward, 3: negative reward
     )
     # Video recording
-    record_video: bool = True  # Whether to record evaluation videos
+    record_video: bool = False  # Whether to record evaluation videos
     video_dir: Optional[str] = None  # Directory to save evaluation videos
     # IQL
     buffer_size: int = 2_000_000  # Replay buffer size
@@ -67,7 +67,7 @@ class TrainConfig:
     # reward model
     feedback_num: int = 1000
     use_reward_model: bool = False
-    use_gt_aug_prefs: bool = False  # Use ground truth preferences for reward learning
+    use_gt_prefs: bool = False  # Use ground truth preferences for reward learning
     epochs: int = 0
     batch_size: int = 256
     activation: str = "tanh"
@@ -84,6 +84,7 @@ class TrainConfig:
     noise: float = 0.0
     human: bool = False
     use_relative_eef: bool = False
+    eef_rm: bool = False  # Use EEF positions as reward model input
     # DTW augmentations
     use_dtw_augmentations: bool = False
     dtw_augment_before_training: bool = False  # If True: augment first then train, If False: train then augment
@@ -121,23 +122,17 @@ class TrainConfig:
             # Create shorter group name to stay under 128 char limit
             group_parts = [
                 f"env_{self.env.replace('metaworld_', 'mw_')}",  # Shorten metaworld prefix
-                f"d{self.data_quality}",  # Shorter data quality
                 f"fn{self.feedback_num}",  # Shorter feedback num
-                f"qb{self.q_budget}",  # Shorter q budget
-                f"{self.feedback_type}",  # Remove ft_ prefix
                 f"{self.model_type}",  # Remove m_ prefix
-                f"n{self.noise}",  # Shorter noise
                 f"e{self.epochs}",  # Shorter epochs
-                f"th{self.threshold}",  # Shorter threshold
                 f"tr{self.trivial_reward}",  # Shorter trivial reward
-                f"cw{int(self.use_class_weights)}",  # Shorter class weights
-                f"gt{int(self.use_gt_aug_prefs)}"  # Add ground truth preference flag
+                f"gt{int(self.use_gt_prefs)}",  # Add ground truth preference flag
+                f"eef_{int(self.eef_rm)}"  # Add EEF reward model flag
             ]
             
             # Add DTW components if enabled (much shorter version)
             if self.use_dtw_augmentations:
-                dtw_mode = "B" if self.dtw_augment_before_training else "A"  # Before/After
-                dtw_component = f"dtw{int(self.use_dtw_augmentations)}{dtw_mode}{self.dtw_subsample_size//1000}k{self.dtw_augmentation_size}"
+                dtw_component = f"dtw{int(self.use_dtw_augmentations)}"
                 group_parts.append(dtw_component)
             
             self.group = "_".join(group_parts)
@@ -146,25 +141,12 @@ class TrainConfig:
             checkpoint_components = [
                 f"{self.name}",
                 f"{self.env}",
-                f"data_{self.data_quality}",
                 f"fn_{self.feedback_num}",
-                f"qb_{self.q_budget}",
-                f"ft_{self.feedback_type}",
                 f"m_{self.model_type}",
-                f"n_{self.noise}",
                 f"e_{self.epochs}",
-                f"th_{self.threshold}",
-                f"gt_{int(self.use_gt_aug_prefs)}"  # Add ground truth preference flag
+                f"gt_{int(self.use_gt_prefs)}",  # Add ground truth preference flag
+                f"eef_{int(self.eef_rm)}"  # Add EEF reward model flag
             ]
-            
-            # Add DTW components if enabled (match learn_reward.py format)
-            if self.use_dtw_augmentations:
-                dtw_mode = "before" if self.dtw_augment_before_training else "after"
-                checkpoint_components.extend([
-                    f"dtw_{dtw_mode}",
-                    f"sub_{self.dtw_subsample_size//1000}k",
-                    f"aug_{self.dtw_augmentation_size}"
-                ])
             
             # Use same seed format as learn_reward.py
             checkpoint_components.append(f"s_{self.seed}")
@@ -935,14 +917,13 @@ def train(config: TrainConfig):
         dataset = utils_env.DMC_dataset(config)
     elif "robomimic" in config.env:
         env = utils_env.get_robomimic_env(config.data_path, seed=config.seed)
-        dataset = utils_env.Robomimic_dataset(config)
+        dataset = utils_env.Robomimic_dataset(config.data_path)
     else:
         env = gym.make(config.env)
 
     # state_dim = env.observation_space.shape[0]  # 39 for metaworld
     state_dim = env.observation_space["state"].shape[0] # robomimic
     action_dim = env.action_space.shape[0]  # 4 for metaworld
-
 
     if config.normalize:
         state_mean, state_std = compute_mean_std(dataset["observations"], eps=1e-5)
@@ -955,9 +936,13 @@ def train(config: TrainConfig):
     dataset["next_observations"] = normalize_states(
         dataset["next_observations"], state_mean, state_std
     )
-
-    dimension = dataset["observations"].shape[1] + dataset["actions"].shape[1]
+    
+    if config.eef_rm:
+        dimension = 3 + dataset["actions"].shape[1]
+    else:
+        dimension = dataset["observations"].shape[1] + dataset["actions"].shape[1]
     if config.use_reward_model:
+        print(f"Using reward model with dimension {dimension}")
         model = reward_model.RewardModel(config, None, None, None, dimension)
         
         # Use the same checkpoint path structure as learn_reward.py
@@ -967,25 +952,12 @@ def train(config: TrainConfig):
         checkpoint_components = [
             "Reward",  # Name from learn_reward.py
             config.env,
-            f"data_{config.data_quality}",
             f"fn_{config.feedback_num}",
-            f"qb_{config.q_budget}",
-            f"ft_{config.feedback_type}",
             f"m_{config.model_type}",
-            f"n_{config.noise}",
             f"e_{config.epochs}",
-            f"th_{config.threshold}",
-            f"gt_{int(config.use_gt_aug_prefs)}"  # Add ground truth preference flag
+            f"gt_{int(config.use_gt_prefs)}",  # Add ground truth preference flag
+            f"eef_{int(config.eef_rm)}"  # Add EEF reward model flag
         ]
-        
-        # Add DTW components if enabled (match learn_reward.py format)
-        if config.use_dtw_augmentations:
-            dtw_mode = "before" if config.dtw_augment_before_training else "after"
-            checkpoint_components.extend([
-                f"dtw_{dtw_mode}",
-                f"sub_{config.dtw_subsample_size//1000}k",
-                f"aug_{config.dtw_augmentation_size}"
-            ])
         
         # Use same seed format as learn_reward.py
         checkpoint_components.append(f"s_{config.seed}")

@@ -100,10 +100,13 @@ def get_human_feedbacks(data_path, num_prefs):
     prefs, _ = load_preferences_from_directory(prefs_path)
 
     # Randomly sample preferences if needed
-    if num_prefs is not None and len(prefs) > num_prefs:
+    if len(prefs) > num_prefs:
+        print(f"Sampling {num_prefs} preferences from {len(prefs)} available preferences")
         indices = np.random.choice(len(prefs), num_prefs, replace=False)
         prefs = [prefs[i] for i in indices]
-
+    else:
+        print(f"Using all {len(prefs)} since num_prefs={num_prefs} > {len(prefs)} preferences from dataset")
+    
     # Initialize lists to store processed data
     labels = []
     idx_st_1 = []

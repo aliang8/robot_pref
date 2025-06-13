@@ -1,7 +1,7 @@
 import os
 import sys
 import uuid
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from typing import List, Optional
 
 import numpy as np
@@ -12,12 +12,10 @@ import reward_utils
 import wandb
 from models.reward_model import RewardModel
 from reward_utils import *
-from utils.analyze_rewards_legacy import (
-    analyze_rewards_legacy,
-    create_episodes_from_dataset,
-)
 
 sys.path.append("../LiRE/algorithms")
+
+
 import utils_env
 
 
@@ -48,7 +46,7 @@ class TrainConfig:
     human: bool = False
     use_relative_eef: bool = False
     use_goal_pos: bool = False
-    use_gt_aug_prefs: bool = False  # Use ground truth preferences for reward learning
+    use_gt_prefs: bool = False  # Use ground truth preferences for reward learning
     # DTW augmentations
     use_dtw_augmentations: bool = False
     dtw_augment_before_training: bool = False  # If True: augment first then train, If False: train then augment
@@ -79,6 +77,7 @@ class TrainConfig:
     name: str = "Reward"
 
     eef_rm: bool = False
+    use_gt_prefs: bool = False
     
     # Custom checkpoint naming (optional override)
     custom_checkpoint_params: Optional[List[str]] = None  # e.g., ["env", "data_quality", "dtw_settings"]
@@ -114,13 +113,13 @@ class TrainConfig:
             "noise": self.noise,
             "seed": self.seed,
             "dtw_enabled": int(self.use_dtw_augmentations),
-            "dtw_mode": "before" if self.dtw_augment_before_training else "after",
             "dtw_subsample": f"{self.dtw_subsample_size//1000}k",
             "dtw_augmentation": self.dtw_augmentation_size,
             "dtw_ratios": f"{self.dtw_preference_ratios[0]:.2f}-{self.dtw_preference_ratios[1]:.2f}-{self.dtw_preference_ratios[2]:.2f}",
             "acquisition_thresholds": f"{self.acquisition_threshold_low}-{self.acquisition_threshold_high}",
             "dtw_settings": f"{int(self.use_dtw_augmentations)}-{int(self.dtw_augment_before_training)}-{self.dtw_subsample_size//1000}k-{self.dtw_augmentation_size}-R{self.dtw_preference_ratios[0]:.2f}-{self.dtw_preference_ratios[1]:.2f}-{self.dtw_preference_ratios[2]:.2f}-A{self.acquisition_threshold_low}-{self.acquisition_threshold_high}",
-            "gt_prefs": int(self.use_gt_aug_prefs)  # Add ground truth preference flag
+            "gt_prefs": int(self.use_gt_prefs),  # Add ground truth preference flag
+            "eef_rm": int(self.eef_rm)  # Add EEF reward model flag
         }
         
         # Use custom parameters if specified, otherwise use default structure
@@ -147,16 +146,10 @@ class TrainConfig:
                 ["env", self.env],
                 ["data", self.data_quality], 
                 ["fn", self.feedback_num],
-                ["qb", self.q_budget],
-                ["ft", self.feedback_type],
                 ["m", self.model_type],
                 ["e", self.epochs],
-                ["n", self.noise],
-                ["th", self.threshold],
-                ["gt", int(self.use_gt_aug_prefs)],  # Add ground truth preference flag
-                # DTW augmentation settings (only if enabled)
-                ["dtw", f"{int(self.use_dtw_augmentations)}-{int(self.dtw_augment_before_training)}-{self.dtw_subsample_size//1000}k-{self.dtw_augmentation_size}-R{self.dtw_preference_ratios[0]:.2f}-{self.dtw_preference_ratios[1]:.2f}-{self.dtw_preference_ratios[2]:.2f}-A{self.acquisition_threshold_low}-{self.acquisition_threshold_high}"] if self.use_dtw_augmentations else None,
-                # Seed (always last)
+                ["gt", int(self.use_gt_prefs)],  # Add ground truth preference flag
+                ["dtw", f"{int(self.use_dtw_augmentations)}"] if self.use_dtw_augmentations else None,
                 ["s", self.seed]
             ]
             
@@ -168,25 +161,12 @@ class TrainConfig:
             checkpoint_components = [
                 f"{self.name}",
                 f"{self.env}",
-                f"data_{self.data_quality}",
                 f"fn_{self.feedback_num}",
-                f"qb_{self.q_budget}",
-                f"ft_{self.feedback_type}",
                 f"m_{self.model_type}",
-                f"n_{self.noise}",
                 f"e_{self.epochs}",
-                f"th_{self.threshold}",
-                f"gt_{int(self.use_gt_aug_prefs)}"  # Add ground truth preference flag
+                f"gt_{int(self.use_gt_prefs)}",  # Add ground truth preference flag
+                f"eef_{int(self.eef_rm)}"  # Add EEF reward model flag
             ]
-            
-            # Add DTW components if enabled
-            if self.use_dtw_augmentations:
-                dtw_mode = "before" if self.dtw_augment_before_training else "after"
-                checkpoint_components.extend([
-                    f"dtw_{dtw_mode}",
-                    f"sub_{self.dtw_subsample_size//1000}k",
-                    f"aug_{self.dtw_augmentation_size}"
-                ])
             
             checkpoint_components.append(f"s_{self.seed}")
         
@@ -269,6 +249,30 @@ def get_segment_rewards(dataset, indices, default_value=0.0):
     return dataset["rewards"][indices].sum(axis=1)
 
 
+def log_query_videos_to_wandb(dataset, idx_st_1, idx_st_2, labels, config, prefix="queries"):
+    """Log video sequences for query pairs to wandb."""
+    if "images" not in dataset:
+        return
+    print("Logging video sequences to wandb...")
+    for i, (idx1, idx2) in enumerate(zip(idx_st_1, idx_st_2)):
+        # Get image sequences for both segments
+        images1 = dataset["images"][idx1:idx1 + config.segment_size]
+        images2 = dataset["images"][idx2:idx2 + config.segment_size]
+        # Get preference for this pair
+        preference = 2  # Default to equal preference
+        if i < len(labels):
+            if labels[i][0] == 0 and labels[i][1] == 1:  # Second segment preferred
+                preference = 1
+            elif labels[i][0] == 1 and labels[i][1] == 0:  # First segment preferred
+                preference = 0
+        # Combine segments side by side with preference border
+        combined_segments = combine_segments_side_by_side(images1, images2, preference)
+        if combined_segments is not None and wandb.run:
+            log_video_to_wandb(combined_segments, f"{prefix}/query_{i}")
+        if i >= 9:
+            break
+
+
 @pyrallis.wrap()
 def train(config: TrainConfig):
     rich.print(config)
@@ -286,6 +290,9 @@ def train(config: TrainConfig):
     else:
         raise ValueError(f"Unsupported environment type: {config.env}")
     
+    # Initialize wandb
+    wandb_init(asdict(config))
+
     # Normalize observations if required
     state_mean, state_std = (reward_utils.compute_mean_std(dataset["observations"], eps=1e-3)
                              if config.normalize else (0, 1))
@@ -307,44 +314,25 @@ def train(config: TrainConfig):
     obs_act_dim = obs_act.shape[-1]
     print(f"Observation-action dimension: {obs_act_dim}")
 
-    # wandb_init(asdict(config))
+    
 
-    # Convert labels to [1,0], [0,1], or [0.5,0.5] format
-    new_labels = []
-    for i in range(len(labels)):
-        if labels[i] == 1:  # First segment preferred
-            new_labels.append([1, 0])
-        elif labels[i] == 0:  # Second segment preferred
-            new_labels.append([0, 1])
-        else:  # Equal preference
-            new_labels.append([0.5, 0.5])
-    labels = np.array(new_labels)
+    # Convert labels to [1,0], [0,1], or [0.5,0.5] format for both labels and target_labels
+    def convert_labels_to_array(label_list):
+        new_labels = []
+        for label in label_list:
+            if label == 1:  # First segment preferred
+                new_labels.append([1, 0])
+            elif label == 0:  # Second segment preferred
+                new_labels.append([0, 1])
+            else:  # Equal preference
+                new_labels.append([0.5, 0.5])
+        return np.array(new_labels)
+
+    labels = convert_labels_to_array(labels)
+    target_labels = convert_labels_to_array(target_labels)
 
     # After collecting feedback log the source preferences
-    if "images" in dataset:
-        print("Logging video sequences to wandb...")
-        
-        # Log original query videos
-        for i, (idx1, idx2) in enumerate(zip(idx_st_1, idx_st_2)):
-            # Get image sequences for both segments
-            images1 = dataset["images"][idx1:idx1 + config.segment_size]
-            images2 = dataset["images"][idx2:idx2 + config.segment_size]
-            
-            # Get preference for this pair
-            preference = 2 # Default to equal preference
-            if i < len(labels):
-                if labels[i][0] == 0 and labels[i][1] == 1:  # Second segment preferred
-                    preference = 1
-                elif labels[i][0] == 1 and labels[i][1] == 0:  # First segment preferred
-                    preference = 0
-
-            # Combine segments side by side with preference border
-            combined_segments = combine_segments_side_by_side(images1, images2, preference)
-            if combined_segments is not None and wandb.run:
-                log_video_to_wandb(combined_segments, f"queries/query_{i}")
-            
-            if i >= 9:
-                break
+    log_query_videos_to_wandb(dataset, idx_st_1, idx_st_2, labels, config)
 
     if config.eef_rm:
         print("Using 3d EEF positions as reward model input")
@@ -370,14 +358,18 @@ def train(config: TrainConfig):
             (dataset["observations"][val_idx_2][:, :, :3], dataset["actions"][val_idx_2]), axis=-1
         )
 
+        # Get images for segments if available
+        val_images1 = dataset["images"][val_idx_1] if "images" in dataset else None
+        val_images2 = dataset["images"][val_idx_2] if "images" in dataset else None
+
         eef_act_dim = train_obs_act_1.shape[-1]
         reward_model = RewardModel(config, train_obs_act_1, train_obs_act_2, labels, eef_act_dim)
 
-        reward_model.save_test_dataset(val_obs_act_1, val_obs_act_2, target_labels, target_labels)
+        reward_model.save_test_dataset(val_obs_act_1, val_obs_act_2, target_labels, target_labels, val_images1, val_images2)
         reward_model.train_model()
         reward_model.save_model(config.checkpoints_path)
     elif config.use_gt_prefs:
-        print("Using ground truth preferences for reward learning")
+        print(f"Using ground truth preferences for {config.data_path} for reward learning")
 
         # Split into train/val sets (80/20 split)
         n_feedbacks = len(labels)
@@ -387,15 +379,17 @@ def train(config: TrainConfig):
         indices = np.random.permutation(n_feedbacks)
         train_indices = indices[:n_train]
         val_indices = indices[n_train:]
+
+        print(f"Using {len(train_indices)} train indices and {len(val_indices)} val indices")
         
         # Split the data into train and validation sets
         train_labels = labels[train_indices]
-        train_idx_st_1 = target_idx_st_1[train_indices]
-        train_idx_st_2 = target_idx_st_2[train_indices]
+        train_idx_st_1 = idx_st_1[train_indices]
+        train_idx_st_2 = idx_st_2[train_indices]
         
         val_labels = labels[val_indices]
-        val_idx_st_1 = target_idx_st_1[val_indices]
-        val_idx_st_2 = target_idx_st_2[val_indices]
+        val_idx_st_1 = idx_st_1[val_indices]
+        val_idx_st_2 = idx_st_2[val_indices]
         
         # Create indices for segments
         train_idx_1 = [[j for j in range(i, i + config.segment_size)] for i in train_idx_st_1]
@@ -418,37 +412,18 @@ def train(config: TrainConfig):
         val_obs_act_2 = np.concatenate(
             (dataset["observations"][val_idx_2], dataset["actions"][val_idx_2]), axis=-1
         )
+
+        # Get images for segments if available
+        val_images1 = dataset["images"][val_idx_1] if "images" in dataset else None
+        val_images2 = dataset["images"][val_idx_2] if "images" in dataset else None
         
-        
-        print(f"Observation-action dimension: {obs_act_dim}")
-        
+        obs_act_dim = train_obs_act_1.shape[-1]
         reward_model = RewardModel(config, train_obs_act_1, train_obs_act_2, train_labels, obs_act_dim)
-        reward_model.save_test_dataset(val_obs_act_1, val_obs_act_2, val_labels, val_labels)
+        
+        reward_model.save_test_dataset(val_obs_act_1, val_obs_act_2, val_labels, val_labels, val_images1, val_images2)
         reward_model.train_model()
         reward_model.save_model(config.checkpoints_path)
-        
-        # Run reward analysis using the legacy-compatible functions
-        print("Running reward analysis...")
-        
-        # Create episodes from the dataset for analysis
-        episodes = create_episodes_from_dataset(dataset, device=config.device, episode_length=500)
-        
-        # Generate reward analysis plot and log to wandb
-        if wandb.run:
-            analyze_rewards_legacy(
-                reward_model=reward_model,
-                episodes=episodes,
-                output_file=None,  # Don't save to file
-                num_episodes=min(9, len(episodes)),
-                wandb_run=wandb.run,
-                random_seed=config.seed
-            )
-        
-        return
-    
-    
-    # DTW Augmentation X-Embodiment Strategy
-    if config.use_dtw_augmentations:
+    elif config.use_dtw_augmentations:
         # Load source and target segment indices
         data_path = Path(config.data_path)
         seg_indices_path = data_path.parent / "segment_start_end_indices.npy"
@@ -470,42 +445,14 @@ def train(config: TrainConfig):
             target_seg_indices,
             config,
         )
-
-        # Log augmented preferences to wandb
-        if "images" in target_dataset:
-            print("Logging augmented preference videos to wandb...")
-            
-            # Log first 10 augmented pairs
-            for i, (idx1, idx2) in enumerate(zip(aug_idx_st_1, aug_idx_st_2)):
-                # Get image sequences for both segments
-                images1 = target_dataset["images"][idx1:idx1 + config.segment_size]
-                images2 = target_dataset["images"][idx2:idx2 + config.segment_size]
-                
-                # Get preference for this pair
-                preference = 2  # Default to equal preference
-                if i < len(aug_labels):
-                    if aug_labels[i][0] == 0 and aug_labels[i][1] == 1:  # Second segment preferred
-                        preference = 1
-                    elif aug_labels[i][0] == 1 and aug_labels[i][1] == 0:  # First segment preferred
-                        preference = 0
-
-                # Combine segments side by side with preference border
-                combined_segments = combine_segments_side_by_side(images1, images2, preference)
-                if combined_segments is not None and wandb.run:
-                    log_video_to_wandb(combined_segments, f"augmented_prefs/aug_{i}")
-                
-                # Only log first 10 augmented pairs to avoid overwhelming wandb
-                if i >= 9:
-                    break
-
-        # Process augmented preferences for training
-        # Create indices for augmented segments\
+        
+        # Create indices for augmented segments
         aug_idx_1 = [[j for j in range(i, i + config.segment_size)] for i in aug_idx_st_1]
         aug_idx_2 = [[j for j in range(i, i + config.segment_size)] for i in aug_idx_st_2]
         
         # Get observations and actions for augmented segments
         aug_obs_act_1 = np.concatenate(
-            (target_dataset["observations"][aug_idx_1], target_dataset["actions"][aug_idx_1]), axis=-1
+            (dataset["observations"][aug_idx_1], dataset["actions"][aug_idx_1]), axis=-1
         )
         aug_obs_act_2 = np.concatenate(
             (target_dataset["observations"][aug_idx_2], target_dataset["actions"][aug_idx_2]), axis=-1
@@ -528,10 +475,14 @@ def train(config: TrainConfig):
             test_obs_act_2 = np.concatenate(
                 (target_dataset["observations"][target_idx_2], target_dataset["actions"][target_idx_2]), axis=-1
             )
+
+            # Get images for target segments if available
+            test_images1 = target_dataset["images"][target_idx_1] if "images" in target_dataset else None
+            test_images2 = target_dataset["images"][target_idx_2] if "images" in target_dataset else None
                             
             # Save test dataset
             reward_model.save_test_dataset(
-                test_obs_act_1, test_obs_act_2, target_labels, target_labels
+                test_obs_act_1, test_obs_act_2, target_labels, target_labels, test_images1, test_images2
             )
         
         # Train the model
@@ -544,23 +495,26 @@ def train(config: TrainConfig):
         if config.checkpoints_path:
             np.save(os.path.join(config.checkpoints_path, "cross_dtw_matrix.npy"), cross_dtw_matrix)
             print(f"Saved cross-embodiment DTW matrix to {config.checkpoints_path}")
+    else:
+        raise ValueError("Invalid reward learning method.")
 
-    # Run reward analysis using the legacy-compatible functions
-    print("Running reward analysis...")
+    # TODO: add reward analysis
+    # # Run reward analysis using the legacy-compatible functions
+    # print("Running reward analysis...")
     
-    # Create episodes from the dataset for analysis
-    episodes = create_episodes_from_dataset(dataset, device=config.device, episode_length=500)
+    # # Create episodes from the dataset for analysis
+    # episodes = create_episodes_from_dataset(dataset, device=config.device, episode_length=500)
     
-    # Generate reward analysis plot and log to wandb
-    if wandb.run:
-        analyze_rewards_legacy(
-            reward_model=reward_model,
-            episodes=episodes,
-            output_file=None,  # Don't save to file
-            num_episodes=min(9, len(episodes)),
-            wandb_run=wandb.run,
-            random_seed=config.seed
-        )
+    # # Generate reward analysis plot and log to wandb
+    # if wandb.run:
+    #     analyze_rewards_legacy(
+    #         reward_model=reward_model,
+    #         episodes=episodes,
+    #         output_file=None,  # Don't save to file
+    #         num_episodes=min(9, len(episodes)),
+    #         wandb_run=wandb.run,
+    #         random_seed=config.seed
+    #     )
 
 
 if __name__ == "__main__":

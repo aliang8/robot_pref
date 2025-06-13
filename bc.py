@@ -34,7 +34,7 @@ class TrainConfig:
     batch_size: int = 256  # Batch size for all networks
     discount: float = 0.99  # Discount factor
     # Video recording
-    record_video: bool = True  # Whether to record evaluation videos
+    record_video: bool = False  # Whether to record evaluation videos
     video_dir: Optional[str] = None  # Directory to save videos, if None, uses "bc_videos"
 
     # BC
@@ -309,7 +309,7 @@ def train(config: TrainConfig):
         dataset = utils_env.DMC_dataset(config)
     elif "robomimic" in config.env:
         env = utils_env.get_robomimic_env(config.data_path, seed=config.seed)
-        dataset = utils_env.Robomimic_dataset(config)
+        dataset = utils_env.Robomimic_dataset(config.data_path)
     else:
         env = gym.make(config.env)
 
@@ -319,7 +319,7 @@ def train(config: TrainConfig):
 
 
     if config.normalize:
-        state_mean, state_std = compute_mean_std(dataset["observations"].cpu().numpy(), eps=1e-3)
+        state_mean, state_std = compute_mean_std(dataset["observations"], eps=1e-4)
     else:
         state_mean, state_std = 0, 1
 

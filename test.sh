@@ -24,14 +24,14 @@ dtw_augmentation_size=2000
 dtw_k_augment=1 # How many augmentations to generate for each source human
 acquisition_threshold_low=0.25
 acquisition_threshold_high=0.75
-dtw_augment_before_training=True
+dtw_augment_before_training=False
 
 use_goal_pos=False
 use_relative_eef=False
 
 data_path="/scr/shared/datasets/robot_pref/lift_panda/lift_panda.hdf5"
 target_data_path="/scr/shared/datasets/robot_pref/lift_sawyer/lift_sawyer.hdf5"
-use_gt_aug_prefs=True
+use_gt_prefs=True
 
 seeds=(42 43 44)
 
@@ -43,7 +43,7 @@ for seed in "${seeds[@]}"; do
     --segment_size=$segment_size --data_aug=$data_aug  --ensemble_num=$ensemble_num --ensemble_method=$ensemble_method --batch_size=$batch_size \
     --use_dtw_augmentations=$use_dtw_augmentations --dtw_subsample_size=$dtw_subsample_size --dtw_augmentation_size=$dtw_augmentation_size \
     --dtw_k_augment=$dtw_k_augment --acquisition_threshold_low=$acquisition_threshold_low --acquisition_threshold_high=$acquisition_threshold_high \
-    --dtw_augment_before_training=$dtw_augment_before_training --use_goal_pos=$use_goal_pos --use_relative_eef=$use_relative_eef --use_gt_aug_prefs=$use_gt_aug_prefs \
+    --dtw_augment_before_training=$dtw_augment_before_training --use_goal_pos=$use_goal_pos --use_relative_eef=$use_relative_eef --use_gt_prefs=$use_gt_prefs \
     --data_path=$data_path --target_data_path=$data_path
 
     echo "Running IQL with reward model for seed $seed"
@@ -53,5 +53,5 @@ for seed in "${seeds[@]}"; do
     --segment_size=$segment_size --data_aug=$data_aug --ensemble_num=$ensemble_num --ensemble_method=$ensemble_method \
     --use_dtw_augmentations=$use_dtw_augmentations --dtw_subsample_size=$dtw_subsample_size --dtw_augmentation_size=$dtw_augmentation_size \
     --dtw_k_augment=$dtw_k_augment --acquisition_threshold_low=$acquisition_threshold_low --acquisition_threshold_high=$acquisition_threshold_high \
-    --dtw_augment_before_training=$dtw_augment_before_training --data_path=$data_path --use_gt_aug_prefs=$use_gt_aug_prefs
+    --dtw_augment_before_training=$dtw_augment_before_training --data_path=$data_path --use_gt_prefs=$use_gt_prefs
 done

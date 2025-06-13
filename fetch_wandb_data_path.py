@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-import json
 import os
 from pathlib import Path
 
@@ -98,7 +97,7 @@ def fetch_wandb_runs(
         history = None
         try:
             history = run.history(keys=["eval/eval_success"])
-        except CommError as e:
+        except CommError:
             print(f"Run {run.name}")
             history = None
 
@@ -154,7 +153,7 @@ def save_run_df(run_data, output_dir="run_data"):
             # Get the latest success rate
             row["latest_eval_success_rate"] = success_rates[-1]
             row["max_eval_success_rate"] = max(success_rates)
-            top_3_rates = sorted(success_rates, reverse=True)[:5]
+            top_3_rates = sorted(success_rates, reverse=True)[:3]
             row["top3_avg_eval_success_rate"] = sum(top_3_rates) / len(top_3_rates)
             for i, rate in enumerate(top_3_rates):
                 row[f"top_eval_success_{i + 1}"] = rate
@@ -199,9 +198,17 @@ def plot_data_path_comparisons(df, output_dir="data_path_plots"):
         
         # Create separate groups for reward types
         def get_reward_type(row):
-            if row.get("use_gt_aug_prefs", False):
-                return "GT Preferences"
-            return "Zero Rewards" if row.get("trivial_reward", 0) == 1 else "Augmented Preferences"
+            # if bc in name
+            if "BC" in row.get("run_name", ""):
+                return "BC"
+            if row.get("eef_rm", False) is True:
+                return "EEF RM"
+            if row.get("use_gt_prefs", False) is True or row.get("use_gt_aug_prefs", False) is True:
+                return "GT Prefs"
+            elif row.get("trivial_reward", None) == 1:
+                return "Zero Rewards"
+            elif row.get("trivial_reward", None) == 0:
+                return "Aug Prefs"
         
         path_df["reward_type"] = path_df.apply(get_reward_type, axis=1)
         
