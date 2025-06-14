@@ -9,7 +9,7 @@ frac: 1.0
 load_model: ''
 max_timesteps: 100_000
 max_traj_len: 1000
-n_episodes: 20
+n_episodes: 30
 name: BC
 normalize: true
 seed: 0

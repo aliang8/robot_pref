@@ -108,10 +108,10 @@ def distributional_bradley_terry_loss(
     )
     loss_mean = torch.mean(bce_mean)
     
-    # Second term: Cross-entropy loss on sampled rewards
-    # Sample from the reward distributions
-    batch_size, seq_len = reward_means1.shape
-    device = reward_means1.device
+    # # Second term: Cross-entropy loss on sampled rewards
+    # # Sample from the reward distributions
+    # batch_size, seq_len = reward_means1.shape
+    # device = reward_means1.device
     
     # Sample rewards for both segments
     std1 = torch.sqrt(reward_vars1)
@@ -184,7 +184,7 @@ def distributional_reward_loss(
     preferences,
     lambda_weight=1.0,
     alpha_reg=0.1,
-    eta=1.0,
+    eta=0.05,
     num_samples=5,
     cost=None,
     alpha=3.5,

@@ -10,7 +10,7 @@ import rich
 
 import reward_utils
 import wandb
-from models.reward_model import RewardModel
+from models.reward_model import RewardModel, DistributionalRewardModel
 from reward_utils import *
 
 sys.path.append("../LiRE/algorithms")
@@ -78,6 +78,8 @@ class TrainConfig:
 
     eef_rm: bool = False
     use_gt_prefs: bool = False
+
+    use_distributional_model: bool = False
     
     # Custom checkpoint naming (optional override)
     custom_checkpoint_params: Optional[List[str]] = None  # e.g., ["env", "data_quality", "dtw_settings"]
@@ -389,7 +391,7 @@ def train(config: TrainConfig):
         
         val_labels = labels[val_indices]
         val_idx_st_1 = idx_st_1[val_indices]
-        val_idx_st_2 = idx_st_2[val_indices]
+        val_idx_st_2 = idx_st_2[val_indices] 
         
         # Create indices for segments
         train_idx_1 = [[j for j in range(i, i + config.segment_size)] for i in train_idx_st_1]
@@ -418,7 +420,13 @@ def train(config: TrainConfig):
         val_images2 = dataset["images"][val_idx_2] if "images" in dataset else None
         
         obs_act_dim = train_obs_act_1.shape[-1]
-        reward_model = RewardModel(config, train_obs_act_1, train_obs_act_2, train_labels, obs_act_dim)
+
+        if config.use_distributional_model:
+            print("Using distributional reward model")
+            reward_model = DistributionalRewardModel(config, train_obs_act_1, train_obs_act_2, train_labels, obs_act_dim)
+        else:
+            print("Using regular reward model")
+            reward_model = RewardModel(config, train_obs_act_1, train_obs_act_2, train_labels, obs_act_dim)
         
         reward_model.save_test_dataset(val_obs_act_1, val_obs_act_2, val_labels, val_labels, val_images1, val_images2)
         reward_model.train_model()

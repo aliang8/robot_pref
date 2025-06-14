@@ -48,7 +48,7 @@ class TrainConfig:
         0  # 0: GT reward, 1: zero reward, 2: constant reward, 3: negative reward
     )
     # Video recording
-    record_video: bool = True  # Whether to record evaluation videos
+    record_video: bool = False  # Whether to record evaluation videos
     video_dir: Optional[str] = None  # Directory to save evaluation videos
     # IQL
     buffer_size: int = 2_000_000  # Replay buffer size
@@ -767,7 +767,15 @@ class ImplicitQLearning:
 
     def _compute_gripper_accuracy(self, pred_actions: torch.Tensor, target_actions: torch.Tensor) -> float:
         """Compute accuracy of gripper actions (last dimension)."""
-        pred_gripper = torch.sign(pred_actions[:, -1])
+        # Handle case where pred_actions is a tuple (arm_actions, gripper_logits)
+        if isinstance(pred_actions, tuple):
+            arm_actions, gripper_logits = pred_actions
+            pred_gripper = torch.where(gripper_logits > 0.0,  # >0 -> close (1)
+                                     torch.tensor(1.0, device=gripper_logits.device),
+                                     torch.tensor(-1.0, device=gripper_logits.device))
+        else:
+            pred_gripper = torch.sign(pred_actions[:, -1])
+            
         target_gripper = target_actions[:, -1]
         accuracy = (pred_gripper == target_gripper).float().mean().item()
         return accuracy
@@ -872,8 +880,16 @@ class ImplicitQLearning:
                 val_pred_actions = self.actor(val_obs)
                 if isinstance(val_pred_actions, torch.distributions.Distribution):
                     val_pred_actions = val_pred_actions.mean
-                gripper_accuracy = self._compute_gripper_accuracy(val_pred_actions, val_actions)
-                arm_loss = self._compute_arm_loss(val_pred_actions, val_actions)
+
+                if isinstance(val_pred_actions, tuple):
+                    val_pred_actions, val_gripper_logits = val_pred_actions
+                    val_pred_gripper = torch.where(val_gripper_logits > 0.0,  # >0 -> close (1)
+                                     torch.tensor(1.0, device=val_gripper_logits.device),
+                                     torch.tensor(-1.0, device=val_gripper_logits.device))
+                else:
+                    val_pred_gripper = torch.sign(val_pred_actions[:, -1])
+                gripper_accuracy = (val_pred_gripper == val_actions[:, -1]).float().mean().item()
+                arm_loss = F.mse_loss(val_pred_actions, val_actions[:, :-1]).item()
                 log_dict["val/gripper_accuracy"] = gripper_accuracy
                 log_dict["val/arm_loss"] = arm_loss
 

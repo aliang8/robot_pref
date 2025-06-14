@@ -357,7 +357,6 @@ def get_robomimic_env(
 
     env_meta = FileUtils.get_env_metadata_from_dataset(data_path)
  
-
     obs_modality_dict = {
         "low_dim": [
             "robot0_eef_pos",

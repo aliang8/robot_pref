@@ -37,7 +37,7 @@ class TrainConfig:
     batch_size: int = 256  # Batch size for all networks
     discount: float = 0.99  # Discount factor
     # Video recording
-    record_video: bool = True  # Whether to record evaluation videos
+    record_video: bool = False  # Whether to record evaluation videos
     video_dir: Optional[str] = None  # Directory to save videos, if None, uses "bc_videos"
 
     # BC
@@ -189,7 +189,7 @@ class Actor(nn.Module):
         state_dim:   int,
         action_dim:  int,
         max_action:  float = 1.0,
-        pos_weight:  float = 5 # To punish false negatives (close grippers)
+        pos_weight:  float = 12.5 # To punish false negatives (close grippers)
     ):
         super().__init__()
 

@@ -1,7 +1,7 @@
 #!/bin/bash
 
-data_path="/scr/shared/datasets/robot_pref/lift_panda/lift_panda.hdf5"
-seeds=(521 522 523)
+data_path="/scr/shared/datasets/robot_pref/lift_sawyer/lift_sawyer.hdf5"
+seeds=(1 2 3)
 config_path="configs/bc.yaml"
 
 for seed in "${seeds[@]}"; do

@@ -1,7 +1,7 @@
 #!/bin/bash
 
 env=robomimic_lift
-seeds=(521 522 523)
+seeds=(1 2 3)
 data_path="/scr/shared/datasets/robot_pref/lift_sawyer/lift_sawyer.hdf5"
 
 # Run for three seeds
