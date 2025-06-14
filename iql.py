@@ -128,7 +128,8 @@ class TrainConfig:
                 f"e{self.epochs}",  # Shorter epochs
                 f"tr{self.trivial_reward}",  # Shorter trivial reward
                 f"gt{int(self.use_gt_prefs)}",  # Add ground truth preference flag
-                f"eef_{int(self.eef_rm)}"  # Add EEF reward model flag
+                f"eef_{int(self.eef_rm)}",  # Add EEF reward model flag
+                f"dist_{int(self.use_distributional_model)}",  # Add distributional reward model flag
             ]
             
             # Add DTW components if enabled (much shorter version)
@@ -979,7 +980,8 @@ def train(config: TrainConfig):
             f"m_{config.model_type}",
             f"e_{config.epochs}",
             f"gt_{int(config.use_gt_prefs)}",  # Add ground truth preference flag
-            f"eef_{int(config.eef_rm)}"  # Add EEF reward model flag
+            f"eef_{int(config.eef_rm)}",  # Add EEF reward model flag
+            f"dist_{int(config.use_distributional_model)}"  # Add distributional reward model flag
         ]
         
         # Use same seed format as learn_reward.py
