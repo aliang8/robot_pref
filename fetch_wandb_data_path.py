@@ -198,17 +198,27 @@ def plot_data_path_comparisons(df, output_dir="data_path_plots"):
         
         # Create separate groups for reward types
         def get_reward_type(row):
-            # if bc in name
+            # If BC in name, always "BC"
             if "BC" in row.get("run_name", ""):
                 return "BC"
+            
+            # Helper to add Distributional tag
+            def add_dist_tag(base, is_dist):
+                if is_dist:
+                    return f"{base} + Dist RM"
+                else:
+                    return base
+
+            is_dist = row.get("use_distributional_model", False) is True
+
             if row.get("eef_rm", False) is True:
-                return "EEF RM"
-            if row.get("use_gt_prefs", False) is True or row.get("use_gt_aug_prefs", False) is True:
-                return "GT Prefs"
+                return add_dist_tag("EEF RM", is_dist)
+            elif row.get("use_gt_prefs", False) is True or row.get("use_gt_aug_prefs", False) is True:
+                return add_dist_tag("GT Prefs", is_dist)
             elif row.get("trivial_reward", None) == 1:
-                return "Zero Rewards"
+                return add_dist_tag("Zero Rewards", is_dist)
             elif row.get("trivial_reward", None) == 0:
-                return "Aug Prefs"
+                return add_dist_tag("Aug Prefs", is_dist)
         
         path_df["reward_type"] = path_df.apply(get_reward_type, axis=1)
         

@@ -167,7 +167,8 @@ class TrainConfig:
                 f"m_{self.model_type}",
                 f"e_{self.epochs}",
                 f"gt_{int(self.use_gt_prefs)}",  # Add ground truth preference flag
-                f"eef_{int(self.eef_rm)}"  # Add EEF reward model flag
+                f"eef_{int(self.eef_rm)}",  # Add EEF reward model flag
+                f"dist_{int(self.use_distributional_model)}"  # Add distributional reward model flag
             ]
             
             checkpoint_components.append(f"s_{self.seed}")

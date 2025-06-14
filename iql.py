@@ -104,6 +104,7 @@ class TrainConfig:
     name: str = "IQL"
 
     data_path: str = ""
+    use_distributional_model: bool = False
 
     def __post_init__(self):
         # Set default equal ratios for DTW preference sampling if not specified
@@ -145,7 +146,8 @@ class TrainConfig:
                 f"m_{self.model_type}",
                 f"e_{self.epochs}",
                 f"gt_{int(self.use_gt_prefs)}",  # Add ground truth preference flag
-                f"eef_{int(self.eef_rm)}"  # Add EEF reward model flag
+                f"eef_{int(self.eef_rm)}",  # Add EEF reward model flag
+                f"dist_{int(self.use_distributional_model)}"  # Add distributional reward model flag
             ]
             
             # Use same seed format as learn_reward.py
@@ -959,7 +961,12 @@ def train(config: TrainConfig):
         dimension = dataset["observations"].shape[1] + dataset["actions"].shape[1]
     if config.use_reward_model:
         print(f"Using reward model with dimension {dimension}")
-        model = reward_model.RewardModel(config, None, None, None, dimension)
+
+        if config.use_distributional_model:
+            print("Using distributional model")
+            model = reward_model.DistributionalRewardModel(config, None, None, None, dimension)
+        else:
+            model = reward_model.RewardModel(config, None, None, None, dimension)
         
         # Use the same checkpoint path structure as learn_reward.py
         base_path = os.getcwd() + "/logs/Reward"

@@ -50,11 +50,9 @@ def distributional_bradley_terry_loss(
     reward_means1, reward_means2, 
     reward_vars1, reward_vars2,
     preferences, 
-    lambda_weight=1.0, 
+    lambda_weight=0.1,
     num_samples=5,
-    cost=None, 
-    alpha=3.5, 
-    beta_max=8.0
+    beta=1.0,
 ):
     """
     Compute the distributional Bradley-Terry preference learning loss as described in Equation 7.
@@ -71,12 +69,7 @@ def distributional_bradley_terry_loss(
         preferences: Labels indicating which segment is preferred (1 or 2) [batch_size]
         lambda_weight: Weight for the stochastic term (lambda in Equation 7)
         num_samples: Number of samples K for approximating the expectation
-        cost: DTW Cost used for beta scaling (optional)
-        alpha: Alpha parameter for beta scaling
-        beta_max: Maximum beta value for scaling
-        
-    Returns:
-        Total loss combining mean and stochastic terms
+        beta: Scaling factor for the sigmoid function
     """
     # Convert preferences to probabilities (1 = first segment preferred, 2 = second segment preferred)
     if isinstance(preferences, torch.Tensor):
@@ -84,23 +77,17 @@ def distributional_bradley_terry_loss(
     else:
         prefs = (torch.tensor(preferences) == 1).float()
 
-    # Optionally use cost to scale beta if provided
-    if cost is not None:
-        beta = beta_max * torch.exp(-alpha * cost)
-    else:
-        beta = 1
-
     eps = 1e-6
     
     # Sum over time dimension to get returns
     return_means1 = reward_means1.sum(dim=1)  # [batch_size]
     return_means2 = reward_means2.sum(dim=1)  # [batch_size]
-    
+
     # First term: Cross-entropy loss on reward means
     logits_mean = torch.clamp(
         beta * (return_means1 - return_means2), min=-50.0, max=50.0
     )
-    pred_probs_mean = torch.sigmoid(logits_mean)
+    pred_probs_mean = torch.sigmoid(logits_mean).squeeze()
     
     bce_mean = -(
         prefs * torch.log(pred_probs_mean + eps)
@@ -108,12 +95,7 @@ def distributional_bradley_terry_loss(
     )
     loss_mean = torch.mean(bce_mean)
     
-    # # Second term: Cross-entropy loss on sampled rewards
-    # # Sample from the reward distributions
-    # batch_size, seq_len = reward_means1.shape
-    # device = reward_means1.device
-    
-    # Sample rewards for both segments
+    # Second term: Cross-entropy loss on sampled rewards
     std1 = torch.sqrt(reward_vars1)
     std2 = torch.sqrt(reward_vars2)
     
@@ -134,7 +116,7 @@ def distributional_bradley_terry_loss(
         logits_sample = torch.clamp(
             beta * (sampled_returns1 - sampled_returns2), min=-50.0, max=50.0
         )
-        pred_probs_sample = torch.sigmoid(logits_sample)
+        pred_probs_sample = torch.sigmoid(logits_sample).squeeze()
         
         bce_sample = -(
             prefs * torch.log(pred_probs_sample + eps)
@@ -148,7 +130,7 @@ def distributional_bradley_terry_loss(
     # Combine losses according to Equation 7
     total_loss = loss_mean + lambda_weight * loss_samples
     
-    return total_loss
+    return total_loss, loss_mean, loss_samples
 
 
 def regularization_loss(reward_variances, eta=1.0):
@@ -182,13 +164,10 @@ def distributional_reward_loss(
     reward_means1, reward_means2,
     reward_vars1, reward_vars2,
     preferences,
-    lambda_weight=1.0,
-    alpha_reg=0.1,
-    eta=0.05,
+    lambda_weight=0.1,  # Reduced from 1.0 to give less weight to stochastic term
+    alpha_reg=0.01,     # Reduced from 0.1 to give less weight to regularization
+    eta=100.0,           # Reduced from 0.05 to allow lower entropy
     num_samples=5,
-    cost=None,
-    alpha=3.5,
-    beta_max=8.0
 ):
     """
     Complete loss function for distributional reward learning combining:
@@ -197,36 +176,32 @@ def distributional_reward_loss(
     
     Args:
         reward_means1, reward_means2: Reward means for both segments
-        reward_vars1, reward_vars2: Reward variances for both segments  
-        preferences: Preference labels
-        lambda_weight: Weight for stochastic term in BT loss
-        alpha_reg: Weight for regularization loss
-        eta: Minimum entropy level for regularization
-        num_samples: Number of samples for approximating expectation
-        cost: Optional DTW cost for beta scaling
-        alpha, beta_max: Parameters for beta scaling
-        
-    Returns:
-        Total loss combining cross-entropy and regularization terms
+        reward_vars1, reward_vars2: Reward variances for both segments
+        preferences: Labels indicating which segment is preferred
+        lambda_weight: Weight for the stochastic term
+        alpha_reg: Weight for the regularization term
+        eta: Minimum entropy level to maintain
+        num_samples: Number of samples for stochastic term
+        cost: DTW Cost for beta scaling
+        alpha: Alpha parameter for beta scaling
+        beta_max: Maximum beta value for scaling
     """
-    # Distributional Bradley-Terry loss
-    bt_loss = distributional_bradley_terry_loss(
+    # Get distributional BT loss + the deterministic and stochastic losses
+    bt_loss, bt_loss_mean, bt_loss_samples = distributional_bradley_terry_loss(
         reward_means1, reward_means2,
         reward_vars1, reward_vars2,
         preferences,
         lambda_weight=lambda_weight,
-        num_samples=num_samples,
-        cost=cost,
-        alpha=alpha,
-        beta_max=beta_max
+        num_samples=num_samples
     )
     
-    # Regularization loss on variances
-    reg_loss1 = regularization_loss(reward_vars1, eta=eta)
-    reg_loss2 = regularization_loss(reward_vars2, eta=eta)
-    reg_loss = (reg_loss1 + reg_loss2) / 2
+    # Get regularization loss
+    reg_loss = regularization_loss(
+        torch.cat([reward_vars1, reward_vars2], dim=0),
+        eta=eta
+    )
     
-    # Total loss
+    # Combine losses
     total_loss = bt_loss + alpha_reg * reg_loss
     
-    return total_loss, bt_loss, reg_loss
+    return total_loss, bt_loss_mean, bt_loss_samples, reg_loss

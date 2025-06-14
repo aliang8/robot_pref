@@ -213,21 +213,23 @@ class RewardModel:
             self.ensemble_model[member].load_state_dict(torch.load(member_path))
 
     def get_reward(self, dataset):
+        """Get reward predictions from the ensemble."""
         obs = dataset["observations"]
         act = dataset["actions"]
 
         if self.dimension == 10:
-            obs = obs[:, :3] # eef pos
+            obs = obs[:, :3]  # eef pos
 
         obs_act = np.concatenate((obs, act), axis=-1)
         obs_act = torch.from_numpy(obs_act).float().to(self.device)
+        
         with torch.no_grad():
             for i in range((obs_act.shape[0] - 1) // 10000 + 1):
                 obs_act_batch = obs_act[i * 10000 : (i + 1) * 10000]
                 pred_batch = self.ensemble_model_forward(obs_act_batch).reshape(-1)
                 dataset["rewards"][
                     i * 10000 : (i + 1) * 10000
-                ] = pred_batch.cpu().numpy()
+                ] = pred_batch.squeeze(-1).cpu().numpy()
         return dataset["rewards"]
 
     def eval(self, obs_act_1, obs_act_2, labels, binary_labels, name, epoch, images1=None, images2=None):
@@ -236,6 +238,7 @@ class RewardModel:
         eval_loss = 0
         eval_bt_loss = 0
         eval_reg_loss = 0
+        total_samples = 0
         
         with torch.no_grad():
             vis_data = []
@@ -257,19 +260,22 @@ class RewardModel:
                 pred_1_mean, pred_1_var = self.ensemble_model_forward(obs_act_1_batch)
                 pred_2_mean, pred_2_var = self.ensemble_model_forward(obs_act_2_batch)
 
-                pred_seg_sum_1 = torch.sum(pred_1_mean, dim=1)
-                pred_seg_sum_2 = torch.sum(pred_2_mean, dim=1)
-                pred_hat = torch.cat([pred_seg_sum_1, pred_seg_sum_2], dim=-1)
-                pred_labels = torch.argmax(pred_hat, dim=-1)
+                pred_hat = torch.stack([
+                    pred_1_mean.sum(dim=1),
+                    pred_2_mean.sum(dim=1)
+                ], dim=1)
 
-                eval_acc += torch.sum(
-                    pred_labels == torch.argmax(binary_labels_batch, dim=-1)
-                ).item()
+                pred_labels = pred_hat.argmax(dim=1).squeeze()
+                eval_acc += (pred_labels == binary_labels_batch.argmax(dim=1)).sum().item()
                 
                 total_loss, bt_loss, reg_loss = self.loss(pred_1_mean, pred_2_mean, pred_1_var, pred_2_var, labels_batch)
-                eval_loss += total_loss.item()
-                eval_bt_loss += bt_loss.item()
-                eval_reg_loss += reg_loss.item()
+                
+                # Normalize losses by batch size
+                batch_size = labels_batch.shape[0]
+                eval_loss += total_loss.item() * batch_size
+                eval_bt_loss += bt_loss.item() * batch_size
+                eval_reg_loss += reg_loss.item() * batch_size
+                total_samples += batch_size
                 
                 if images1 is not None and images2 is not None and len(vis_data) < 4:
                     batch_indices = list(range(len(pred_1_mean)))
@@ -288,10 +294,11 @@ class RewardModel:
                             'images2': images2[batch * self.batch_size + i],
                         })
         
-        eval_loss /= obs_act_1.shape[0]
-        eval_bt_loss /= obs_act_1.shape[0]
-        eval_reg_loss /= obs_act_1.shape[0]
-        eval_acc /= float(obs_act_1.shape[0])
+        # Normalize by total number of samples
+        eval_loss /= total_samples
+        eval_bt_loss /= total_samples
+        eval_reg_loss /= total_samples
+        eval_acc /= float(total_samples)
         
         wandb.log({
             name + "/loss": eval_loss,
@@ -548,6 +555,7 @@ class DistributionalRewardModel:
             print("Class weighting disabled")
 
     def _calculate_class_weights(self):
+        # TODO: this is unused for now
         """Calculate inverse frequency class weights for preference types."""
         # Count preference types
         seg1_better_count = 0
@@ -614,16 +622,15 @@ class DistributionalRewardModel:
             prev_dim = H
             
         shared_features = nn.Sequential(*shared_layers)
-        
-        # Split the final hidden dimension for mean and variance branches
+
         split_dim = H // 2
         
-        # Mean branch
         mean_branch = nn.Sequential(
             nn.Linear(split_dim, split_dim),
             nn.LayerNorm(split_dim),
             nn.LeakyReLU(0.1),
-            nn.Linear(split_dim, out_dim)
+            nn.Linear(split_dim, out_dim),
+            nn.Tanh() # [-1, 1]
         )
         
         # Variance branch (output log variance for numerical stability)
@@ -662,7 +669,6 @@ class DistributionalRewardModel:
         
         # Compute mean and variance
         reward_mean = self.net['mean_branch'](mean_features)
-        reward_mean = torch.tanh(reward_mean)
         log_variance = self.net['variance_branch'](var_features)
         
         # Convert log variance to variance (ensure positive)
@@ -682,7 +688,6 @@ class DistributionalRewardModel:
             var_features = shared_features[..., split_dim:]
             
             mean = model['mean_branch'](mean_features)
-            mean = torch.tanh(mean)
             log_var = model['variance_branch'](var_features)
             var = torch.exp(log_var) + 1e-6
             
@@ -723,7 +728,7 @@ class DistributionalRewardModel:
 
         # Compute distributional Bradley-Terry loss
         from utils.loss import distributional_reward_loss
-        total_loss, bt_loss, reg_loss = distributional_reward_loss(
+        total_loss, bt_loss_mean, bt_loss_samples, reg_loss = distributional_reward_loss(
             mean1, mean2,
             var1, var2,
             prefs,
@@ -733,7 +738,7 @@ class DistributionalRewardModel:
         # if weights is not None:
         #     loss = loss * weights.mean()
 
-        return total_loss, bt_loss, reg_loss
+        return total_loss, bt_loss_mean, bt_loss_samples, reg_loss
 
     def linear_BT_loss(self, mean1, mean2, var1, var2, label, apply_class_weights=True):
         """Linear Bradley-Terry loss for distributional reward model."""
@@ -756,7 +761,7 @@ class DistributionalRewardModel:
         
         # Compute distributional Bradley-Terry loss
         from utils.loss import distributional_reward_loss
-        total_loss, bt_loss, reg_loss = distributional_reward_loss(
+        total_loss, bt_loss_mean, bt_loss_samples, reg_loss = distributional_reward_loss(
             mean1, mean2,
             var1, var2,
             prefs,
@@ -766,7 +771,7 @@ class DistributionalRewardModel:
         # if weights is not None:
         #     loss = loss * weights.mean()
         
-        return total_loss, bt_loss, reg_loss
+        return total_loss, bt_loss_mean, bt_loss_samples, reg_loss
 
     def save_model(self, path):
         """Save the ensemble of distributional reward models."""
@@ -811,7 +816,7 @@ class DistributionalRewardModel:
             for i in range((obs_act.shape[0] - 1) // 10000 + 1):
                 obs_act_batch = obs_act[i * 10000 : (i + 1) * 10000]
                 mean, _ = self.ensemble_model_forward(obs_act_batch)
-                dataset["rewards"][i * 10000 : (i + 1) * 10000] = mean.cpu().numpy()
+                dataset["rewards"][i * 10000 : (i + 1) * 10000] = mean.squeeze(-1).cpu().numpy()
         
         return dataset["rewards"]
 
@@ -825,7 +830,7 @@ class DistributionalRewardModel:
                     list(self.ensemble_model[member]['mean_branch'].parameters()) + \
                     list(self.ensemble_model[member]['variance_branch'].parameters())
             
-            self.optimizer.append(optim.Adam(params, lr=self.lr))
+            self.optimizer.append(optim.Adam(params, lr=self.lr, weight_decay=1e-4))  # Added weight decay
             self.lr_scheduler.append(
                 optim.lr_scheduler.StepLR(
                     self.optimizer[member],
@@ -840,8 +845,11 @@ class DistributionalRewardModel:
         
         for epoch in tqdm.tqdm(range(self.epochs)):
             train_loss = 0
-            train_bt_loss = 0
+            train_bt_mean_loss = 0
+            train_bt_samples_loss = 0
             train_reg_loss = 0
+            total_samples = 0
+            
             for member in range(self.ensemble_num):
                 self.optimizer[member].zero_grad()
                 self.net = self.ensemble_model[member]
@@ -880,37 +888,48 @@ class DistributionalRewardModel:
                             :, start_idx_2 : start_idx_2 + short_segment_size, :
                         ]
                     
-                    pred_1_mean, pred_1_var = self.single_model_forward(obs_act_1_batch)
-                    pred_2_mean, pred_2_var = self.single_model_forward(obs_act_2_batch)
-                    
-                    total_loss, bt_loss, reg_loss = self.loss(pred_1_mean, pred_2_mean, pred_1_var, pred_2_var, labels_batch)
-                    
-                    # total_loss = total_loss / labels_batch.shape[0]
-                    # bt_loss = bt_loss / labels_batch.shape[0]
-                    # reg_loss = reg_loss / labels_batch.shape[0]
-                    # train_loss += total_loss.item() * labels_batch.shape[0]
-                    # train_bt_loss += bt_loss.item() * labels_batch.shape[0]
-                    # train_reg_loss += reg_loss.item() * labels_batch.shape[0]
-                    
-                    train_loss += total_loss.item()
-                    train_bt_loss += bt_loss.item()
-                    train_reg_loss += reg_loss.item()
-                    
+                    # Compute predictions for both segments in a single call to avoid redundancy
+                    pred_means_1, pred_vars_1 = self.single_model_forward(obs_act_1_batch)
+                    pred_means_2, pred_vars_2 = self.single_model_forward(obs_act_2_batch)
+
+                    # Compute all losses in one call
+                    total_loss, bt_loss_mean, bt_loss_samples, reg_loss = self.loss(
+                        pred_means_1, pred_means_2, pred_vars_1, pred_vars_2, labels_batch
+                    )
+
+                    batch_size = labels_batch.shape[0]
+                    # Accumulate losses (weighted by batch size for averaging later)
+                    train_loss += total_loss.item() * batch_size
+                    train_bt_mean_loss += bt_loss_mean.item() * batch_size
+                    train_bt_samples_loss += bt_loss_samples.item() * batch_size
+                    train_reg_loss += reg_loss.item() * batch_size
+                    total_samples += batch_size
+
+                    # Normalize loss for backward pass
                     total_loss.backward()
+                    
+                    # # Add gradient clipping
+                    # torch.nn.utils.clip_grad_norm_(self.net['shared_features'].parameters(), max_norm=1.0)
+                    # torch.nn.utils.clip_grad_norm_(self.net['mean_branch'].parameters(), max_norm=1.0)
+                    # torch.nn.utils.clip_grad_norm_(self.net['variance_branch'].parameters(), max_norm=1.0)
+                    
                     self.optimizer[member].step()
                 
                 self.lr_scheduler[member].step()
 
-            # train_loss /= obs_act_1.shape[0] * self.ensemble_num
-            # train_bt_loss /= obs_act_1.shape[0] * self.ensemble_num
-            # train_reg_loss /= obs_act_1.shape[0] * self.ensemble_num
-
-            train_loss /= obs_act_1.shape[0] * self.ensemble_num
-            train_bt_loss /= obs_act_1.shape[0] * self.ensemble_num
-            train_reg_loss /= obs_act_1.shape[0] * self.ensemble_num
+            # Normalize by total samples
+            train_loss /= total_samples
+            train_bt_mean_loss /= total_samples
+            train_bt_samples_loss /= total_samples
+            train_reg_loss /= total_samples
 
             if epoch % 20 == 0:
-                wandb.log({"train/loss": train_loss, "train/bt_loss": train_bt_loss, "train/reg_loss": train_reg_loss}, step=epoch)
+                wandb.log({
+                    "train/loss": train_loss, 
+                    "train/bt_mean_loss": train_bt_mean_loss, 
+                    "train/bt_samples_loss": train_bt_samples_loss,
+                    "train/reg_loss": train_reg_loss
+                }, step=epoch)
 
             if epoch % 100 == 0:
                 self.eval(
@@ -936,8 +955,10 @@ class DistributionalRewardModel:
         """Evaluate the ensemble of distributional reward models."""
         eval_acc = 0
         eval_loss = 0
-        eval_bt_loss = 0
+        eval_bt_mean_loss = 0
+        eval_bt_samples_loss = 0
         eval_reg_loss = 0
+        total_samples = 0
         
         with torch.no_grad():
             vis_data = []
@@ -967,10 +988,15 @@ class DistributionalRewardModel:
                 pred_labels = pred_hat.argmax(dim=1).squeeze()
                 eval_acc += (pred_labels == binary_labels_batch.argmax(dim=1)).sum().item()
                 
-                total_loss, bt_loss, reg_loss = self.loss(pred_1_mean, pred_2_mean, pred_1_var, pred_2_var, labels_batch)
-                eval_loss += total_loss.item()
-                eval_bt_loss += bt_loss.item()
-                eval_reg_loss += reg_loss.item()
+                total_loss, bt_loss_mean, bt_loss_samples, reg_loss = self.loss(pred_1_mean, pred_2_mean, pred_1_var, pred_2_var, labels_batch)
+
+                # Normalize losses by batch size
+                batch_size = labels_batch.shape[0]
+                eval_loss += total_loss.item() * batch_size
+                eval_bt_mean_loss += bt_loss_mean.item() * batch_size
+                eval_bt_samples_loss += bt_loss_samples.item() * batch_size
+                eval_reg_loss += reg_loss.item() * batch_size
+                total_samples += batch_size
                 
                 if images1 is not None and images2 is not None and len(vis_data) < 4:
                     batch_indices = list(range(len(pred_1_mean)))
@@ -989,14 +1015,17 @@ class DistributionalRewardModel:
                             'images2': images2[batch * self.batch_size + i],
                         })
         
-        eval_loss /= obs_act_1.shape[0]
-        eval_bt_loss /= obs_act_1.shape[0]
-        eval_reg_loss /= obs_act_1.shape[0]
-        eval_acc /= float(obs_act_1.shape[0])
+        # Normalize by total number of samples
+        eval_loss /= total_samples
+        eval_bt_mean_loss /= total_samples
+        eval_bt_samples_loss /= total_samples
+        eval_reg_loss /= total_samples
+        eval_acc /= float(total_samples)
         
         wandb.log({
             name + "/loss": eval_loss,
-            name + "/bt_loss": eval_bt_loss,
+            name + "/bt_mean_loss": eval_bt_mean_loss,
+            name + "/bt_samples_loss": eval_bt_samples_loss,
             name + "/reg_loss": eval_reg_loss,
             name + "/acc": eval_acc
         }, step=epoch)
