@@ -1,74 +1,29 @@
 import os
 import random
 import uuid
-from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-from typing import Dict, Tuple
+
 import gym
+import hydra
 import numpy as np
-import pyrallis
 import rich
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
+from tqdm import trange
 
 import utils_env
 import wandb
 from iql import ReplayBuffer, eval_actor
+from models.act import ActionChunkingTransformerPolicy, ACTTemporalEnsembler
+from utils.loss import arm_gripper_loss
 
 TensorBatch = List[torch.Tensor]
-
-
-@dataclass
-class TrainConfig:
-    # Experiment
-    device: str = "cuda"
-    env: str = "halfcheetah-medium-expert-v2"  # OpenAI gym environment name
-    seed: int = 0  # Sets Gym, PyTorch and Numpy seeds
-    eval_freq: int = int(5e3)  # How often (time steps) we evaluate
-    n_episodes: int = 10  # How many episodes run during evaluation
-    max_timesteps: int = int(1e6)  # Max time steps to run environment
-    checkpoints_path: Optional[str] = None  # Save path
-    load_model: str = ""  # Model load file name, "" doesn't load
-    batch_size: int = 256  # Batch size for all networks
-    discount: float = 0.99  # Discount factor
-    # Video recording
-    record_video: bool = False  # Whether to record evaluation videos
-    video_dir: Optional[str] = None  # Directory to save videos, if None, uses "bc_videos"
-
-    # BC
-    buffer_size: int = 1_000_000  # Replay buffer size
-    frac: float = 0.1  # Best data fraction to use
-    max_traj_len: int = 1000  # Max trajectory length
-    normalize: bool = False  # Normalize states
-    # Wandb logging
-    project: str = "robot_pref"
-    entity: str = "clvr"
-    group: str = "BC-Robomimic"
-    name: str = "BC"
-
-    data_path: str = ""
-
-    def __post_init__(self):
-        self.name = f"{self.name}-{self.env}-{str(uuid.uuid4())[:8]}"
-        if self.checkpoints_path is not None:
-            self.checkpoints_path = os.path.join(self.checkpoints_path, self.name)
-
-
-def soft_update(target: nn.Module, source: nn.Module, tau: float):
-    for target_param, source_param in zip(target.parameters(), source.parameters()):
-        target_param.data.copy_((1 - tau) * target_param.data + tau * source_param.data)
-
 
 def compute_mean_std(states: np.ndarray, eps: float) -> Tuple[np.ndarray, np.ndarray]:
     mean = states.mean(0)
     std = states.std(0) + eps
     return mean, std
-
 
 def normalize_states(states: np.ndarray, mean: np.ndarray, std: np.ndarray):
     return (states - mean) / std
@@ -96,7 +51,6 @@ def wrap_env(
     return env
 
 
-
 def set_seed(
     seed: int, env: Optional[gym.Env] = None, deterministic_torch: bool = False
 ):
@@ -111,11 +65,11 @@ def set_seed(
 
 
 def wandb_init(config: dict) -> None:
+
     wandb.init(
         config=config,
-        project=config["project"],
-        group=config["group"],
-        name=config["name"],
+        project=config.wandb.project,
+        name=config.wandb.name,
         id=str(uuid.uuid4()),
     )
     wandb.run.save()
@@ -140,155 +94,60 @@ def wandb_init(config: dict) -> None:
 #     actor.train()
 #     return np.asarray(episode_rewards)
 
-
-def keep_best_trajectories(
-    dataset: Dict[str, np.ndarray],
-    frac: float,
-    discount: float,
-    max_episode_steps: int = 1000,
-):
-    ids_by_trajectories = []
-    returns = []
-    cur_ids = []
-    cur_return = 0
-    reward_scale = 1.0
-    for i, (reward, done) in enumerate(zip(dataset["rewards"], dataset["terminals"])):
-        cur_return += reward_scale * reward
-        cur_ids.append(i)
-        reward_scale *= discount
-        if done == 1.0 or len(cur_ids) == max_episode_steps:
-            ids_by_trajectories.append(list(cur_ids))
-            returns.append(cur_return)
-            cur_ids = []
-            cur_return = 0
-            reward_scale = 1.0
-
-    sort_ord = np.argsort(returns, axis=0)[::-1].reshape(-1)
-    top_trajs = sort_ord[: max(1, int(frac * len(sort_ord)))]
-
-    order = []
-    for i in top_trajs:
-        order += ids_by_trajectories[i]
-    order = np.array(order)
-    dataset["observations"] = dataset["observations"][order]
-    dataset["actions"] = dataset["actions"][order]
-    dataset["next_observations"] = dataset["next_observations"][order]
-    dataset["rewards"] = dataset["rewards"][order]
-    dataset["terminals"] = dataset["terminals"][order]
-
-
-
 class Actor(nn.Module):
-    """
-    Arm:  continuous actions in [-max_action, max_action]^6
-    Gripper: discrete {-1, 1}  (open / close)
-    """
-
     def __init__(
         self,
         state_dim:   int,
         action_dim:  int,
-        max_action:  float = 1.0,
-        pos_weight:  float = 12.5 # To punish false negatives (close grippers)
+        max_action:  float,
+        model_config: Dict[str, Any]
     ):
         super().__init__()
 
-        # ------- shared hyper‑params -------
-        hidden = 256
-
-        # ------- arm head -------
-        self.arm_net = nn.Sequential(
-            nn.Linear(state_dim, hidden), nn.ReLU(),
-            nn.Linear(hidden,  hidden),   nn.ReLU(),
-            nn.Linear(hidden,  action_dim - 1)           # 6 dims
-        )
-
-        # ------- gripper head (logits) -------
-        self.gripper_net = nn.Sequential(
-            nn.Linear(state_dim, hidden), nn.ReLU(),
-            nn.Linear(hidden,  hidden),   nn.ReLU(),
-            nn.Linear(hidden,  1)                         # raw logits
-        )
+        self.state_embedder = nn.Linear(state_dim, model_config.d_model)
+        self.model = ActionChunkingTransformerPolicy(cfg=model_config, output_dim=action_dim)
+        self.loss_fn = nn.L1Loss(reduction="none")
+        if model_config.use_separate_gripper:
+            self.gripper_pos_weight = getattr(model_config, "gripper_pos_weight", 1.0)
+            self.gripper_pos_weight = torch.tensor(self.gripper_pos_weight)
+            self.gripper_loss_fn = nn.BCEWithLogitsLoss(
+                reduction="none", pos_weight=self.gripper_pos_weight
+            )
 
         self.max_action = float(max_action)
-        # buffer so it moves with the model between CPU / GPU
-        self.register_buffer("bce_pos_weight",
-                             torch.tensor(pos_weight, dtype=torch.float32))
 
-    # --------------------------------------------------------------------- #
-    # Forward                                                                #
-    # --------------------------------------------------------------------- #
+        self.temporal_ensembler = ACTTemporalEnsembler(temporal_ensemble_coeff=model_config.temporal_ensemble_coeff, chunk_size=model_config.seq_len)
+
     def forward(self, state: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        Returns:
-            arm_actions      -- shape (B, 6), scaled to [-max_action, max_action]
-            gripper_logits   -- shape (B, 1), un‑activated
-        """
-        arm_actions    = torch.tanh(self.arm_net(state)) * self.max_action
-        gripper_logits = self.gripper_net(state)          # raw
-        return arm_actions, gripper_logits
-
-    # --------------------------------------------------------------------- #
-    # Loss                                                                   #
-    # --------------------------------------------------------------------- #
+        state_embs = self.state_embedder(state)
+        action_preds = self.model(state_embs)
+        
+        return action_preds
+    
     def compute_loss(
         self, state: torch.Tensor, target_action: torch.Tensor
     ) -> Tuple[torch.Tensor, Dict[str, float]]:
+        state_embs = self.state_embedder(state)
+        action_preds = self.model(state_embs)
 
-        arm_pred, grip_logits = self(state)
+        arm_loss, gripper_loss, gripper_acc = arm_gripper_loss(action_preds=action_preds, actions=target_action, arm_loss_fn=self.loss_fn, gripper_loss_fn=self.gripper_loss_fn, gaussian_output=False)
 
-        # Split labelled targets
-        arm_target     = target_action[:, :-1]                 # (B, 6)
-        grip_target_01 = (target_action[:, -1:] + 1) / 2       # {-1,1} -> {0,1}
+        total_loss = arm_loss + gripper_loss
 
-        # Losses
-        arm_loss = F.mse_loss(arm_pred, arm_target)
-
-        grip_loss = F.binary_cross_entropy_with_logits(
-            grip_logits,
-            grip_target_01,
-            pos_weight=self.bce_pos_weight
-        )
-
-        total = arm_loss + grip_loss
-
-        return total, {
-            "arm_mse":   arm_loss.item(),
-            "grip_bce":  grip_loss.item(),
-            "total":     total.item()
+        return total_loss, {
+            "arm_loss": arm_loss.item(),
+            "gripper_loss": gripper_loss.item(),
+            "gripper_acc": gripper_acc.item(),
+            "loss": total_loss.item(),
         }
 
-    # --------------------------------------------------------------------- #
-    # Act (no‑grad)                                                          #
-    # --------------------------------------------------------------------- #
     @torch.no_grad()
     def act(self, state: torch.Tensor) -> torch.Tensor:
-        """
-        Args
-        ----
-        state : torch.Tensor | np.ndarray
-          shape (state_dim,) or (B, state_dim)
+        state_embs = self.state_embedder(state)
+        action_preds = self.model(state_embs).actions
+        action = self.temporal_ensembler.update(action_preds)
 
-        Returns
-        -------
-        np.ndarray shape (action_dim,) or (B, action_dim)
-        """
-        if not torch.is_tensor(state):
-            state = torch.as_tensor(state, dtype=torch.float32)
-        if state.dim() == 1:
-            state = state[None]                              # add batch
-
-        state = state.to(next(self.parameters()).device)
-
-        arm, grip_logits = self(state)
-
-        grip_bin = torch.where(grip_logits > 0.0,  # >0 -> close (1)
-                               torch.tensor(1.0,  device=grip_logits.device),
-                               torch.tensor(-1.0, device=grip_logits.device))
-
-        actions = torch.cat([arm, grip_bin], dim=-1)
-        return actions.cpu().numpy().squeeze()
-
+        return action.squeeze()
 
 class BC:
     def __init__(
@@ -312,6 +171,9 @@ class BC:
         self.total_it += 1
 
         state, action, _, _, _ = batch
+
+        if state.dim() == 3:
+            state = state[:, 0:1] # take only the first frame for now
 
         # Compute actor loss using the actor's compute_loss method
         actor_loss, loss_dict = self.actor.compute_loss(state, action)
@@ -337,8 +199,8 @@ class BC:
         self.total_it = state_dict["total_it"]
 
 
-@pyrallis.wrap()
-def train(config: TrainConfig):
+@hydra.main(config_path="configs", config_name="bc", version_base=None)
+def train(config):
     rich.print("config ", config)
     if "metaworld" in config.env:
         env = utils_env.make_metaworld_env(config.env, config.seed)
@@ -352,9 +214,12 @@ def train(config: TrainConfig):
     else:
         env = gym.make(config.env)
 
-    # state_dim = env.observation_space.shape[0]  # 39 for metaworld
-    state_dim = env.observation_space["state"].shape[0] # robomimic
-    action_dim = env.action_space.shape[0]  # 4 for metaworld
+    # Handle both standard and dict observation spaces
+    if isinstance(env.observation_space, gym.spaces.Dict):
+        state_dim = env.observation_space["state"].shape[0]
+    else:
+        state_dim = env.observation_space.shape[0]
+    action_dim = env.action_space.shape[0]
 
 
     if config.normalize:
@@ -374,14 +239,16 @@ def train(config: TrainConfig):
         action_dim,
         config.buffer_size,
         config.device,
+        seq_len=config.model.seq_len,
     )
     replay_buffer.load_dataset(dataset)
 
     if config.checkpoints_path is not None:
         print(f"Checkpoints path: {config.checkpoints_path}")
         os.makedirs(config.checkpoints_path, exist_ok=True)
-        with open(os.path.join(config.checkpoints_path, "config.yaml"), "w") as f:
-            pyrallis.dump(config, f)
+        # Save config using Hydra's utilities
+        from omegaconf import OmegaConf
+        OmegaConf.save(config=config, f=os.path.join(config.checkpoints_path, "config.yaml"))
 
     max_action = float(env.action_space.high[0])
 
@@ -389,8 +256,8 @@ def train(config: TrainConfig):
     seed = config.seed
     set_seed(seed, env)
 
-    actor = Actor(state_dim, action_dim, max_action).to(config.device)
-    actor_optimizer = torch.optim.Adam(actor.parameters(), lr=3e-4)
+    actor = Actor(state_dim=state_dim, action_dim=action_dim, max_action=max_action,model_config=config.model).to(config.device)
+    actor_optimizer = torch.optim.Adam(actor.parameters(), lr=1e-3)
 
     kwargs = {
         "max_action": max_action,
@@ -412,14 +279,14 @@ def train(config: TrainConfig):
         trainer.load_state_dict(torch.load(policy_file))
         actor = trainer.actor
 
-    wandb_init(asdict(config))
+    wandb_init(config) if config.use_wandb else None
 
     evaluations = []
-    for t in range(int(config.max_timesteps)):
+    for t in trange(int(config.max_timesteps)):
         batch = replay_buffer.sample(config.batch_size)
         batch = [b.to(config.device) for b in batch]
         log_dict = trainer.train(batch)
-        wandb.log(log_dict, step=trainer.total_it)
+        wandb.log(log_dict, step=trainer.total_it) if wandb.run is not None else None
         # Evaluate episode
         if (t + 1) % config.eval_freq == 0:
             print(f"Eval at step: {t + 1}")
@@ -449,7 +316,7 @@ def train(config: TrainConfig):
                     "eval/eval_success": eval_success,
                 },
                 step=trainer.total_it,
-            )
+            ) if wandb.run is not None else None
             
             # Log videos to wandb if recording
             if config.record_video:
@@ -467,7 +334,7 @@ def train(config: TrainConfig):
                                 )
                             },
                             step=trainer.total_it,
-                        )
+                        ) if wandb.run is not None else None
             
             if (config.checkpoints_path is not None) and (t + 1) % (
                 20 * config.eval_freq

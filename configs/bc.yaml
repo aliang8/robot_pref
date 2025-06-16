@@ -7,9 +7,23 @@ env: robomimic_lift
 eval_freq: 5000
 frac: 1.0
 load_model: ''
-max_timesteps: 100_000
+max_timesteps: 300_000
 max_traj_len: 1000
 n_episodes: 30
 name: BC
 normalize: true
 seed: 0
+
+data_path: null
+record_video: true
+
+# wandb
+use_wandb: false
+wandb:
+  project: "robot_pref"
+  entity: "clvr"
+  name: "bc-${env}-${seed}"
+
+
+defaults:
+- model: act

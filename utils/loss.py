@@ -205,3 +205,83 @@ def distributional_reward_loss(
     total_loss = bt_loss + alpha_reg * reg_loss
     
     return total_loss, bt_loss_mean, bt_loss_samples, reg_loss
+
+
+def gaussian_nll_loss(
+    actions: torch.Tensor,
+    means: torch.Tensor,
+    logvars: torch.Tensor,
+) -> torch.Tensor:
+    """
+    Computes the negative log-likelihood loss using PyTorch's Normal distribution.
+
+    Args:
+        actions: Target actions tensor of shape (batch_size, action_dim)
+        means: Predicted mean tensor of shape (batch_size, action_dim)
+        logvars: Predicted log-variance tensor of shape (batch_size, action_dim)
+
+    Returns:
+        nll: Negative log-likelihood loss tensor of shape (batch_size, action_dim)
+    """
+    # Input validation
+    if not (actions.shape == means.shape == logvars.shape):
+        raise ValueError(
+            f"Shape mismatch: actions {actions.shape}, "
+            f"means {means.shape}, logvars {logvars.shape}"
+        )
+
+    # Clamp logvars for numerical stability
+    logvars = torch.clamp(logvars, min=-10, max=2)
+    # Convert logvar to std dev
+    stds = torch.exp(0.5 * logvars)
+    # Clamp stds for numerical stability
+    stds = torch.clamp(stds, min=1e-6)
+
+    # Create normal distribution
+    dist = torch.distributions.Normal(means, stds)
+
+    # Compute log probability
+    log_prob = dist.log_prob(actions)
+
+    # Sum over action dimensions
+    nll = -torch.sum(log_prob, dim=-1)
+    return nll
+
+
+def arm_gripper_loss(action_preds, actions, arm_loss_fn, gripper_loss_fn, gaussian_output=False):
+    """
+    Compute loss for arm and gripper actions.
+    
+    Args:
+        action_preds: Predicted actions from model
+        actions: Target actions
+        arm_loss_fn: Loss function for arm actions
+        gripper_loss_fn: Loss function for gripper actions
+        gaussian_output: Whether the model outputs a gaussian distribution
+    """
+    # Get arm and gripper predictions
+    if gaussian_output:
+        arm_preds = action_preds.mean[..., :-1]
+        gripper_preds = action_preds.mean[..., -1:]
+    else:
+        arm_preds = action_preds.actions[..., :-1]
+        gripper_preds = action_preds.actions[..., -1:]
+
+    # Get arm and gripper targets
+    arm_targets = actions[..., :-1]
+    gripper_targets = actions[..., -1:]
+
+    # Compute arm loss
+    arm_loss = arm_loss_fn(arm_preds, arm_targets).mean()
+
+    # Transform gripper targets from [-1, 1] to [0, 1] for BCE
+    gripper_targets_01 = (gripper_targets + 1) / 2  # Transform from [-1, 1] to [0, 1]
+    gripper_loss = gripper_loss_fn(gripper_preds, gripper_targets_01).mean()
+
+    # Compute gripper accuracy
+    gripper_preds_binary = torch.where(gripper_preds > 0.0,  # >0 -> close (1)
+                                     torch.tensor(1.0, device=gripper_preds.device),
+                                     torch.tensor(-1.0, device=gripper_preds.device))
+    gripper_acc = (gripper_preds_binary == gripper_targets).float().mean()
+
+    return arm_loss, gripper_loss, gripper_acc

@@ -10,8 +10,8 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import gym
+import hydra
 import numpy as np
-import pyrallis
 import rich
 import torch
 import torch.nn as nn
@@ -213,12 +213,14 @@ class ReplayBuffer:
         buffer_size: int,
         device: str = "cpu",
         val_split: float = 0.1,  # 10% validation split
+        seq_len: int = 1,  # Sequence length for temporal data
     ):
         self._buffer_size = buffer_size
         self._pointer = 0
         self._size = 0
         self._val_split = val_split
         self._val_size = 0
+        self._seq_len = seq_len
 
         # Training data
         self._states = torch.zeros(
@@ -299,23 +301,48 @@ class ReplayBuffer:
         self._val_next_states = (self._val_next_states - state_mean) / state_std
 
     def sample(self, batch_size: int) -> TensorBatch:
-        indices = np.random.randint(0, min(self._size, self._pointer), size=batch_size)
-        states = self._states[indices]
-        actions = self._actions[indices]
-        rewards = self._rewards[indices]
-        next_states = self._next_states[indices]
-        dones = self._dones[indices]
+        # For sequence data, we need to ensure we don't sample indices that would cause out-of-bounds
+        max_start_idx = min(self._size, self._pointer) - self._seq_len
+        if max_start_idx <= 0:
+            raise ValueError(f"Buffer size ({self._size}) is too small for sequence length {self._seq_len}")
+            
+        # Sample start indices for sequences
+        start_indices = np.random.randint(0, max_start_idx, size=batch_size)
+        
+        # Create sequence indices
+        seq_indices = np.array([np.arange(idx, idx + self._seq_len) for idx in start_indices])
+        
+        # Get sequences
+        states = self._states[seq_indices]  # Shape: (batch_size, seq_len, state_dim)
+        actions = self._actions[seq_indices]  # Shape: (batch_size, seq_len, action_dim)
+        rewards = self._rewards[seq_indices]  # Shape: (batch_size, seq_len, 1)
+        next_states = self._next_states[seq_indices]  # Shape: (batch_size, seq_len, state_dim)
+        dones = self._dones[seq_indices]  # Shape: (batch_size, seq_len, 1)
+        
         return [states, actions, rewards, next_states, dones]
         
     def get_validation_batch(self) -> TensorBatch:
         """Get the entire validation set."""
-        return [
-            self._val_states,
-            self._val_actions,
-            self._val_rewards,
-            self._val_next_states,
-            self._val_dones,
-        ]
+        if self._seq_len > 1:
+            # For sequence data, we need to reshape the validation data
+            val_size = self._val_size - self._seq_len + 1
+            seq_indices = np.array([np.arange(i, i + self._seq_len) for i in range(val_size)])
+            
+            return [
+                self._val_states[seq_indices],
+                self._val_actions[seq_indices],
+                self._val_rewards[seq_indices],
+                self._val_next_states[seq_indices],
+                self._val_dones[seq_indices],
+            ]
+        else:
+            return [
+                self._val_states,
+                self._val_actions,
+                self._val_rewards,
+                self._val_next_states,
+                self._val_dones,
+            ]
 
 
 def set_seed(
@@ -365,8 +392,23 @@ def _eval_episode(env, actor, device, max_steps, seed, record_video=False, state
         # Normalize state if normalization parameters are provided
         if state_mean is not None and state_std is not None:
             state = (state - state_mean) / state_std
-            
+        
+        if isinstance(state, np.ndarray):
+            state = torch.tensor(state, dtype=torch.float32, device=device).unsqueeze(0)
+
         action = actor.act(state)
+        
+        # Handle gripper action (last dimension)
+        if isinstance(action, torch.Tensor):
+            # Convert gripper logits to binary action
+            arm_actions = action[..., :-1]
+            gripper_logits = action[..., -1:]
+            gripper_action = torch.where(gripper_logits > 0.0,  # >0 -> close (1)
+                                       torch.tensor(1.0, device=gripper_logits.device),
+                                       torch.tensor(-1.0, device=gripper_logits.device))
+            action = torch.cat([arm_actions, gripper_action], dim=-1)
+            action = action.cpu().numpy()  # Convert to numpy
+        
         state, reward, terminated, truncated, info = env.step(action)
         done = terminated or truncated
         steps += 1
@@ -406,6 +448,8 @@ def eval_actor(
 ) -> Tuple[np.ndarray, np.ndarray, List[np.ndarray]]:
     """Evaluate the actor on the environment."""
     actor.eval()
+
+    actor.temporal_ensembler.reset() # reset the temporal ensembler
     
     # Create a wrapper class for the actor to make it picklable
     class ActorWrapper:
@@ -925,8 +969,8 @@ class ImplicitQLearning:
         self.total_it = state_dict["total_it"]
 
 
-@pyrallis.wrap()
-def train(config: TrainConfig):
+@hydra.main(config_path="configs", config_name="iql", version_base=None)
+def train(config):
     rich.print("config ", config)
     if "metaworld" in config.env:
         env = utils_env.make_metaworld_env(config.env, config.seed)
@@ -1015,9 +1059,11 @@ def train(config: TrainConfig):
     max_action = float(env.action_space.high[0])
 
     if config.checkpoints_path is not None:
+        print(f"Checkpoints path: {config.checkpoints_path}")
         os.makedirs(config.checkpoints_path, exist_ok=True)
-        with open(os.path.join(config.checkpoints_path, "config.yaml"), "w") as f:
-            pyrallis.dump(config, f)
+        # Save config using Hydra's utilities
+        from omegaconf import OmegaConf
+        OmegaConf.save(config=config, f=os.path.join(config.checkpoints_path, "config.yaml"))
 
     # Set seeds
     seed = config.seed

@@ -1,0 +1,17 @@
+name: ac_decoder
+d_model: ${.embedding_dim}
+nhead: 4
+num_layers: 3
+pos_enc: learned
+
+# temporal ensembling
+temporal_ensemble_coeff: 0.5
+use_temporal_ensembling: False
+gripper_pos: 1.0
+
+input_modalities:
+  - states
+
+defaults:
+  - base
+  - _self_
