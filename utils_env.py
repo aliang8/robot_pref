@@ -1,8 +1,8 @@
 import os
 import pickle as pkl
 
-import dmc2gym
-import metaworld.envs.mujoco.env_dict as _env_dict
+# import dmc2gym
+# import metaworld.envs.mujoco.env_dict as _env_dict
 import numpy as np
 from gym.wrappers.time_limit import TimeLimit
 
