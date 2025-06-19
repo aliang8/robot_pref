@@ -19,7 +19,7 @@ model_type: BT
 noise: 0.0
 human: false
 # MLP
-epochs: 3000
+epochs: 3001
 batch_size: 256
 activation: tanh
 lr: 1e-3

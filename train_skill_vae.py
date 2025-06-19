@@ -490,13 +490,6 @@ def main(cfg: DictConfig):
         )
         print(f"Wandb initialized: {wandb_run.name}")
     
-    # Print model architecture after wandb initialization
-    if wandb_run is not None:
-        print("\n" + "=" * 50)
-        print("MODEL ARCHITECTURE AFTER WANDB INITIALIZATION:")
-        print("=" * 50)
-        print("Wandb initialized - model architecture will be printed after model creation")
-    
     # Load data
     print(f"\nLoading data from: {cfg.data.data_path}")
     data = load_tensordict(cfg.data.data_path)
@@ -541,15 +534,6 @@ def main(cfg: DictConfig):
     )
     
     print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
-    
-    # Print model architecture after model initialization
-    print("\n" + "=" * 50)
-    print("MODEL ARCHITECTURE AFTER MODEL INITIALIZATION:")
-    print("=" * 50)
-    print("SkillVAE Model:")
-    print(model)
-    print(f"Total parameters: {sum(p.numel() for p in model.parameters()):,}")
-    print("=" * 50)
     
     # Create output directory
     output_dir = os.path.join(cfg.output.output_dir, cfg.output.model_dir_name)

@@ -187,7 +187,8 @@ def train(config: DictConfig):
         eef_act_dim = train_obs_act_1.shape[-1]
         reward_model = RewardModel(config, train_obs_act_1, train_obs_act_2, labels, eef_act_dim)
 
-        print(reward_model)
+        print("Reward model architecture:")
+        print(reward_model.net)
 
         reward_model.save_test_dataset(val_obs_act_1, val_obs_act_2, target_labels, target_labels, val_images1, val_images2)
         reward_model.train_model()

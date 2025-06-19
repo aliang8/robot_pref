@@ -886,6 +886,9 @@ def print_dataset_statistics(dataset: Dict[str, np.ndarray]) -> None:
 
 @hydra.main(config_path="configs", config_name="iql", version_base=None)
 def train(config):
+    # Initialize wandb
+    wandb_init(config) if config.use_wandb else None
+
     rich.print("config ", config)
     if "metaworld" in config.env:
         env = utils_env.make_metaworld_env(config.env, config.seed)
@@ -907,7 +910,7 @@ def train(config):
     else:
         state_mean, state_std = 0, 1
 
-    print_dataset_statistics(dataset)
+    
 
     dataset["observations"] = normalize_states(
         dataset["observations"], state_mean, state_std
@@ -939,6 +942,8 @@ def train(config):
 
     if config.trivial_reward == 1:
         dataset["rewards"] *= 0.0
+
+    print_dataset_statistics(dataset)
     
     # if config.normalize_reward: # TODO
     # modify_reward(
@@ -1026,8 +1031,7 @@ def train(config):
         trainer.load_state_dict(torch.load(policy_file))
         actor = trainer.actor
 
-    # Initialize wandb
-    wandb_init(config) if config.use_wandb else None
+    
     
     for t in trange(int(config.max_timesteps)):
         batch = replay_buffer.sample(config.batch_size)

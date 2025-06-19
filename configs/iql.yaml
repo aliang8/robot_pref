@@ -15,7 +15,7 @@ max_timesteps: 150_000
 n_episodes: 30
 name: IQL
 normalize: false
-normalize_reward: true
+normalize_reward: false
 qf_lr: 3e-4
 record_video: false
 seed: 0
@@ -23,7 +23,7 @@ tau: 0.005
 
 vf_lr: 3e-4
 
-use_reward_model: true
+use_reward_model: false
 trivial_reward: 0 # 1 for zero reward IQL
 
 

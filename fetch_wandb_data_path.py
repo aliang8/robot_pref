@@ -150,7 +150,8 @@ def save_run_df(run_data, output_dir="run_data"):
         # Get SR metrics
         if "history" in run and "eval_success_rates" in run["history"]:
             success_rates = run["history"]["eval_success_rates"]
-            top_3_rates = success_rates[-5:]
+            # top_3_rates = success_rates[-10:]
+            top_3_rates = sorted(success_rates, reverse=True)[:3]
             row["top3_avg_eval_success_rate"] = sum(top_3_rates) / len(top_3_rates)
 
         rows.append(row)
@@ -181,16 +182,15 @@ def plot_data_path_comparisons(df, output_dir="data_path_plots"):
         print("No runs with valid success rate metrics found. Cannot generate plots.")
         return output_dir
 
-    # Determine which column to use for data_path
+    # Get unique data paths from both "data_path" and "_content.data_path" if present
+    data_path_set = set()
     if "data_path" in df_filtered.columns:
-        data_path_col = "data_path"
-    elif "_content.data_path" in df_filtered.columns:
-        data_path_col = "_content.data_path"
-    else:
+        data_path_set.update(df_filtered["data_path"].dropna().unique())
+    if "_content.data_path" in df_filtered.columns:
+        data_path_set.update(df_filtered["_content.data_path"].dropna().unique())
+    if not data_path_set:
         raise KeyError("Neither 'data_path' nor '_content.data_path' found in DataFrame columns.")
-
-    # Get unique data paths
-    data_paths = df_filtered[data_path_col].unique()
+    data_paths = list(data_path_set)
     print(f"Found {len(data_paths)} unique data paths: {data_paths}")
 
     # Helper function to get config value with fallback to _content prefixed path
@@ -209,8 +209,13 @@ def plot_data_path_comparisons(df, output_dir="data_path_plots"):
 
     # Create a plot for each data path
     for data_path in data_paths:
-        # Filter data for this data path
-        path_df = df_filtered[df_filtered[data_path_col] == data_path].copy()
+        # Filter data for this data path, considering both "data_path" and "_content.data_path"
+        mask = pd.Series([False] * len(df_filtered), index=df_filtered.index)
+        if "data_path" in df_filtered.columns:
+            mask = mask | (df_filtered["data_path"] == data_path)
+        if "_content.data_path" in df_filtered.columns:
+            mask = mask | (df_filtered["_content.data_path"] == data_path)
+        path_df = df_filtered[mask].copy()
         
         # Create separate groups for reward types
         def get_reward_type(row):
@@ -220,29 +225,31 @@ def plot_data_path_comparisons(df, output_dir="data_path_plots"):
                 return "BC"
             
             # Helper to add Distributional tag
-            def add_dist_tag(base, is_dist):
+            def add_tag(base, is_dist, feedback_num=None):
                 if is_dist:
+                    if feedback_num is not None:
+                        return f"{base} + Dist RM (NF={feedback_num})"
                     return f"{base} + Dist RM"
                 else:
+                    if feedback_num is not None:
+                        return f"{base} (NF={feedback_num})"
                     return base
 
             is_dist = get_config_value(row, "use_distributional_model", False) is True
+            feedback_num = get_config_value(row, "feedback_num", False)
 
             if get_config_value(row, "eef_rm", False) is True:
-                return add_dist_tag("EEF RM", is_dist)
+                return add_tag("EEF RM", is_dist, feedback_num)
             elif get_config_value(row, "use_gt_prefs", False) is True or get_config_value(row, "use_gt_aug_prefs", False) is True:
-                return add_dist_tag("GT Prefs", is_dist)
+                return add_tag("GT Prefs", is_dist, feedback_num)
             elif get_config_value(row, "trivial_reward", None) == 1:
-                return add_dist_tag("Zero Rewards", is_dist)
+                return add_tag("Zero Rewards", is_dist)
             elif get_config_value(row, "trivial_reward", None) == 0:
-                return add_dist_tag("Aug Prefs", is_dist)
+                return add_tag("Aug Prefs", is_dist, feedback_num)
             else:
                 return "IQL_Zero"
-        
+
         path_df["reward_type"] = path_df.apply(get_reward_type, axis=1)
-        
-        # Filter out rows with "Unknown" reward type
-        path_df = path_df[path_df["reward_type"] != "Unknown"]
         
         if len(path_df) == 0:
             print(f"No valid reward types found for data path: {data_path}")

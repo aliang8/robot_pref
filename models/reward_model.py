@@ -110,11 +110,12 @@ class RewardModel:
         if test_images2 is not None:
             self.test_images2 = test_images2
 
-    def model_net(self, in_dim=39, out_dim=1, H=128, n_layers=2):
+    def model_net(self, in_dim=39, out_dim=1, H=128, n_layers=1):
         net = []
         for i in range(n_layers):
             net.append(nn.Linear(in_dim, H))
             net.append(nn.LeakyReLU())
+            net.append(nn.Dropout(0.2))
             in_dim = H
         net.append(nn.Linear(H, out_dim))
         if self.activation == "tanh":
@@ -387,7 +388,7 @@ class RewardModel:
         for member in range(self.ensemble_num):
             self.ensemble_model[member].train()
             self.optimizer.append(
-                optim.Adam(self.ensemble_model[member].parameters(), lr=self.lr)
+                optim.Adam(self.ensemble_model[member].parameters(), lr=self.lr, weight_decay=1e-4)
             )
             self.lr_scheduler.append(
                 optim.lr_scheduler.StepLR(
