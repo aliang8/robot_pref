@@ -1,6 +1,5 @@
 import os
 import random
-import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
@@ -10,13 +9,15 @@ import numpy as np
 import rich
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
+from omegaconf import OmegaConf
 from tqdm import trange
 
 import utils_env
 import wandb
-from iql import ReplayBuffer, eval_actor
-from models.act import ActionChunkingTransformerPolicy, ACTTemporalEnsembler
-from utils.loss import arm_gripper_loss
+from iql import ReplayBuffer, eval_actor, print_dataset_statistics
+from reward_utils import normalize_states
+from utils.wandb import wandb_init
 
 TensorBatch = List[torch.Tensor]
 
@@ -25,8 +26,7 @@ def compute_mean_std(states: np.ndarray, eps: float) -> Tuple[np.ndarray, np.nda
     std = states.std(0) + eps
     return mean, std
 
-def normalize_states(states: np.ndarray, mean: np.ndarray, std: np.ndarray):
-    return (states - mean) / std
+
 
 
 def wrap_env(
@@ -64,16 +64,6 @@ def set_seed(
     torch.use_deterministic_algorithms(deterministic_torch)
 
 
-def wandb_init(config: dict) -> None:
-
-    wandb.init(
-        config=config,
-        project=config.wandb.project,
-        name=config.wandb.name,
-        id=str(uuid.uuid4()),
-    )
-    wandb.run.save()
-
 
 # @torch.no_grad()
 # def eval_actor(
@@ -94,60 +84,175 @@ def wandb_init(config: dict) -> None:
 #     actor.train()
 #     return np.asarray(episode_rewards)
 
+# class Actor(nn.Module):
+#     def __init__(
+#         self,
+#         state_dim:   int,
+#         action_dim:  int,
+#         max_action:  float,
+#         model_config: Dict[str, Any]
+#     ):
+#         super().__init__()
+
+#         self.cfg = model_config
+
+#         self.model = ActionChunkingTransformerPolicy(cfg=model_config, input_dim=state_dim, output_dim=action_dim)
+#         # self.loss_fn = nn.L1Loss(reduction="none")
+#         self.loss_fn = nn.MSELoss(reduction="none")
+#         if model_config.use_separate_gripper:
+#             self.gripper_pos_weight = getattr(model_config, "gripper_pos_weight", 1.0)
+#             self.gripper_pos_weight = torch.tensor(self.gripper_pos_weight)
+#             self.gripper_loss_fn = nn.BCEWithLogitsLoss(
+#                 reduction="none", pos_weight=self.gripper_pos_weight
+#             )
+
+#         self.max_action = float(max_action)
+
+#         self.temporal_ensembler = ACTTemporalEnsembler(temporal_ensemble_coeff=model_config.temporal_ensemble_coeff, chunk_size=model_config.action_horizon)
+
+#     def forward(self, state: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+#         action_preds = self.model(state)
+        
+#         return action_preds
+    
+#     def compute_loss(
+#         self, state: torch.Tensor, target_action: torch.Tensor
+#     ) -> Tuple[torch.Tensor, Dict[str, float]]:        
+#         action_preds = self.model(state)
+#         import ipdb; ipdb.set_trace()
+
+#         arm_loss, gripper_loss, gripper_acc = arm_gripper_loss(action_preds=action_preds, actions=target_action, arm_loss_fn=self.loss_fn, gripper_loss_fn=self.gripper_loss_fn, gaussian_output=False)
+
+#         total_loss = self.cfg.arm_loss_weight * arm_loss + self.cfg.gripper_loss_weight * gripper_loss
+
+#         return total_loss, {
+#             "arm_loss": arm_loss.item(),
+#             "gripper_loss": gripper_loss.item(),
+#             "gripper_acc": gripper_acc.item(),
+#             "loss": total_loss.item(),
+#         }
+
+#     @torch.no_grad()
+#     def act(self, state: torch.Tensor) -> torch.Tensor:
+#         action_preds = self.model(state).actions
+
+#         action_preds = self.temporal_ensembler.update(action_preds)
+
+#         return action_preds.squeeze()
+    
+
 class Actor(nn.Module):
+    """
+    Arm:  continuous actions in [-max_action, max_action]^6
+    Gripper: discrete {-1, 1}  (open / close)
+    """
+
     def __init__(
         self,
         state_dim:   int,
         action_dim:  int,
-        max_action:  float,
-        model_config: Dict[str, Any]
+        max_action:  float = 1.0,
+        pos_weight:  float = 12.5 # To punish false negatives (close grippers)
     ):
         super().__init__()
 
-        self.state_embedder = nn.Linear(state_dim, model_config.d_model)
-        self.model = ActionChunkingTransformerPolicy(cfg=model_config, output_dim=action_dim)
-        self.loss_fn = nn.L1Loss(reduction="none")
-        if model_config.use_separate_gripper:
-            self.gripper_pos_weight = getattr(model_config, "gripper_pos_weight", 1.0)
-            self.gripper_pos_weight = torch.tensor(self.gripper_pos_weight)
-            self.gripper_loss_fn = nn.BCEWithLogitsLoss(
-                reduction="none", pos_weight=self.gripper_pos_weight
-            )
+        # ------- shared hyper‑params -------
+        hidden = 256
+
+        # ------- arm head -------
+        self.arm_net = nn.Sequential(
+            nn.Linear(state_dim, hidden), nn.ReLU(),
+            nn.Linear(hidden,  hidden),   nn.ReLU(),
+            nn.Linear(hidden,  action_dim - 1)           # 6 dims
+        )
+
+        # ------- gripper head (logits) -------
+        self.gripper_net = nn.Sequential(
+            nn.Linear(state_dim, hidden), nn.ReLU(),
+            nn.Linear(hidden,  hidden),   nn.ReLU(),
+            nn.Linear(hidden,  1)                         # raw logits
+        )
 
         self.max_action = float(max_action)
+        # buffer so it moves with the model between CPU / GPU
+        self.register_buffer("bce_pos_weight",
+                             torch.tensor(pos_weight, dtype=torch.float32))
 
-        self.temporal_ensembler = ACTTemporalEnsembler(temporal_ensemble_coeff=model_config.temporal_ensemble_coeff, chunk_size=model_config.seq_len)
-
+    # --------------------------------------------------------------------- #
+    # Forward                                                                #
+    # --------------------------------------------------------------------- #
     def forward(self, state: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        state_embs = self.state_embedder(state)
-        action_preds = self.model(state_embs)
-        
-        return action_preds
-    
+        """
+        Returns:
+            arm_actions      -- shape (B, 6), scaled to [-max_action, max_action]
+            gripper_logits   -- shape (B, 1), un‑activated
+        """
+        arm_actions    = torch.tanh(self.arm_net(state)) * self.max_action
+        gripper_logits = self.gripper_net(state)          # raw
+        return arm_actions, gripper_logits
+
+    # --------------------------------------------------------------------- #
+    # Loss                                                                   #
+    # --------------------------------------------------------------------- #
     def compute_loss(
         self, state: torch.Tensor, target_action: torch.Tensor
     ) -> Tuple[torch.Tensor, Dict[str, float]]:
-        state_embs = self.state_embedder(state)
-        action_preds = self.model(state_embs)
 
-        arm_loss, gripper_loss, gripper_acc = arm_gripper_loss(action_preds=action_preds, actions=target_action, arm_loss_fn=self.loss_fn, gripper_loss_fn=self.gripper_loss_fn, gaussian_output=False)
+        arm_pred, grip_logits = self(state)
 
-        total_loss = arm_loss + gripper_loss
+        # Split labelled targets
+        arm_target     = target_action[:, :-1]                 # (B, 6)
+        grip_target_01 = (target_action[:, -1:] + 1) / 2       # {-1,1} -> {0,1}
 
-        return total_loss, {
-            "arm_loss": arm_loss.item(),
-            "gripper_loss": gripper_loss.item(),
-            "gripper_acc": gripper_acc.item(),
-            "loss": total_loss.item(),
+        # Losses
+        arm_loss = F.mse_loss(arm_pred, arm_target)
+
+        grip_loss = F.binary_cross_entropy_with_logits(
+            grip_logits,
+            grip_target_01,
+            pos_weight=self.bce_pos_weight
+        )
+
+        total = arm_loss + grip_loss
+
+        return total, {
+            "arm_mse":   arm_loss.item(),
+            "grip_bce":  grip_loss.item(),
+            "total":     total.item()
         }
 
+    # --------------------------------------------------------------------- #
+    # Act (no‑grad)                                                          #
+    # --------------------------------------------------------------------- #
     @torch.no_grad()
     def act(self, state: torch.Tensor) -> torch.Tensor:
-        state_embs = self.state_embedder(state)
-        action_preds = self.model(state_embs).actions
-        action = self.temporal_ensembler.update(action_preds)
+        """
+        Args
+        ----
+        state : torch.Tensor | np.ndarray
+          shape (state_dim,) or (B, state_dim)
 
-        return action.squeeze()
+        Returns
+        -------
+        np.ndarray shape (action_dim,) or (B, action_dim)
+        """
+        if not torch.is_tensor(state):
+            state = torch.as_tensor(state, dtype=torch.float32)
+        if state.dim() == 1:
+            state = state[None]                              # add batch
+
+        state = state.to(next(self.parameters()).device)
+
+        arm, grip_logits = self(state)
+
+        grip_bin = torch.where(grip_logits > 0.0,  # >0 -> close (1)
+                               torch.tensor(1.0,  device=grip_logits.device),
+                               torch.tensor(-1.0, device=grip_logits.device))
+
+        actions = torch.cat([arm, grip_bin], dim=-1)
+        return actions.cpu().numpy().squeeze()
+
+
 
 class BC:
     def __init__(
@@ -170,10 +275,14 @@ class BC:
         log_dict = {}
         self.total_it += 1
 
-        state, action, _, _, _ = batch
+        state, action, _, _, _ = batch        
 
-        if state.dim() == 3:
-            state = state[:, 0:1] # take only the first frame for now
+        # TODO: seq_len is 10 right now split into 5 for history and 6 for action horizon adjust this for the configs
+        # history = state[:, :5]
+        # action_horizon = action[:, 4:]
+        # actor_loss, loss_dict = self.actor.compute_loss(history, action_horizon)
+        # if state.dim() == 3:
+        #     state = state[:, 0:1] # take only the first frame for now
 
         # Compute actor loss using the actor's compute_loss method
         actor_loss, loss_dict = self.actor.compute_loss(state, action)
@@ -201,6 +310,9 @@ class BC:
 
 @hydra.main(config_path="configs", config_name="bc", version_base=None)
 def train(config):
+    
+    wandb_init(config) if config.use_wandb else None
+
     rich.print("config ", config)
     if "metaworld" in config.env:
         env = utils_env.make_metaworld_env(config.env, config.seed)
@@ -233,13 +345,16 @@ def train(config):
     dataset["next_observations"] = normalize_states(
         dataset["next_observations"], state_mean, state_std
     )
+
+    print_dataset_statistics(dataset)
+    
     env = wrap_env(env, state_mean=state_mean, state_std=state_std)
     replay_buffer = ReplayBuffer(
         state_dim,
         action_dim,
         config.buffer_size,
         config.device,
-        seq_len=config.model.seq_len,
+        # seq_len=config.model.seq_len + config.model.action_horizon - 1, # seq_len + action_horizon
     )
     replay_buffer.load_dataset(dataset)
 
@@ -247,7 +362,6 @@ def train(config):
         print(f"Checkpoints path: {config.checkpoints_path}")
         os.makedirs(config.checkpoints_path, exist_ok=True)
         # Save config using Hydra's utilities
-        from omegaconf import OmegaConf
         OmegaConf.save(config=config, f=os.path.join(config.checkpoints_path, "config.yaml"))
 
     max_action = float(env.action_space.high[0])
@@ -256,8 +370,24 @@ def train(config):
     seed = config.seed
     set_seed(seed, env)
 
-    actor = Actor(state_dim=state_dim, action_dim=action_dim, max_action=max_action,model_config=config.model).to(config.device)
-    actor_optimizer = torch.optim.Adam(actor.parameters(), lr=1e-3)
+    # actor = Actor(state_dim=state_dim, action_dim=action_dim, max_action=max_action,model_config=config.model).to(config.device)
+    actor = Actor(
+        state_dim=state_dim,
+        action_dim=action_dim,
+        max_action=max_action,
+        pos_weight=config.model.gripper_pos_weight if hasattr(config.model, 'gripper_pos_weight') else 12.5
+    ).to(config.device)
+
+    # Print model architecture after model initialization
+    print("\n" + "=" * 50)
+    print("MODEL ARCHITECTURE:")
+    print("=" * 50)
+    print("Actor Network:")
+    print(actor)
+    print(f"Total parameters: {sum(p.numel() for p in actor.parameters()):,}")
+    print("=" * 50)
+
+    actor_optimizer = torch.optim.Adam(actor.parameters(), lr=1e-4)
 
     kwargs = {
         "max_action": max_action,
@@ -279,12 +409,10 @@ def train(config):
         trainer.load_state_dict(torch.load(policy_file))
         actor = trainer.actor
 
-    wandb_init(config) if config.use_wandb else None
-
+    
     evaluations = []
     for t in trange(int(config.max_timesteps)):
         batch = replay_buffer.sample(config.batch_size)
-        batch = [b.to(config.device) for b in batch]
         log_dict = trainer.train(batch)
         wandb.log(log_dict, step=trainer.total_it) if wandb.run is not None else None
         # Evaluate episode

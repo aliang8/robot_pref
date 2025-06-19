@@ -1,14 +1,14 @@
 #!/bin/bash
 
-env=robomimic_lift
-seeds=(1 2 3)
 data_path="/scr/shared/datasets/robot_pref/lift_sawyer/lift_sawyer.hdf5"
+use_wandb=True
+seeds=(4 5 6)
 
-# Run for three seeds
+# Run zero rewards IQL for three seeds
 for seed in "${seeds[@]}"; do
     echo "Running seed $seed"
-    python3 iql.py --config=configs/iql.yaml --env=$env --seed=$seed \
-    --data_path=$data_path --trivial_reward=1 &
+    python3 iql.py seed=$seed \
+    data_path=$data_path trivial_reward=1 use_wandb=$use_wandb&
 done 
 
 wait  # Wait for all background jobs to finish

@@ -1,5 +1,9 @@
+import io
 import os
+import tempfile
 
+import matplotlib.animation as animation
+import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import torch.nn as nn
@@ -44,7 +48,7 @@ class RewardModel:
         self.feedback_type = config.feedback_type
 
         # Calculate class weights based on preference distribution
-        self.use_class_weights = getattr(config, 'use_class_weights', True)
+        self.use_class_weights = getattr(config, 'use_class_weights', False)
         if self.use_class_weights:
             self.class_weights = self._calculate_class_weights()
             print(f"Class weights calculated: {self.class_weights}")
@@ -153,7 +157,7 @@ class RewardModel:
         elif self.ensemble_method == "uwo":
             return torch.mean(pred, dim=1) - 5 * torch.std(pred, dim=1)
 
-    def BT_loss(self, pred_hat, label, apply_class_weights=True):
+    def BT_loss(self, pred_hat, label, apply_class_weights=False):
         # https://pytorch.org/docs/stable/generated/torch.nn.LogSoftmax.html#torch.nn.LogSoftmax
         logprobs = F.log_softmax(pred_hat, dim=1)
         losses = -(label * logprobs).sum(dim=1)  # Per-sample losses
@@ -175,7 +179,7 @@ class RewardModel:
         
         return losses.sum()
 
-    def linear_BT_loss(self, pred_hat, label, apply_class_weights=True):
+    def linear_BT_loss(self, pred_hat, label, apply_class_weights=False):
         pred_hat += self.segment_size + 1e-5
         pred_prob = pred_hat / torch.sum(pred_hat, dim=1, keepdim=True)
         # label and pred_hat cross entropy loss
@@ -199,12 +203,11 @@ class RewardModel:
         return torch.sum(losses)
 
     def save_model(self, path):
+        print(f"Saving {self.ensemble_num} ensemble members to {path}")
         for member in range(self.ensemble_num):
             # join path + member number
             member_path = os.path.join(path, "reward_" + str(member) + ".pt")
             torch.save(self.ensemble_model[member].state_dict(), member_path)
-
-            print(f"Model for member {member} saved at {member_path}")
 
     def load_model(self, path):
         self.ensemble_model = self.construct_ensemble()
@@ -236,8 +239,6 @@ class RewardModel:
         """Evaluate the ensemble of distributional reward models."""
         eval_acc = 0
         eval_loss = 0
-        eval_bt_loss = 0
-        eval_reg_loss = 0
         total_samples = 0
         
         with torch.no_grad():
@@ -257,37 +258,31 @@ class RewardModel:
                     batch * self.batch_size : (batch + 1) * self.batch_size
                 ]
                 
-                pred_1_mean, pred_1_var = self.ensemble_model_forward(obs_act_1_batch)
-                pred_2_mean, pred_2_var = self.ensemble_model_forward(obs_act_2_batch)
+                pred_1 = self.ensemble_model_forward(obs_act_1_batch)
+                pred_2 = self.ensemble_model_forward(obs_act_2_batch)
 
                 pred_hat = torch.stack([
-                    pred_1_mean.sum(dim=1),
-                    pred_2_mean.sum(dim=1)
-                ], dim=1)
+                    pred_1.sum(dim=1),
+                    pred_2.sum(dim=1)
+                ], dim=1).squeeze()
 
                 pred_labels = pred_hat.argmax(dim=1).squeeze()
                 eval_acc += (pred_labels == binary_labels_batch.argmax(dim=1)).sum().item()
-                
-                total_loss, bt_loss, reg_loss = self.loss(pred_1_mean, pred_2_mean, pred_1_var, pred_2_var, labels_batch)
-                
+                                
                 # Normalize losses by batch size
                 batch_size = labels_batch.shape[0]
-                eval_loss += total_loss.item() * batch_size
-                eval_bt_loss += bt_loss.item() * batch_size
-                eval_reg_loss += reg_loss.item() * batch_size
+                eval_loss += self.loss(pred_hat, labels_batch).item()
                 total_samples += batch_size
                 
                 if images1 is not None and images2 is not None and len(vis_data) < 4:
-                    batch_indices = list(range(len(pred_1_mean)))
+                    batch_indices = list(range(len(pred_1)))
                     if len(batch_indices) > (4 - len(vis_data)):
                         batch_indices = np.random.choice(batch_indices, size=4 - len(vis_data), replace=False)
                     
                     for i in batch_indices:
                         vis_data.append({
-                            'reward1': pred_1_mean[i].cpu().numpy(),
-                            'reward2': pred_2_mean[i].cpu().numpy(),
-                            'variance1': pred_1_var[i].cpu().numpy(),
-                            'variance2': pred_2_var[i].cpu().numpy(),
+                            'reward1': pred_1[i].cpu().numpy(),
+                            'reward2': pred_2[i].cpu().numpy(),
                             'gt_pref': torch.argmax(binary_labels_batch[i]).item(),
                             'pred_pref': pred_labels[i].item(),
                             'images1': images1[batch * self.batch_size + i],
@@ -296,34 +291,22 @@ class RewardModel:
         
         # Normalize by total number of samples
         eval_loss /= total_samples
-        eval_bt_loss /= total_samples
-        eval_reg_loss /= total_samples
         eval_acc /= float(total_samples)
         
         wandb.log({
             name + "/loss": eval_loss,
-            name + "/bt_loss": eval_bt_loss,
-            name + "/reg_loss": eval_reg_loss,
             name + "/acc": eval_acc
-        }, step=epoch)
+        }, step=epoch) if wandb.run is not None else None
         
         if len(vis_data) > 0 and wandb.run is not None:
             self._create_visualization(vis_data, name, epoch)
 
     def _create_visualization(self, vis_data, name, epoch):
-        """Create visualization of reward predictions with variance bands."""
-        import matplotlib.pyplot as plt
-        import matplotlib.animation as animation
-        import io
-        import tempfile
-        import os
-        
+        """Create visualization of reward predictions."""
         videos = []
         for idx, ex in enumerate(vis_data):
             r1 = ex['reward1']  # mean rewards
             r2 = ex['reward2']  # mean rewards
-            v1 = ex['variance1']  # variances
-            v2 = ex['variance2']  # variances
             gt_pref = ex['gt_pref']
             pred_pref = ex['pred_pref']
             
@@ -339,10 +322,6 @@ class RewardModel:
             line1, = ax1.plot([], [], label="Traj 1", color="blue")
             line2, = ax1.plot([], [], label="Traj 2", color="red")
             
-            # Create empty variance bands
-            band1 = ax1.fill_between([], [], [], [], alpha=0.2, color="blue")
-            band2 = ax1.fill_between([], [], [], [], alpha=0.2, color="red")
-            
             ax1.legend(loc="upper right", fontsize=8)
             ax1.tick_params(axis='both', which='major', labelsize=8)
             
@@ -356,37 +335,22 @@ class RewardModel:
             
             max_len = max(len(r1), len(r2))
             ax1.set_xlim(0, max_len-1)
-            min_y = min(np.min(r1 - 2*np.sqrt(v1)), np.min(r2 - 2*np.sqrt(v2)))
-            max_y = max(np.max(r1 + 2*np.sqrt(v1)), np.max(r2 + 2*np.sqrt(v2)))
+            min_y = min(np.min(r1), np.min(r2))
+            max_y = max(np.max(r1), np.max(r2))
             ax1.set_ylim(min_y - 0.1 * abs(min_y), max_y + 0.1 * abs(max_y))
             
             def init():
                 line1.set_data([], [])
                 line2.set_data([], [])
-                band1.set_verts([])
-                band2.set_verts([])
                 img1.set_data(np.zeros((64, 64, 3)))
                 img2.set_data(np.zeros((64, 64, 3)))
-                return line1, line2, band1, band2, img1, img2
+                return line1, line2, img1, img2
             
             def animate(i):
                 # Update mean reward lines
                 x = np.arange(i+1)
                 line1.set_data(x, r1[:i+1])
                 line2.set_data(x, r2[:i+1])
-                
-                # Update variance bands
-                band1.set_verts([np.column_stack([
-                    np.concatenate([x, x[::-1]]),
-                    np.concatenate([r1[:i+1] + 2*np.sqrt(v1[:i+1]), 
-                                  (r1[:i+1] - 2*np.sqrt(v1[:i+1]))[::-1]])
-                ])])
-                
-                band2.set_verts([np.column_stack([
-                    np.concatenate([x, x[::-1]]),
-                    np.concatenate([r2[:i+1] + 2*np.sqrt(v2[:i+1]), 
-                                  (r2[:i+1] - 2*np.sqrt(v2[:i+1]))[::-1]])
-                ])])
                 
                 # Update images
                 img1_data = ex['images1'][i]
@@ -399,7 +363,7 @@ class RewardModel:
                 img1.set_data(img1_data)
                 img2.set_data(img2_data)
                 
-                return line1, line2, band1, band2, img1, img2
+                return line1, line2, img1, img2
             
             ani = animation.FuncAnimation(
                 fig, animate, init_func=init, frames=max_len,
@@ -416,7 +380,7 @@ class RewardModel:
             buf.seek(0)
             videos.append(wandb.Video(buf, caption=f"Test Pair {idx+1}: GT Pref={gt_pref}, Pred={pred_pref}", format="mp4"))
         
-        wandb.log({f"{name}/reward_videos": videos}, step=epoch)
+        wandb.log({f"{name}/reward_videos": videos}, step=epoch) if wandb.run is not None else None
 
     def train_model(self):
         self.ensemble_model = self.construct_ensemble()
@@ -488,7 +452,7 @@ class RewardModel:
 
             train_loss /= obs_act_1.shape[0] * self.ensemble_num
 
-            if epoch % 20 == 0:
+            if epoch % 20 == 0 and wandb.run is not None:
                 wandb.log({"train/loss": train_loss}, step=epoch)
 
             if epoch % 100 == 0:
@@ -923,7 +887,7 @@ class DistributionalRewardModel:
             train_bt_samples_loss /= total_samples
             train_reg_loss /= total_samples
 
-            if epoch % 20 == 0:
+            if epoch % 20 == 0 and wandb.run is not None:
                 wandb.log({
                     "train/loss": train_loss, 
                     "train/bt_mean_loss": train_bt_mean_loss, 
@@ -1028,18 +992,19 @@ class DistributionalRewardModel:
             name + "/bt_samples_loss": eval_bt_samples_loss,
             name + "/reg_loss": eval_reg_loss,
             name + "/acc": eval_acc
-        }, step=epoch)
+        }, step=epoch) if wandb.run is not None else None
         
         if len(vis_data) > 0 and wandb.run is not None:
             self._create_visualization(vis_data, name, epoch)
 
     def _create_visualization(self, vis_data, name, epoch):
         """Create visualization of reward predictions with variance bands."""
-        import matplotlib.pyplot as plt
-        import matplotlib.animation as animation
         import io
-        import tempfile
         import os
+        import tempfile
+
+        import matplotlib.animation as animation
+        import matplotlib.pyplot as plt
         
         videos = []
         for idx, ex in enumerate(vis_data):
@@ -1139,7 +1104,7 @@ class DistributionalRewardModel:
             buf.seek(0)
             videos.append(wandb.Video(buf, caption=f"Test Pair {idx+1}: GT Pref={gt_pref}, Pred={pred_pref}", format="mp4"))
         
-        wandb.log({f"{name}/reward_videos": videos}, step=epoch)
+        wandb.log({f"{name}/reward_videos": videos}, step=epoch) if wandb.run is not None else None
 
 
 

@@ -214,6 +214,13 @@ def main(cfg: DictConfig):
             )
 
             print(f"Wandb initialized: {wandb_run.name}")
+
+            # Print model architecture after wandb initialization
+            if wandb_run is not None:
+                print("\n" + "=" * 50)
+                print("MODEL ARCHITECTURE AFTER WANDB INITIALIZATION:")
+                print("=" * 50)
+                print("Wandb initialized - model architecture will be printed after model creation")
         else:
             wandb_run = None
 
@@ -373,6 +380,15 @@ def main(cfg: DictConfig):
         
         model = model.to(device)
         print(f"Total parameters: {sum(p.numel() for p in model.parameters())}")
+
+        # Print model architecture after model initialization
+        print("\n" + "=" * 50)
+        print("MODEL ARCHITECTURE AFTER MODEL INITIALIZATION:")
+        print("=" * 50)
+        print(f"{'Distributional' if cfg.model.is_distributional else 'Regular'} Reward Model:")
+        print(model)
+        print(f"Total parameters: {sum(p.numel() for p in model.parameters()):,}")
+        print("=" * 50)
 
         start_time = time.time()
         dataset_name = Path(cfg.data.data_path).stem

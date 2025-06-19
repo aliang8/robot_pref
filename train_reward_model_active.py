@@ -568,6 +568,16 @@ def active_preference_learning(cfg):
         print("Training ensemble reward model...")
         ensemble = EnsembleRewardModel(state_dim, action_dim, cfg.model.hidden_dims, cfg.active_learning.num_models)
 
+        # Print model architecture after model initialization
+        print("\n" + "=" * 50)
+        print("MODEL ARCHITECTURE AFTER MODEL INITIALIZATION:")
+        print("=" * 50)
+        print(f"Ensemble Reward Model ({cfg.active_learning.num_models} models):")
+        print(ensemble)
+        print(f"Total parameters per model: {sum(p.numel() for p in ensemble.models[0].parameters()):,}")
+        print(f"Total parameters for ensemble: {sum(p.numel() for p in ensemble.parameters()):,}")
+        print("=" * 50)
+
         output_path = model_dir / "rm_training" / f"reward_model_training_{iteration}.png"
         ensemble, _, _ = train_model(
             ensemble,
@@ -709,6 +719,15 @@ def main(cfg: DictConfig):
         )
 
         print(f"Wandb initialized: {wandb_run.name}")
+        
+        # Print model architecture after wandb initialization
+        if wandb_run is not None:
+            print("\n" + "=" * 50)
+            print("MODEL ARCHITECTURE AFTER WANDB INITIALIZATION:")
+            print("=" * 50)
+            print("Wandb initialized - model architecture will be printed after model creation")
+
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     active_preference_learning(cfg)
 

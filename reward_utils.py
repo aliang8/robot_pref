@@ -115,7 +115,7 @@ def get_human_feedbacks(data_path, num_prefs):
     for pref in prefs:
         pair_ind = pref["pair_index"]
         preference = pref["preference"]  # Should be 'A', 'B', or 'equal'
-
+        
         seg1, seg2 = seg_pairs[pair_ind]
         
         # Get the actual segment data using indices

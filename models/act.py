@@ -139,7 +139,7 @@ class ActionChunkingTransformerPolicy(BasePolicy):
     """
 
     # def __init__(self, cfg: DictConfig, embedder: nn.Module, output_dim: int):
-    def __init__(self, cfg: DictConfig, output_dim: int):
+    def __init__(self, cfg: DictConfig, input_dim: int, output_dim: int):
         super().__init__(cfg, input_dim=cfg.d_model, output_dim=output_dim)
         
         # Policy is a transformer decoder
@@ -150,24 +150,33 @@ class ActionChunkingTransformerPolicy(BasePolicy):
             num_layers=cfg.num_layers,
             norm=nn.LayerNorm(cfg.d_model),
         )
-        # self.positional_encoding = get_pos_encoding(
-        #     cfg.pos_enc, embedding_dim=cfg.d_model, max_len=200
-        # )
-        self.decoder_pos_encoding = get_pos_encoding(
-            cfg.pos_enc, embedding_dim=cfg.d_model, max_len=200
+        self.positional_encoding = get_pos_encoding(
+            cfg.pos_enc, embedding_dim=cfg.d_model, max_len=cfg.seq_len
         )
+        self.decoder_pos_encoding = get_pos_encoding(
+            cfg.pos_enc, embedding_dim=cfg.d_model, max_len=cfg.action_horizon
+        )
+
+        self.state_embedder = nn.Sequential(nn.Linear(input_dim, cfg.d_model), 
+                                            nn.GELU(),
+                                            nn.Linear(cfg.d_model, cfg.d_model))
         self.action_embed = nn.Linear(output_dim, cfg.d_model)
 
 
-    def forward(self, state_embs: torch.Tensor) -> torch.Tensor:
-        B = state_embs.shape[0]
+    def forward(self, states: torch.Tensor) -> torch.Tensor:
+        B = states.shape[0]
+        state_embs = self.state_embedder(states)
+
+        # [B, T, E]
+        pos_encoding = self.positional_encoding.weight[: self.cfg.seq_len].unsqueeze(0)
+        memory = state_embs + pos_encoding
 
         # [B, T, E]
         action_embeddings = torch.zeros(
-            B, self.cfg.seq_len, self.cfg.d_model, device=state_embs.device
+            B, self.cfg.action_horizon, self.cfg.d_model, device=state_embs.device
         )
         action_pos_encoding = self.decoder_pos_encoding.weight[
-            : self.cfg.seq_len
+            : self.cfg.action_horizon
         ].unsqueeze(0)
 
         action_embeddings = action_embeddings + action_pos_encoding
@@ -179,11 +188,12 @@ class ActionChunkingTransformerPolicy(BasePolicy):
         # [B, T, E] -> [B, T, E]
         output = self.transformer_decoder(
             tgt=action_embeddings,
-            memory=state_embs,
+            memory=memory,
         )
 
         # Apply action head
         output = self.action_head(output)
+    
         return output
 
     # def forward(

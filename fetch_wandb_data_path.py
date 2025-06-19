@@ -147,17 +147,11 @@ def save_run_df(run_data, output_dir="run_data"):
                     field_name = f"{section_key}.{k}"
                     row[field_name] = v
 
-        # Add history data for success rates
+        # Get SR metrics
         if "history" in run and "eval_success_rates" in run["history"]:
             success_rates = run["history"]["eval_success_rates"]
-            # Get the latest success rate
-            row["latest_eval_success_rate"] = success_rates[-1]
-            row["max_eval_success_rate"] = max(success_rates)
-            top_3_rates = sorted(success_rates, reverse=True)[:3]
+            top_3_rates = success_rates[-5:]
             row["top3_avg_eval_success_rate"] = sum(top_3_rates) / len(top_3_rates)
-            for i, rate in enumerate(top_3_rates):
-                row[f"top_eval_success_{i + 1}"] = rate
-            row["history_eval_success_rates"] = success_rates
 
         rows.append(row)
 
@@ -187,19 +181,42 @@ def plot_data_path_comparisons(df, output_dir="data_path_plots"):
         print("No runs with valid success rate metrics found. Cannot generate plots.")
         return output_dir
 
+    # Determine which column to use for data_path
+    if "data_path" in df_filtered.columns:
+        data_path_col = "data_path"
+    elif "_content.data_path" in df_filtered.columns:
+        data_path_col = "_content.data_path"
+    else:
+        raise KeyError("Neither 'data_path' nor '_content.data_path' found in DataFrame columns.")
+
     # Get unique data paths
-    data_paths = df_filtered["data_path"].unique()
+    data_paths = df_filtered[data_path_col].unique()
     print(f"Found {len(data_paths)} unique data paths: {data_paths}")
+
+    # Helper function to get config value with fallback to _content prefixed path
+    def get_config_value(row, config_key, default=None):
+        """Get config value, trying direct path first, then _content prefixed path."""
+        # Try direct path first
+        if config_key in row:
+            return row[config_key]
+        
+        # Try _content prefixed path
+        content_key = f"_content.{config_key}"
+        if content_key in row:
+            return row[content_key]
+        
+        return default
 
     # Create a plot for each data path
     for data_path in data_paths:
         # Filter data for this data path
-        path_df = df_filtered[df_filtered["data_path"] == data_path].copy()
+        path_df = df_filtered[df_filtered[data_path_col] == data_path].copy()
         
         # Create separate groups for reward types
         def get_reward_type(row):
             # If BC in name, always "BC"
-            if "BC" in row.get("run_name", ""):
+            run_name = get_config_value(row, "run_name", "")
+            if "bc" in run_name.lower():
                 return "BC"
             
             # Helper to add Distributional tag
@@ -209,18 +226,27 @@ def plot_data_path_comparisons(df, output_dir="data_path_plots"):
                 else:
                     return base
 
-            is_dist = row.get("use_distributional_model", False) is True
+            is_dist = get_config_value(row, "use_distributional_model", False) is True
 
-            if row.get("eef_rm", False) is True:
+            if get_config_value(row, "eef_rm", False) is True:
                 return add_dist_tag("EEF RM", is_dist)
-            elif row.get("use_gt_prefs", False) is True or row.get("use_gt_aug_prefs", False) is True:
+            elif get_config_value(row, "use_gt_prefs", False) is True or get_config_value(row, "use_gt_aug_prefs", False) is True:
                 return add_dist_tag("GT Prefs", is_dist)
-            elif row.get("trivial_reward", None) == 1:
+            elif get_config_value(row, "trivial_reward", None) == 1:
                 return add_dist_tag("Zero Rewards", is_dist)
-            elif row.get("trivial_reward", None) == 0:
+            elif get_config_value(row, "trivial_reward", None) == 0:
                 return add_dist_tag("Aug Prefs", is_dist)
+            else:
+                return "IQL_Zero"
         
         path_df["reward_type"] = path_df.apply(get_reward_type, axis=1)
+        
+        # Filter out rows with "Unknown" reward type
+        path_df = path_df[path_df["reward_type"] != "Unknown"]
+        
+        if len(path_df) == 0:
+            print(f"No valid reward types found for data path: {data_path}")
+            continue
         
         # Calculate statistics for each group
         metric_column = "top3_avg_eval_success_rate"

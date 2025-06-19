@@ -1,11 +1,9 @@
 # source: https://github.com/gwthomas/IQL-PyTorch
 # https://arxiv.org/pdf/2110.06169.pdf
 import copy
-import multiprocessing as mp
 import os
 import random
 import uuid
-from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
@@ -16,153 +14,154 @@ import rich
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from omegaconf import DictConfig, OmegaConf
 from torch.distributions import Normal
 from torch.optim.lr_scheduler import CosineAnnealingLR
+from tqdm import trange
 
 # sys.path.append("./Reward_learning")
 import models.reward_model as reward_model
 import utils_env
 import wandb
+from learn_reward import build_rm_checkpoint_path
+from utils.wandb import wandb_init
 
 TensorBatch = List[torch.Tensor]
-
 
 EXP_ADV_MAX = 100.0
 LOG_STD_MIN = -20.0
 LOG_STD_MAX = 2.0
 
 
-@dataclass
-class TrainConfig:
-    # Experiment
-    device: str = "cuda"
-    env: str = "metaworld_box-close-v2"  # environment name
-    seed: int = 0  # Sets Gym, PyTorch and Numpy seeds
-    eval_freq: int = int(5e3)  # How often (time steps) we evaluate
-    n_episodes: int = 15  # How many episodes run during evaluation
-    max_timesteps: int = int(1e6)  # Max time steps to run environment
-    checkpoints_path: Optional[str] = None  # Save path
-    load_model: str = ""  # Model load file name, "" doesn't load
-    data_quality: float = 5.0  # Replay buffer size (data_quality * 100000)
-    trivial_reward: int = (
-        0  # 0: GT reward, 1: zero reward, 2: constant reward, 3: negative reward
-    )
-    # Video recording
-    record_video: bool = False  # Whether to record evaluation videos
-    video_dir: Optional[str] = None  # Directory to save evaluation videos
-    # IQL
-    buffer_size: int = 2_000_000  # Replay buffer size
-    batch_size: int = 256  # Batch size for all networks
-    discount: float = 0.99  # Discount factor
-    tau: float = 0.005  # Target network update rate
-    beta: float = 3.0  # Inverse temperature. Small beta -> BC, big beta -> maximizing Q
-    iql_tau: float = 0.7  # Coefficient for asymmetric loss
-    iql_deterministic: bool = False  # Use deterministic actor
-    normalize: bool = True  # Normalize states
-    normalize_reward: bool = True  # Normalize reward
-    vf_lr: float = 3e-4  # V function learning rate
-    qf_lr: float = 3e-4  # Critic learning rate
-    actor_lr: float = 3e-4  # Actor learning rate
-    actor_dropout: Optional[float] = None  # Adroit uses dropout for policy network
-    # reward model
-    feedback_num: int = 1000
-    use_reward_model: bool = False
-    use_gt_prefs: bool = False  # Use ground truth preferences for reward learning
-    epochs: int = 0
-    batch_size: int = 256
-    activation: str = "tanh"
-    lr: float = 1e-3
-    threshold: float = 0.0
-    segment_size: int = 25
-    data_aug: str = "none"
-    hidden_sizes: int = 128
-    ensemble_num: int = 3
-    ensemble_method: str = "mean"
-    q_budget: int = 100
-    feedback_type: str = "RLT"
-    model_type: str = "BT"
-    noise: float = 0.0
-    human: bool = False
-    use_relative_eef: bool = False
-    eef_rm: bool = False  # Use EEF positions as reward model input
-    # DTW augmentations
-    use_dtw_augmentations: bool = False
-    dtw_augment_before_training: bool = False  # If True: augment first then train, If False: train then augment
-    dtw_subsample_size: int = 10000  # Number of segments to sample for DTW matrix
-    dtw_augmentation_size: int = 2000  # Number of augmentation pairs to create from DTW matrix
-    dtw_k_augment: int = 5  # Number of similar segments to find for each original preference pair
-    dtw_preference_ratios: List[float] = None  # Ratios for [seg1_better, seg2_better, equal_pref] sampling. None = use all available
-    acquisition_threshold_low: float = 0.25  # 25th percentile for acquisition filtering
-    acquisition_threshold_high: float = 0.75  # 75th percentile for acquisition filtering
-    acquisition_method: str = "entropy"  # "entropy", "disagreement", "combined", "variance"
-    # Class weighting for preference balancing
-    use_class_weights: bool = False  # Apply inverse frequency weighting to balance preference types
-    # Wandb logging
-    project: str = "robot_pref"
-    entity: str = "clvr"
-    group: str = "IQL-MetaWorld"
-    name: str = "IQL"
+class Actor(nn.Module):
+    """
+    Arm:  continuous actions in [-max_action, max_action]^6
+    Gripper: discrete {-1, 1}  (open / close)
+    """
 
-    data_path: str = ""
-    use_distributional_model: bool = False
+    def __init__(
+        self,
+        state_dim:   int,
+        action_dim:  int,
+        max_action:  float = 1.0,
+        pos_weight:  float = 12.5 # To punish false negatives (close grippers)
+    ):
+        super().__init__()
 
-    def __post_init__(self):
-        # Set default equal ratios for DTW preference sampling if not specified
-        if self.dtw_preference_ratios is None:
-            self.dtw_preference_ratios = [0.0, 1.0, 0.0]  # [seg1_better, seg2_better, equal_pref]
-        
-        # Validate ratios sum to 1.0
-        if self.dtw_preference_ratios is not None:
-            ratio_sum = sum(self.dtw_preference_ratios)
-            if abs(ratio_sum - 1.0) > 1e-6:
-                print(f"Warning: DTW preference ratios sum to {ratio_sum:.6f}, normalizing to sum to 1.0")
-                self.dtw_preference_ratios = [r / ratio_sum for r in self.dtw_preference_ratios]
-        
-        if self.use_reward_model:
-            # Build comprehensive group and checkpoint names including all new parameters
-            # Create shorter group name to stay under 128 char limit
-            group_parts = [
-                f"env_{self.env.replace('metaworld_', 'mw_')}",  # Shorten metaworld prefix
-                f"fn{self.feedback_num}",  # Shorter feedback num
-                f"{self.model_type}",  # Remove m_ prefix
-                f"e{self.epochs}",  # Shorter epochs
-                f"tr{self.trivial_reward}",  # Shorter trivial reward
-                f"gt{int(self.use_gt_prefs)}",  # Add ground truth preference flag
-                f"eef_{int(self.eef_rm)}",  # Add EEF reward model flag
-                f"dist_{int(self.use_distributional_model)}",  # Add distributional reward model flag
-            ]
-            
-            # Add DTW components if enabled (much shorter version)
-            if self.use_dtw_augmentations:
-                dtw_component = f"dtw{int(self.use_dtw_augmentations)}"
-                group_parts.append(dtw_component)
-            
-            self.group = "_".join(group_parts)
-            
-            # Build checkpoint path components to match learn_reward.py exactly
-            checkpoint_components = [
-                f"{self.name}",
-                f"{self.env}",
-                f"fn_{self.feedback_num}",
-                f"m_{self.model_type}",
-                f"e_{self.epochs}",
-                f"gt_{int(self.use_gt_prefs)}",  # Add ground truth preference flag
-                f"eef_{int(self.eef_rm)}",  # Add EEF reward model flag
-                f"dist_{int(self.use_distributional_model)}"  # Add distributional reward model flag
-            ]
-            
-            # Use same seed format as learn_reward.py
-            checkpoint_components.append(f"s_{self.seed}")
-            checkpoint_name = "/".join(checkpoint_components)
-            print(f"Checkpoint name: {checkpoint_name}")
-            print(f"Group name length: {len(self.group)} chars: {self.group}")
-        else:
-            self.group = f"IQL/{self.env}_quality_{self.data_quality}_trivial_{self.trivial_reward}"
-            checkpoint_name = f"{self.name}/{self.env}/quality_{self.data_quality}_trivial_{self.trivial_reward}/seed_{self.seed}_{str(uuid.uuid4())[:8]}"
-        
-        if self.checkpoints_path is not None:
-            self.checkpoints_path = os.path.join(self.checkpoints_path, checkpoint_name)
-        self.name = f"seed_{self.seed}_{str(uuid.uuid4())[:8]}"
+        # ------- shared hyper‑params -------
+        hidden = 256
+
+        # ------- arm head -------
+        self.arm_net = nn.Sequential(
+            nn.Linear(state_dim, hidden), nn.ReLU(),
+            nn.Linear(hidden,  hidden),   nn.ReLU(),
+            nn.Linear(hidden,  action_dim - 1)           # 6 dims
+        )
+
+        # ------- gripper head (logits) -------
+        self.gripper_net = nn.Sequential(
+            nn.Linear(state_dim, hidden), nn.ReLU(),
+            nn.Linear(hidden,  hidden),   nn.ReLU(),
+            nn.Linear(hidden,  1)                         # raw logits
+        )
+
+        self.max_action = float(max_action)
+        # buffer so it moves with the model between CPU / GPU
+        self.register_buffer("bce_pos_weight",
+                             torch.tensor(pos_weight, dtype=torch.float32))
+
+    # --------------------------------------------------------------------- #
+    # Forward                                                                #
+    # --------------------------------------------------------------------- #
+    def forward(self, state: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Returns:
+            arm_actions      -- shape (B, 6), scaled to [-max_action, max_action]
+            gripper_logits   -- shape (B, 1), un‑activated
+        """
+        arm_actions    = torch.tanh(self.arm_net(state)) * self.max_action
+        gripper_logits = self.gripper_net(state)          # raw
+        return arm_actions, gripper_logits
+
+    # --------------------------------------------------------------------- #
+    # Loss                                                                   #
+    # --------------------------------------------------------------------- #
+    def compute_loss(
+        self, state: torch.Tensor, target_action: torch.Tensor
+    ) -> Tuple[torch.Tensor, Dict[str, float]]:
+
+        arm_pred, grip_logits = self(state)
+
+        # Split labelled targets
+        arm_target     = target_action[:, :-1]                 # (B, 6)
+        grip_target_01 = (target_action[:, -1:] + 1) / 2       # {-1,1} -> {0,1}
+
+        # Losses
+        arm_loss = F.mse_loss(arm_pred, arm_target)
+
+        grip_loss = F.binary_cross_entropy_with_logits(
+            grip_logits,
+            grip_target_01,
+            pos_weight=self.bce_pos_weight
+        )
+
+        total = arm_loss + grip_loss
+
+        return total, {
+            "arm_mse":   arm_loss.item(),
+            "grip_bce":  grip_loss.item(),
+            "total":     total.item()
+        }
+
+    # --------------------------------------------------------------------- #
+    # Act (no‑grad)                                                          #
+    # --------------------------------------------------------------------- #
+    @torch.no_grad()
+    def act(self, state: torch.Tensor) -> torch.Tensor:
+        """
+        Args
+        ----
+        state : torch.Tensor | np.ndarray
+          shape (state_dim,) or (B, state_dim)
+
+        Returns
+        -------
+        np.ndarray shape (action_dim,) or (B, action_dim)
+        """
+        if not torch.is_tensor(state):
+            state = torch.as_tensor(state, dtype=torch.float32)
+        if state.dim() == 1:
+            state = state[None]                              # add batch
+
+        state = state.to(next(self.parameters()).device)
+
+        arm, grip_logits = self(state)
+
+        grip_bin = torch.where(grip_logits > 0.0,  # >0 -> close (1)
+                               torch.tensor(1.0,  device=grip_logits.device),
+                               torch.tensor(-1.0, device=grip_logits.device))
+
+        actions = torch.cat([arm, grip_bin], dim=-1)
+        return actions.cpu().numpy().squeeze()
+
+
+
+def build_iql_checkpoint_path(config: DictConfig) -> str:
+    """Build IQL checkpoint path based on config parameters.
+    
+    This function handles checkpoint path building for the main IQL training,
+    separate from reward model checkpoints.
+    """
+    if getattr(config, 'use_reward_model', False):
+        # For reward model cases, use a different naming scheme
+        checkpoint_name = f"{getattr(config, 'name', 'IQL')}/{config.env}/quality_{getattr(config, 'data_quality', 5.0)}_trivial_{getattr(config, 'trivial_reward', 0)}/seed_{config.seed}_{str(uuid.uuid4())[:8]}"
+    else:
+        # For non-reward model cases
+        checkpoint_name = f"{getattr(config, 'name', 'IQL')}/{config.env}/quality_{getattr(config, 'data_quality', 5.0)}_trivial_{getattr(config, 'trivial_reward', 0)}/seed_{config.seed}_{str(uuid.uuid4())[:8]}"
+    
+    print(f"Checkpoint name: {checkpoint_name}")
+    
+    return checkpoint_name
 
 
 def soft_update(target: nn.Module, source: nn.Module, tau: float):
@@ -205,6 +204,9 @@ def wrap_env(
     return env
 
 
+
+
+
 class ReplayBuffer:
     def __init__(
         self,
@@ -212,43 +214,28 @@ class ReplayBuffer:
         action_dim: int,
         buffer_size: int,
         device: str = "cpu",
-        val_split: float = 0.1,  # 10% validation split
-        seq_len: int = 1,  # Sequence length for temporal data
     ):
         self._buffer_size = buffer_size
         self._pointer = 0
         self._size = 0
-        self._val_split = val_split
-        self._val_size = 0
-        self._seq_len = seq_len
 
-        # Training data
         self._states = torch.zeros(
             (buffer_size, state_dim), dtype=torch.float32, device=device
         )
         self._actions = torch.zeros(
             (buffer_size, action_dim), dtype=torch.float32, device=device
         )
-        self._rewards = torch.zeros(
-            (buffer_size, 1), dtype=torch.float32, device=device
-        )
+        self._rewards = torch.zeros((buffer_size, 1), dtype=torch.float32, device=device)
         self._next_states = torch.zeros(
             (buffer_size, state_dim), dtype=torch.float32, device=device
         )
         self._dones = torch.zeros((buffer_size, 1), dtype=torch.float32, device=device)
-        
-        # Validation data
-        self._val_states = None
-        self._val_actions = None
-        self._val_rewards = None
-        self._val_next_states = None
-        self._val_dones = None
-        
         self._device = device
 
     def _to_tensor(self, data: np.ndarray) -> torch.Tensor:
         return torch.tensor(data, dtype=torch.float32, device=self._device)
 
+    # Loads data in d4rl format, i.e. from Dict[str, np.array].
     def load_dataset(self, data: Dict[str, np.ndarray]):
         if self._size != 0:
             raise ValueError("Trying to load data into non-empty replay buffer")
@@ -257,92 +244,29 @@ class ReplayBuffer:
             raise ValueError(
                 "Replay buffer is smaller than the dataset you are trying to load!"
             )
-            
-        # Calculate validation split
-        val_size = int(n_transitions * self._val_split)
-        train_size = n_transitions - val_size
-        
-        # Split data into train and validation
-        indices = np.random.permutation(n_transitions)
-        train_indices = indices[:train_size]
-        val_indices = indices[train_size:]
-        
-        # Load training data
-        self._states[:train_size] = self._to_tensor(data["observations"][train_indices])
-        self._actions[:train_size] = self._to_tensor(data["actions"][train_indices])
-        self._rewards[:train_size] = self._to_tensor(data["rewards"][train_indices, None])
-        self._next_states[:train_size] = self._to_tensor(data["next_observations"][train_indices])
-        self._dones[:train_size] = self._to_tensor(data["terminals"][train_indices, None])
-        self._size = train_size
-        self._pointer = train_size
-        
-        # Load validation data
-        self._val_states = self._to_tensor(data["observations"][val_indices])
-        self._val_actions = self._to_tensor(data["actions"][val_indices])
-        self._val_rewards = self._to_tensor(data["rewards"][val_indices, None])
-        self._val_next_states = self._to_tensor(data["next_observations"][val_indices])
-        self._val_dones = self._to_tensor(data["terminals"][val_indices, None])
-        self._val_size = val_size
+        self._states[:n_transitions] = self._to_tensor(data["observations"])
+        self._actions[:n_transitions] = self._to_tensor(data["actions"])
+        self._rewards[:n_transitions] = self._to_tensor(data["rewards"][..., None])
+        self._next_states[:n_transitions] = self._to_tensor(data["next_observations"])
+        self._dones[:n_transitions] = self._to_tensor(data["terminals"][..., None])
+        self._size += n_transitions
+        self._pointer = min(self._size, n_transitions)
 
-        print(f"Dataset size: {n_transitions} (train: {train_size}, val: {val_size})")
-
-    def normalize_observations(self, state_mean: np.ndarray, state_std: np.ndarray):
-        """Normalize both training and validation observations."""
-        # Convert numpy arrays to tensors on the same device as the data
-        state_mean = torch.tensor(state_mean, device=self._states.device)
-        state_std = torch.tensor(state_std, device=self._states.device)
-        
-        # Normalize training observations
-        self._states = (self._states - state_mean) / state_std
-        self._next_states = (self._next_states - state_mean) / state_std
-        
-        # Normalize validation observations
-        self._val_states = (self._val_states - state_mean) / state_std
-        self._val_next_states = (self._val_next_states - state_mean) / state_std
+        print(f"Dataset size: {n_transitions}")
 
     def sample(self, batch_size: int) -> TensorBatch:
-        # For sequence data, we need to ensure we don't sample indices that would cause out-of-bounds
-        max_start_idx = min(self._size, self._pointer) - self._seq_len
-        if max_start_idx <= 0:
-            raise ValueError(f"Buffer size ({self._size}) is too small for sequence length {self._seq_len}")
-            
-        # Sample start indices for sequences
-        start_indices = np.random.randint(0, max_start_idx, size=batch_size)
-        
-        # Create sequence indices
-        seq_indices = np.array([np.arange(idx, idx + self._seq_len) for idx in start_indices])
-        
-        # Get sequences
-        states = self._states[seq_indices]  # Shape: (batch_size, seq_len, state_dim)
-        actions = self._actions[seq_indices]  # Shape: (batch_size, seq_len, action_dim)
-        rewards = self._rewards[seq_indices]  # Shape: (batch_size, seq_len, 1)
-        next_states = self._next_states[seq_indices]  # Shape: (batch_size, seq_len, state_dim)
-        dones = self._dones[seq_indices]  # Shape: (batch_size, seq_len, 1)
-        
+        indices = np.random.randint(0, min(self._size, self._pointer), size=batch_size)
+        states = self._states[indices]
+        actions = self._actions[indices]
+        rewards = self._rewards[indices]
+        next_states = self._next_states[indices]
+        dones = self._dones[indices]
         return [states, actions, rewards, next_states, dones]
-        
-    def get_validation_batch(self) -> TensorBatch:
-        """Get the entire validation set."""
-        if self._seq_len > 1:
-            # For sequence data, we need to reshape the validation data
-            val_size = self._val_size - self._seq_len + 1
-            seq_indices = np.array([np.arange(i, i + self._seq_len) for i in range(val_size)])
-            
-            return [
-                self._val_states[seq_indices],
-                self._val_actions[seq_indices],
-                self._val_rewards[seq_indices],
-                self._val_next_states[seq_indices],
-                self._val_dones[seq_indices],
-            ]
-        else:
-            return [
-                self._val_states,
-                self._val_actions,
-                self._val_rewards,
-                self._val_next_states,
-                self._val_dones,
-            ]
+
+    def add_transition(self):
+        # Use this method to add new data into the replay buffer during fine-tuning.
+        # I left it unimplemented since now we do not do fine-tuning.
+        raise NotImplementedError
 
 
 def set_seed(
@@ -358,19 +282,8 @@ def set_seed(
     torch.use_deterministic_algorithms(deterministic_torch)
 
 
-def wandb_init(config: dict) -> None:
-    wandb.init(
-        config=config,
-        project=config["project"],
-        group=config["group"],
-        name=config["name"],
-        entity=config["entity"],
-        id=str(uuid.uuid4()),
-    )
-    wandb.run.save()
 
-
-def _eval_episode(env, actor, device, max_steps, seed, record_video=False, state_mean=None, state_std=None):
+def _eval_episode(env, actor, device, max_steps, seed, record_video=False, state_mean=None, state_std=None, seq_len=5):
     """Helper function to evaluate a single episode."""
     env.seed(seed)
     
@@ -383,41 +296,59 @@ def _eval_episode(env, actor, device, max_steps, seed, record_video=False, state
         except Exception as e:
             print(f"Warning: Could not capture initial frame: {e}")
     
+    # actor.temporal_ensembler.reset() # reset the temporal ensembler
     state, info = env.reset()
+    
+    # Initialize state history with the first frame repeated seq_len times
+    if state_mean is not None and state_std is not None:
+        normalized_state = (state - state_mean) / state_std
+    else:
+        normalized_state = state
+    
+    # Create initial state history by repeating the first state
+    # state_history = [normalized_state] * seq_len
+    
     episode_reward = 0.0
     episode_success = False
     steps = 0
-    
-    while steps < max_steps:
-        # Normalize state if normalization parameters are provided
-        if state_mean is not None and state_std is not None:
-            state = (state - state_mean) / state_std
-        
-        if isinstance(state, np.ndarray):
-            state = torch.tensor(state, dtype=torch.float32, device=device).unsqueeze(0)
 
-        action = actor.act(state)
+    while steps < max_steps:
+        # # Convert state history to tensor for actor input
+        # if isinstance(state_history[0], np.ndarray):
+        #     state_tensor = torch.tensor(np.array(state_history), dtype=torch.float32, device=device).unsqueeze(0)
+        # else:
+        #     state_tensor = torch.stack(state_history, dim=0).unsqueeze(0).to(device)
         
-        # Handle gripper action (last dimension)
+        action = actor.act(state)
+
         if isinstance(action, torch.Tensor):
             # Convert gripper logits to binary action
             arm_actions = action[..., :-1]
             gripper_logits = action[..., -1:]
             gripper_action = torch.where(gripper_logits > 0.0,  # >0 -> close (1)
-                                       torch.tensor(1.0, device=gripper_logits.device),
-                                       torch.tensor(-1.0, device=gripper_logits.device))
+                                    torch.tensor(1.0, device=gripper_logits.device),
+                                    torch.tensor(-1.0, device=gripper_logits.device))
             action = torch.cat([arm_actions, gripper_action], dim=-1)
             action = action.cpu().numpy()  # Convert to numpy
-        
+    
         state, reward, terminated, truncated, info = env.step(action)
         done = terminated or truncated
         steps += 1
         episode_reward += reward
         
+        # Update state history: remove oldest state and add new state
+        if state_mean is not None and state_std is not None:
+            normalized_state = (state - state_mean) / state_std
+        else:
+            normalized_state = state
+        
+        # state_history.pop(0)  # Remove oldest state
+        # state_history.append(normalized_state)  # Add new state
+    
         # Check for success
         if "success" in info:
             episode_success = episode_success or info["success"]
-            
+        
         # Record frame if recording
         if record_video:
             try:
@@ -428,7 +359,7 @@ def _eval_episode(env, actor, device, max_steps, seed, record_video=False, state
 
         if episode_success:
             break
-                
+            
     return episode_reward, int(episode_success), frames if record_video else None
 
 
@@ -445,103 +376,34 @@ def eval_actor(
     record_video: bool = True,
     state_mean: Optional[np.ndarray] = None,
     state_std: Optional[np.ndarray] = None,
+    seq_len: int = 5,
 ) -> Tuple[np.ndarray, np.ndarray, List[np.ndarray]]:
     """Evaluate the actor on the environment."""
     actor.eval()
 
-    actor.temporal_ensembler.reset() # reset the temporal ensembler
-    
-    # Create a wrapper class for the actor to make it picklable
-    class ActorWrapper:
-        def __init__(self, actor, device):
-            self.actor = actor
-            self.device = device
-            
-        def predict(self, obs):
-            with torch.no_grad():
-                action = self.actor.act(obs)
-            return action
-    
-    # Wrap the actor
-    algo = ActorWrapper(actor, device)
-    
-    # Determine if we should use parallel evaluation
-    use_parallel = parallel and n_episodes > 1
-    
-    if use_parallel:
-        try:
-            from multiprocessing import get_context
-
-            from utils.eval import PicklableEnvCreator, evaluate_episode_worker
-            
-            # Determine number of workers
-            n_workers = min(n_episodes, mp.cpu_count())
-            print(f"Running parallel evaluation ({n_workers} workers, {n_episodes} episodes)")
-            
-            # Prepare arguments for workers
-            worker_args = []
-            for i in range(n_episodes):
-                # Create a distinct environment creator for each episode with appropriate seed
-                episode_seed = seed + i
-                
-                # Try to determine if this is a MetaWorld environment
-                is_metaworld = False
-                try:
-                    import metaworld
-                    if isinstance(env, metaworld.envs.base.Env) or "metaworld" in env.__class__.__module__:
-                        is_metaworld = True
-                except (ImportError, AttributeError):
-                    if hasattr(env, "model") and hasattr(env, "data"):
-                        is_metaworld = True
-                
-                # Create environment creator with appropriate type
-                env_type = "metaworld" if is_metaworld else None
-                env_creator = PicklableEnvCreator(env_id=env_name, seed=episode_seed, env_type=env_type)
-                
-                # Determine if this episode should be recorded
-                should_record = record_video and i < 5  # Record up to 5 episodes
-                
-                # Add to worker arguments
-                worker_args.append((env_creator, algo, i, should_record, None, 30))
-            
-            # Use 'spawn' context for better compatibility across platforms
-            ctx = get_context("spawn")
-            with ctx.Pool(processes=n_workers) as pool:
-                results = list(pool.map(evaluate_episode_worker, worker_args))
-            
-            # Process results
-            episode_rewards = [r["return"] for r in results]
-            episode_success_list = [r["success"] for r in results]
-            episode_frames = [r.get("frames", None) for r in results]
-            
-        except Exception as e:
-            print(f"Error in parallel evaluation: {e}. Falling back to sequential evaluation.")
-            import traceback
-            traceback.print_exc()
-            use_parallel = False
-    
     # Sequential evaluation (fallback or if parallel not requested)
-    if not use_parallel:
-        episode_rewards = []
-        episode_success_list = []
-        episode_frames = []
-        
-        for i in range(n_episodes):
-            reward, success, frames = _eval_episode(
-                env, 
-                actor, 
-                device, 
-                max_steps, 
-                seed + i,
-                record_video=record_video and i < 5,  # Record up to 5 episodes
-                state_mean=state_mean,
-                state_std=state_std,
-            )
-            episode_rewards.append(reward)
-            episode_success_list.append(success)
-            episode_frames.append(frames)
+    episode_rewards = []
+    episode_success_list = []
+    episode_frames = []
     
+    for i in range(n_episodes):
+        reward, success, frames = _eval_episode(
+            env, 
+            actor, 
+            device, 
+            max_steps, 
+            seed + i,
+            record_video=record_video and i < 5,  # Record up to 5 episodes
+            state_mean=state_mean,
+            state_std=state_std,
+            seq_len=seq_len,
+        )
+        episode_rewards.append(reward)
+        episode_success_list.append(success)
+        episode_frames.append(frames)
+
     actor.train()
+    
     return np.array(episode_rewards), np.array(episode_success_list), episode_frames
 
 
@@ -574,27 +436,30 @@ def modify_reward(
     min_ret, max_ret = return_reward_range(dataset, max_episode_steps)
     # GT reward
     if trivial_reward == 0:
-        dataset["rewards"] = (dataset["rewards"] - min(dataset["rewards"])) / (
-            max(dataset["rewards"]) - min(dataset["rewards"])
-        )
+        # dataset["rewards"] = (dataset["rewards"] - min(dataset["rewards"])) / (
+        #     max(dataset["rewards"]) - min(dataset["rewards"])
+        # ) # TODO: no normalization for now
+        return
     # zero reward
     elif trivial_reward == 1:
         dataset["rewards"] *= 0.0
-    # random reward
-    elif trivial_reward == 2:
-        dataset["rewards"] = (dataset["rewards"] - min(dataset["rewards"])) / (
-            max(dataset["rewards"]) - min(dataset["rewards"])
-        )
-        min_reward, max_reward = min(dataset["rewards"]), max(dataset["rewards"])
-        dataset["rewards"] = np.random.uniform(
-            min_reward, max_reward, size=dataset["rewards"].shape
-        )
-        min_ret, max_ret = return_reward_range(dataset, max_episode_steps)
-    # negative reward
-    elif trivial_reward == 3:
-        dataset["rewards"] = 1 - (dataset["rewards"] - min(dataset["rewards"])) / (
-            max(dataset["rewards"]) - min(dataset["rewards"])
-        )
+
+    else: 
+        return
+    # # random reward
+    # elif trivial_reward == 2:
+    #     dataset["rewards"] = (dataset["rewards"] - min(dataset["rewards"])) / (
+    #         max(dataset["rewards"]) - min(dataset["rewards"])
+    #     )
+    #     min_reward, max_reward = min(dataset["rewards"]), max(dataset["rewards"])
+    #     dataset["rewards"] = np.random.uniform(
+    #         min_reward, max_reward, size=dataset["rewards"].shape
+    #     )
+    # # negative reward
+    # elif trivial_reward == 3:
+    #     dataset["rewards"] = 1 - (dataset["rewards"] - min(dataset["rewards"])) / (
+    #         max(dataset["rewards"]) - min(dataset["rewards"])
+    #     )
 
 
 def asymmetric_l2_loss(u: torch.Tensor, tau: float) -> torch.Tensor:
@@ -839,11 +704,15 @@ class ImplicitQLearning:
 
         v = self.vf(observations)
         adv = target_q - v
+        log_dict["target_q_mean"] = target_q.mean().item()
+        log_dict["v_mean"] = v.mean().item()
+        log_dict["adv_mean"] = adv.mean().item()
         v_loss = asymmetric_l2_loss(adv, self.iql_tau)
         log_dict["value_loss"] = v_loss.item()
         self.v_optimizer.zero_grad()
         v_loss.backward()
         self.v_optimizer.step()
+        
         return adv
 
     def _update_q(
@@ -898,7 +767,7 @@ class ImplicitQLearning:
         self.actor_optimizer.step()
         self.actor_lr_schedule.step()
 
-    def train(self, batch: TensorBatch, val_batch: Optional[TensorBatch] = None) -> Dict[str, float]:
+    def train(self, batch: TensorBatch) -> Dict[str, float]:
         self.total_it += 1
         (
             observations,
@@ -919,26 +788,6 @@ class ImplicitQLearning:
         self._update_q(next_v, observations, actions, rewards, dones, log_dict)
         # Update actor
         self._update_policy(adv, observations, actions, log_dict)
-
-        # Compute validation metrics if validation batch is provided
-        if val_batch is not None:
-            val_obs, val_actions = val_batch[0], val_batch[1]
-            with torch.no_grad():
-                val_pred_actions = self.actor(val_obs)
-                if isinstance(val_pred_actions, torch.distributions.Distribution):
-                    val_pred_actions = val_pred_actions.mean
-
-                if isinstance(val_pred_actions, tuple):
-                    val_pred_actions, val_gripper_logits = val_pred_actions
-                    val_pred_gripper = torch.where(val_gripper_logits > 0.0,  # >0 -> close (1)
-                                     torch.tensor(1.0, device=val_gripper_logits.device),
-                                     torch.tensor(-1.0, device=val_gripper_logits.device))
-                else:
-                    val_pred_gripper = torch.sign(val_pred_actions[:, -1])
-                gripper_accuracy = (val_pred_gripper == val_actions[:, -1]).float().mean().item()
-                arm_loss = F.mse_loss(val_pred_actions, val_actions[:, :-1]).item()
-                log_dict["val/gripper_accuracy"] = gripper_accuracy
-                log_dict["val/arm_loss"] = arm_loss
 
         return log_dict
 
@@ -969,6 +818,72 @@ class ImplicitQLearning:
         self.total_it = state_dict["total_it"]
 
 
+def print_dataset_statistics(dataset: Dict[str, np.ndarray]) -> None:
+    """Print statistics for each key in the dataset in a legible format."""
+    print("\n" + "="*60)
+    print("DATASET STATISTICS")
+    print("="*60)
+    
+    total_samples = None
+    for key, data in dataset.items():
+        if isinstance(data, np.ndarray):
+            if total_samples is None:
+                total_samples = data.shape[0]
+            
+            print(f"\n{key.upper()}:")
+            print(f"  Shape: {data.shape}")
+            
+            
+            # Calculate statistics
+            mean_val = np.mean(data)
+            min_val = np.min(data)
+            max_val = np.max(data)
+            
+            # Print statistics in a formatted way
+            print(f"  Mean:  {mean_val:>12.6f}")
+            print(f"  Min:   {min_val:>12.6f}")
+            print(f"  Max:   {max_val:>12.6f}")
+            
+            # If it's a 2D array, also show per-dimension statistics
+            if data.ndim == 2 and data.shape[1] <= 10:  # Only for reasonable number of dimensions
+                print("  Per-dimension statistics:")
+                for i in range(data.shape[1]):
+                    dim_mean = np.mean(data[:, i])
+                    dim_std = np.std(data[:, i])
+                    dim_min = np.min(data[:, i])
+                    dim_max = np.max(data[:, i])
+                    print(f"    Dim {i:2d}: mean={dim_mean:8.4f}, std={dim_std:8.4f}, min={dim_min:8.4f}, max={dim_max:8.4f}")
+            elif data.ndim == 2 and data.shape[1] > 10:
+                print(f"  (Skipping per-dimension stats for {data.shape[1]} dimensions)")
+        else:
+            print(f"\n{key.upper()}:")
+            print(f"  Type: {type(data)}")
+            if hasattr(data, '__len__'):
+                print(f"  Length: {len(data)}")
+    
+    # Print summary information
+    if total_samples is not None:
+        print("\nSUMMARY:")
+        print(f"  Total samples: {total_samples:,}")
+        
+        # Try to estimate number of episodes if terminals are available
+        if "terminals" in dataset:
+            terminals = dataset["terminals"]
+            if isinstance(terminals, np.ndarray):
+                num_episodes = np.sum(terminals) + 1  # +1 for the last episode
+                avg_episode_length = total_samples / num_episodes
+                print(f"  Estimated episodes: {num_episodes:,}")
+                print(f"  Average episode length: {avg_episode_length:.1f} steps")
+        
+        # Calculate total memory usage
+        total_memory = sum(data.nbytes for data in dataset.values() if isinstance(data, np.ndarray))
+        total_memory_mb = total_memory / (1024 * 1024)
+        print(f"  Total memory usage: {total_memory_mb:.2f} MB")
+    
+    print("\n" + "="*60)
+
+
+
 @hydra.main(config_path="configs", config_name="iql", version_base=None)
 def train(config):
     rich.print("config ", config)
@@ -984,7 +899,6 @@ def train(config):
     else:
         env = gym.make(config.env)
 
-    # state_dim = env.observation_space.shape[0]  # 39 for metaworld
     state_dim = env.observation_space["state"].shape[0] # robomimic
     action_dim = env.action_space.shape[0]  # 4 for metaworld
 
@@ -992,6 +906,8 @@ def train(config):
         state_mean, state_std = compute_mean_std(dataset["observations"], eps=1e-5)
     else:
         state_mean, state_std = 0, 1
+
+    print_dataset_statistics(dataset)
 
     dataset["observations"] = normalize_states(
         dataset["observations"], state_mean, state_std
@@ -1004,45 +920,32 @@ def train(config):
         dimension = 3 + dataset["actions"].shape[1]
     else:
         dimension = dataset["observations"].shape[1] + dataset["actions"].shape[1]
+
     if config.use_reward_model:
         print(f"Using reward model with dimension {dimension}")
-
+        
         if config.use_distributional_model:
             print("Using distributional model")
             model = reward_model.DistributionalRewardModel(config, None, None, None, dimension)
         else:
             model = reward_model.RewardModel(config, None, None, None, dimension)
         
-        # Use the same checkpoint path structure as learn_reward.py
-        base_path = os.getcwd() + "/logs/Reward"
-        
-        # Build path components to match learn_reward.py exactly
-        checkpoint_components = [
-            "Reward",  # Name from learn_reward.py
-            config.env,
-            f"fn_{config.feedback_num}",
-            f"m_{config.model_type}",
-            f"e_{config.epochs}",
-            f"gt_{int(config.use_gt_prefs)}",  # Add ground truth preference flag
-            f"eef_{int(config.eef_rm)}",  # Add EEF reward model flag
-            f"dist_{int(config.use_distributional_model)}"  # Add distributional reward model flag
-        ]
-        
-        # Use same seed format as learn_reward.py
-        checkpoint_components.append(f"s_{config.seed}")
-        
-        path = os.path.join(base_path, *checkpoint_components[1:])  # Skip "Reward" for path construction
-        print(f"Loading reward model from: {path}")
-        
+        # Use the helper function to build checkpoint path
+        path = build_rm_checkpoint_path(config)
+        path = os.path.join(config.checkpoints_path, path)
         model.load_model(path)
+        print(f"Successfully loaded reward model from {path}")
         dataset["rewards"] = model.get_reward(dataset)
 
-    if config.normalize_reward:
-        modify_reward(
-            dataset,
-            max_episode_steps=500,
-            trivial_reward=config.trivial_reward,
-        )
+    if config.trivial_reward == 1:
+        dataset["rewards"] *= 0.0
+    
+    # if config.normalize_reward: # TODO
+    # modify_reward(
+    #     dataset,
+    #     max_episode_steps=500,
+    #     trivial_reward=config.trivial_reward,
+    # )
 
     env = wrap_env(env, state_mean=state_mean, state_std=state_std)
     config.buffer_size = dataset["observations"].shape[0]
@@ -1054,15 +957,15 @@ def train(config):
         config.device,
     )
     replay_buffer.load_dataset(dataset)
-    replay_buffer.normalize_observations(state_mean, state_std)
 
     max_action = float(env.action_space.high[0])
 
     if config.checkpoints_path is not None:
         print(f"Checkpoints path: {config.checkpoints_path}")
+        checkpoint_name = build_iql_checkpoint_path(config)
+        config.checkpoints_path = os.path.join(config.checkpoints_path, checkpoint_name)
+        
         os.makedirs(config.checkpoints_path, exist_ok=True)
-        # Save config using Hydra's utilities
-        from omegaconf import OmegaConf
         OmegaConf.save(config=config, f=os.path.join(config.checkpoints_path, "config.yaml"))
 
     # Set seeds
@@ -1071,18 +974,28 @@ def train(config):
 
     q_network = TwinQ(state_dim, action_dim).to(config.device)
     v_network = ValueFunction(state_dim).to(config.device)
-    # actor = (
-    #     DeterministicPolicy(
-    #         state_dim, action_dim, max_action, dropout=config.actor_dropout
-    #     )
-    #     if config.iql_deterministic
-    #     else GaussianPolicy(
-    #         state_dim, action_dim, max_action, dropout=config.actor_dropout
-    #     )
-    # ).to(config.device)
+    
+    actor = Actor(
+        state_dim=state_dim,
+        action_dim=action_dim,
+        max_action=max_action,
+        pos_weight=config.model.gripper_pos_weight if hasattr(config.model, 'gripper_pos_weight') else 12.5
+    ).to(config.device)
 
-    from bc import Actor
-    actor = Actor(state_dim, action_dim, max_action).to(config.device)
+    # Print model architecture after model initialization
+    print("\n" + "=" * 50)
+    print("MODEL ARCHITECTURE:")
+    print("=" * 50)
+    print("Q-Network (TwinQ):")
+    print(q_network)
+    print(f"Q-Network parameters: {sum(p.numel() for p in q_network.parameters()):,}")
+    print("\nValue Network:")
+    print(v_network)
+    print(f"Value Network parameters: {sum(p.numel() for p in v_network.parameters()):,}")
+    print("\nActor Network:")
+    print(actor)
+    print(f"Actor parameters: {sum(p.numel() for p in actor.parameters()):,}")
+    print("=" * 50)
 
     v_optimizer = torch.optim.Adam(v_network.parameters(), lr=config.vf_lr)
     q_optimizer = torch.optim.Adam(q_network.parameters(), lr=config.qf_lr)
@@ -1114,33 +1027,18 @@ def train(config):
         actor = trainer.actor
 
     # Initialize wandb
-    wandb_init(asdict(config))
-
-    for t in range(int(config.max_timesteps)):
+    wandb_init(config) if config.use_wandb else None
+    
+    for t in trange(int(config.max_timesteps)):
         batch = replay_buffer.sample(config.batch_size)
-        batch = [b.to(config.device) for b in batch]
-        
-        # Get validation batch
-        val_batch = replay_buffer.get_validation_batch()
-        val_batch = [b.to(config.device) for b in val_batch]
-        
-        log_dict = trainer.train(batch, val_batch)
+        log_dict = trainer.train(batch)
 
         # Log training/validation metrics
-        wandb.log(log_dict, step=trainer.total_it)
+        wandb.log(log_dict, step=trainer.total_it) if wandb.run is not None else None
         # Evaluate episode
         if (t + 1) % config.eval_freq == 0:
             print(f"Eval at step: {t + 1}")
-            
-            # Create video directory for this evaluation
-            video_dir = None
-            if config.record_video:
-                if config.video_dir:
-                    video_dir = os.path.join(config.video_dir, f"eval_{t}")
-                else:
-                    video_dir = os.path.join("videos", f"eval_{t}")
-                os.makedirs(video_dir, exist_ok=True)
-            
+
             eval_scores, eval_success, eval_frames = eval_actor(
                 env,
                 config.env,
@@ -1151,6 +1049,7 @@ def train(config):
                 record_video=config.record_video,
                 state_mean=state_mean if config.normalize else None,
                 state_std=state_std if config.normalize else None,
+                # seq_len=config.model.seq_len,
             )
             eval_score = eval_scores.mean()  # For DMControl
             eval_success = eval_success.mean() * 100  # For MetaWorld
@@ -1168,10 +1067,10 @@ def train(config):
                     "eval/eval_success": eval_success,
                 },
                 step=trainer.total_it,
-            )
+            ) if wandb.run is not None else None
             
             # Log videos to wandb if recording
-            if config.record_video and video_dir:
+            if config.record_video:
                 for i, frames in enumerate(eval_frames):
                     if frames is not None:
                         episode_num = i + 1
@@ -1187,7 +1086,7 @@ def train(config):
                                 )
                             },
                             step=trainer.total_it,
-                        )
+                        ) if wandb.run is not None else None
             
             if (config.checkpoints_path is not None) and (t + 1) % (
                 20 * config.eval_freq

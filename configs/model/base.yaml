@@ -1,11 +1,8 @@
 name: null
-image_obs: ${env.image_obs}
 condition_on_task: False
 embedding_dim: 256
 
 gaussian_policy: False
-action_scale: ${env.action_scale}
-action_dim: ${env.action_dim}
 
 # set this if we want to use a pretrained vision model for the encoder
 # options: resnet18, ..., lapa, dynamo
@@ -14,8 +11,10 @@ embedding_model_ckpt: null
 embedding_model_id: null
 finetune_embedding_model: False
 
-seq_len: 10
-action_activation: null
+seq_len: 5 # history length
+action_horizon: 6 # action pred horizon
+
+action_activation: Tanh
 use_only_gripper_state: False
 
 use_separate_gripper: True
@@ -27,17 +26,6 @@ use_custom_cnn: False
 
 input_modalities:
   - states
-
-embedder:
-  name: mia
-  max_seq_len: 500
-  embedding_dim: ${..embedding_dim}
-  input_modalities: ${..input_modalities}
-  image_shape: ${env.image_shape}
-  embedding_model: ${..embedding_model}
-  state_dim: ${env.state_dim}
-  num_learnable_tokens: 16
-  num_heads: 8
 
 defaults:
   - _self_
