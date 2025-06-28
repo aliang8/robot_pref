@@ -76,7 +76,6 @@ class TransRewardModel(nn.Module):
         reverse: bool = False,
         target_idx: int = 1,
     ) -> Tuple[Dict[str, torch.Tensor], list]:
-        """Forward pass mimicking the Flax implementation."""
         B, T, _ = states.shape
         device = states.device
 
