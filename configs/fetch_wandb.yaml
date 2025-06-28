@@ -8,7 +8,7 @@ wandb:
   entity: "clvr"
   user: "hongmm"        # Filter for runs by this user
   max_runs: null          # Maximum number of runs to fetch, null means all
-  after_date: "2025-06-17"  # Only include runs created after this date (format: YYYY-MM-DD)
+  after_date: "2025-06-23"  # Only include runs created after this date (format: YYYY-MM-DD)
 
 # Output configuration
 output:

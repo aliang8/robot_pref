@@ -7,7 +7,7 @@ env: robomimic_lift
 eval_freq: 5000
 frac: 1.0
 load_model: ''
-max_timesteps: 300_000
+max_timesteps: 150_000
 max_traj_len: 1000
 n_episodes: 30
 name: BC
@@ -15,7 +15,7 @@ normalize: false
 seed: 0
 
 data_path: null
-record_video: true
+record_video: false
 
 # wandb
 use_wandb: false

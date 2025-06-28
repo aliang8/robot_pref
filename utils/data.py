@@ -1,8 +1,10 @@
+import random
+
 import numpy as np
 import torch
+
 # from d3rlpy.datasets import MDPDataset
 from tqdm import tqdm
-import random
 
 
 # Define a simple AttrDict class that provides dot access to dictionaries
@@ -219,7 +221,7 @@ def segment_episodes(data, segment_length):
 
 
 def segment_episodes_random(data, segment_length, num_segments=None):
-    """Segment episodes into smaller segments, handling variable episode lengths.
+    """Segment episodes into num_segments segments of segment_length randomly.
 
     Args:
         data: Raw TensorDict data to segment
@@ -249,7 +251,7 @@ def segment_episodes_random(data, segment_length, num_segments=None):
         episode_len = episode_lens[int(episode_idx)]
         if episode_len >= segment_length:
             valid_episodes.append((episode_idx, episode_len))
-            episode_start_indices[int(episode_idx)] = current_idx
+            episode_start_indices[episode_idx] = current_idx
         current_idx += episode_len
     
     print(f"Found {len(valid_episodes)} valid episodes (length >= {segment_length})")
@@ -271,14 +273,12 @@ def segment_episodes_random(data, segment_length, num_segments=None):
         
         # Randomly select an episode
         episode_idx, episode_len = random.choice(valid_episodes)
-        episode_abs_start = episode_start_indices[int(episode_idx)]
+        episode_abs_start = episode_start_indices[episode_idx]
         
-        # Calculate number of segments to take from this episode
+        # Find the maximum possible start index for the segment based on segment length
         max_start = episode_len - segment_length
         if max_start < 0:
             continue
-            
-        # Randomly sample a starting point
         start_idx = random.randint(0, max_start)
         end_idx = start_idx + segment_length
         
@@ -286,10 +286,6 @@ def segment_episodes_random(data, segment_length, num_segments=None):
         abs_start_idx = episode_abs_start + start_idx
         abs_end_idx = episode_abs_start + end_idx
         
-        # Validate segment length
-        if abs_end_idx - abs_start_idx != segment_length:
-            continue
-            
         # Create segment dictionary and validate data
         segment = {}
         valid_segment = True

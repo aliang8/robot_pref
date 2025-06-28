@@ -931,7 +931,7 @@ def train(config):
             print("Using distributional model")
             model = reward_model.DistributionalRewardModel(config, None, None, None, dimension)
         else:
-            model = reward_model.RewardModel(config, None, None, None, dimension)
+            model = reward_model.RewardModel(config, None, None, None, None, dimension)
         
         # Use the helper function to build checkpoint path
         path = build_rm_checkpoint_path(config)

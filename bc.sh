@@ -1,6 +1,6 @@
 #!/bin/bash
 
-data_path="/scr/shared/datasets/robot_pref/lift_panda/lift_panda.hdf5"
+data_path="/tmp/mimicgen_stack_1000/stack/demo_src_stack_task_D0_r_Panda/demo.hdf5"
 use_wandb=True
 seeds=(4 5 6)
 

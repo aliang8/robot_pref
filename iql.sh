@@ -1,6 +1,6 @@
 #!/bin/bash
 
-feedback_num=100
+feedback_num=500
 
 # Data
 data_path="/scr/shared/datasets/robot_pref/lift_panda/lift_panda.hdf5"

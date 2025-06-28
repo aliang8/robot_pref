@@ -172,7 +172,6 @@ def main(cfg: DictConfig):
     if cfg.dtw.enabled:
         dtw_matrix_file = output_dir / f"dtw_matrix_{cfg.data.segment_length}.pkl"
 
-        
         if os.path.exists(dtw_matrix_file) and not cfg.data.overwrite:
             print(f"DTW matrix file already exists: {dtw_matrix_file}")
         else:

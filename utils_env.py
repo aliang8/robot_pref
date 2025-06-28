@@ -79,10 +79,10 @@ def Robomimic_dataset(data_path):
             
             # Get observations
             obs = np.concatenate([
-                demo_data["obs"]["robot0_eef_pos"][:].reshape(-1, 3),
-                demo_data["obs"]["robot0_eef_quat"][:].reshape(-1, 4),
-                demo_data["obs"]["robot0_gripper_qpos"][:].reshape(-1, 2),
-                demo_data["obs"]["object"][:].reshape(-1, 10)  # obs varies by task (lift: 10, square: 14)
+                demo_data["obs"]["robot0_eef_pos"][:],
+                demo_data["obs"]["robot0_eef_quat"][:],
+                demo_data["obs"]["robot0_gripper_qpos"][:],
+                demo_data["obs"]["object"][:]
             ], axis=1)
             
             observations.append(obs)
@@ -121,18 +121,6 @@ def Robomimic_dataset(data_path):
         print(f"Total number of transitions: {len(dataset['observations'])}")
         print(f"Average trajectory length: {len(dataset['observations']) / num_trajectories:.2f} steps")
         
-    # elif config.human == True:
-    #     base_path = os.path.join(os.getcwd(), "human_feedback/")
-    #     base_path += f"{config.env}/dataset.pkl"
-    #     with open(base_path, "rb") as f:
-    #         dataset = pkl.load(f)
-    #         dataset["observations"] = np.array(dataset["observations"])
-    #         dataset["actions"] = np.array(dataset["actions"])
-    #         dataset["next_observations"] = np.array(dataset["next_observations"])
-    #         dataset["rewards"] = np.zeros(len(dataset["observations"]))  # dummy rewards
-    #         dataset["terminals"] = np.array(dataset["dones"])
-    #         dataset["images"] = np.array(dataset["images"])
-
     N = dataset["observations"].shape[0]
     obs_ = []
     next_obs_ = []

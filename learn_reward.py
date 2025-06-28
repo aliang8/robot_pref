@@ -130,6 +130,9 @@ def train(config: DictConfig):
         train_obs_act_2 = np.concatenate(
             (dataset["observations"][train_idx_2], dataset["actions"][train_idx_2]), axis=-1
         )
+
+        train_images1 = dataset["images"][train_idx_1] if "images" in dataset else None
+        train_images2 = dataset["images"][train_idx_2] if "images" in dataset else None
         
         val_obs_act_1 = np.concatenate(
             (dataset["observations"][val_idx_1], dataset["actions"][val_idx_1]), axis=-1
@@ -146,10 +149,10 @@ def train(config: DictConfig):
 
         if getattr(config, 'use_distributional_model', False):
             print("Using distributional reward model")
-            reward_model = DistributionalRewardModel(config, train_obs_act_1, train_obs_act_2, train_labels, obs_act_dim)
+            reward_model = DistributionalRewardModel(config, dataset, train_obs_act_1, train_obs_act_2, train_labels, obs_act_dim, train_images1, train_images2)
         else:
             print("Using regular reward model")
-            reward_model = RewardModel(config, train_obs_act_1, train_obs_act_2, train_labels, obs_act_dim)
+            reward_model = RewardModel(config, dataset, train_obs_act_1, train_obs_act_2, train_labels, obs_act_dim, train_images1, train_images2)
 
         print(reward_model)
         
@@ -172,6 +175,9 @@ def train(config: DictConfig):
         train_obs_act_2 = np.concatenate(
             (dataset["observations"][train_idx_2][:, :, :3], dataset["actions"][train_idx_2]), axis=-1
         )
+
+        train_images1 = dataset["images"][train_idx_1] if "images" in dataset else None
+        train_images2 = dataset["images"][train_idx_2] if "images" in dataset else None
         
         val_obs_act_1 = np.concatenate(
             (dataset["observations"][val_idx_1][:, :, :3], dataset["actions"][val_idx_1]), axis=-1
@@ -185,7 +191,7 @@ def train(config: DictConfig):
         val_images2 = dataset["images"][val_idx_2] if "images" in dataset else None
 
         eef_act_dim = train_obs_act_1.shape[-1]
-        reward_model = RewardModel(config, train_obs_act_1, train_obs_act_2, labels, eef_act_dim)
+        reward_model = RewardModel(config, dataset, train_obs_act_1, train_obs_act_2, labels, eef_act_dim, train_images1, train_images2)
 
         print("Reward model architecture:")
         print(reward_model.net)
@@ -203,7 +209,7 @@ def train(config: DictConfig):
         target_seg_indices = np.load(seg_indices_path, allow_pickle=True)
 
         # Compute cross-embodiment DTW matrix
-        cross_dtw_matrix = compute_dtw_matrix_cross(dataset, seg_indices, target_dataset, target_seg_indices, config)
+        cross_dtw_matrix = compute_dtw_matrix_cross(dataset, seg_indices, target_dataset, target_seg_indices, config, train_images1, train_images2)
         
         # Create augmented source preferences from DTW matrix
         aug_labels, aug_idx_st_1, aug_idx_st_2 = create_augmented_preferences_from_dtw(
@@ -229,10 +235,13 @@ def train(config: DictConfig):
         aug_obs_act_2 = np.concatenate(
             (target_dataset["observations"][aug_idx_2], target_dataset["actions"][aug_idx_2]), axis=-1
         )
+
+        train_images1 = dataset["images"][train_idx_1] if "images" in dataset else None
+        train_images2 = dataset["images"][train_idx_2] if "images" in dataset else None
         
         # Create reward model with augmented preferences
         print("Training reward model with augmented preferences...")
-        reward_model = RewardModel(config, aug_obs_act_1, aug_obs_act_2, aug_labels, obs_act_dim)
+        reward_model = RewardModel(config, target_dataset, aug_obs_act_1, aug_obs_act_2, aug_labels, obs_act_dim, train_images1, train_images2)
 
         print(reward_model)
         
