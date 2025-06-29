@@ -1,8 +1,8 @@
 #!/bin/bash
 
-data_path="/tmp/mimicgen_stack_1000/stack/demo_src_stack_task_D0_r_Panda/demo.hdf5"
+data_path="/scr/shared/datasets/robot_pref/stack_panda/stack_panda.hdf5"
 use_wandb=True
-seeds=(4 5 6)
+seeds=(7 8 9 10 11 12)
 
 for seed in "${seeds[@]}"; do
     echo "Launching experiment with seed $seed..."

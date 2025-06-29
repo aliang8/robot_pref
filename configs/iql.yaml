@@ -1,5 +1,6 @@
 actor_lr: 3e-4
 batch_size: 256
+seq_len: 1
 beta: 3.0
 buffer_size: 10000000
 checkpoints_path: logs/

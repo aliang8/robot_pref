@@ -1,9 +1,9 @@
 #!/bin/bash
 
-feedback_num=500
+feedback_num=100
 
 # Data
-data_path="/scr/shared/datasets/robot_pref/lift_panda/lift_panda.hdf5"
+data_path="/scr/shared/datasets/robot_pref/stack_panda/stack_panda.hdf5"
 target_data_path="/scr/shared/datasets/robot_pref/lift_sawyer/lift_sawyer.hdf5"
 
 # RM Methods

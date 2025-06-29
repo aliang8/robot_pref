@@ -38,128 +38,101 @@ def make_dmc_env(env_name, seed):
     )
     return env
 
-def Robomimic_dataset(data_path):
+def Robomimic_dataset(data_path, seq_len=1):
     """
-    Load and process Robomimic datasets in HDF5 format.
-    
-    Returns:
-        A dictionary containing keys:
-            observations: An N x dim_obs array of observations.
-            actions: An N x dim_action array of actions.
-            next_observations: An N x dim_obs array of next observations.
-            rewards: An N-dim float array of dummy rewards.
-            terminals: An N-dim boolean array of "done" or episode termination flags.
+    Load Robomimic dataset and build:
+        - action sequences of length seq_len (staying inside episodes)
+        - corresponding single starting observations
     """
-    # TODO: 
-    # config.human = False
-
-    # if config.human == False:
     import h5py
-    
-    # Load the HDF5 format dataset
-    path = data_path
-    print(f"loading data from: {path}")
-    
-    dataset = dict()
-    with h5py.File(path, 'r') as f:
+    import numpy as np
+
+    print(f"Loading data from: {data_path}")
+
+    with h5py.File(data_path, 'r') as f:
         data = f["data"]
-        
-        # Initialize lists to store data
+
         observations = []
         actions = []
         episodes = []
-        images = []
-        
-        # Process each demonstration
-        num_trajectories = len(data.keys())
-        print(f"Found {num_trajectories} trajectories in the dataset")
-        
+
+        print(f"Found {len(data.keys())} trajectories in dataset")
+
         for demo in sorted(data.keys(), key=lambda x: int(x.split('_')[1])):
             demo_data = data[demo]
-            
-            # Get observations
             obs = np.concatenate([
                 demo_data["obs"]["robot0_eef_pos"][:],
                 demo_data["obs"]["robot0_eef_quat"][:],
                 demo_data["obs"]["robot0_gripper_qpos"][:],
                 demo_data["obs"]["object"][:]
             ], axis=1)
-            
+
             observations.append(obs)
             actions.append(demo_data["actions"][:])
-            episodes.append(np.full((len(demo_data["actions"]),), int(demo.split('_')[1])))
-            
-            # Get images if available
-            if "agentview_image" in demo_data["obs"]:
-                images.append(demo_data["obs"]["agentview_image"][:])
-        
-        # Convert lists to numpy arrays
-        dataset["observations"] = np.concatenate(observations, axis=0)
-        dataset["actions"] = np.concatenate(actions, axis=0)
+            episodes.append(np.full(len(demo_data["actions"]), int(demo.split('_')[1])))
+
+        observations = np.concatenate(observations, axis=0)
+        actions = np.concatenate(actions, axis=0)
         episodes = np.concatenate(episodes, axis=0)
-        
-        # Create next_observations by shifting observations
-        dataset["next_observations"] = np.roll(dataset["observations"], -1, axis=0)
-        
-        # Create terminals based on episode boundaries
-        dataset["terminals"] = np.zeros(len(dataset["observations"]), dtype=bool)
-        # Mark the last step of each episode as terminal
+        rewards = np.zeros(len(observations))
+
+        # Identify terminals: last step of each episode
+        terminals = np.zeros(len(episodes), dtype=bool)
         for i in range(len(episodes)-1):
             if episodes[i] != episodes[i+1]:
-                dataset["terminals"][i] = True
-        # Mark the very last step as terminal
-        dataset["terminals"][-1] = True
-        
-        # Create dummy rewards
-        dataset["rewards"] = np.zeros(len(dataset["observations"]))
-        
-        # Store images if available
-        if len(images) > 0:
-            dataset["images"] = np.concatenate(images, axis=0)
-        
-        # Print total number of transitions
-        print(f"Total number of transitions: {len(dataset['observations'])}")
-        print(f"Average trajectory length: {len(dataset['observations']) / num_trajectories:.2f} steps")
-        
-    N = dataset["observations"].shape[0]
-    obs_ = []
-    next_obs_ = []
-    action_ = []
-    reward_ = []
-    done_ = []
-    images_ = []
+                terminals[i] = True
+        terminals[-1] = True
 
-    dataset["terminals"] = dataset["terminals"].reshape(-1)
-    dataset["rewards"] = dataset["rewards"].reshape(-1)
+    print(f"Total number of transitions: {len(observations)}")
 
-    for i in range(N):
-        obs = dataset["observations"][i].astype(np.float32)
-        new_obs = dataset["next_observations"][i].astype(np.float32)
-        action = dataset["actions"][i].astype(np.float32)
-        reward = dataset["rewards"][i].astype(np.float32)
-        done_bool = bool(dataset["terminals"][i])
-        obs_.append(obs)
-        next_obs_.append(new_obs)
-        action_.append(action)
-        reward_.append(reward)
-        done_.append(done_bool)
-        if "images" in dataset:
-            images = dataset["images"][i].astype(np.uint8)
-            images_.append(images)
+    # === Build single starting obs + action sequences ===
+    obs_starts = []         # shape (num_sequences, obs_dim)
+    next_obs_starts = []  # shape (num_sequences, obs_dim)
+    action_seqs = []        # shape (num_sequences, seq_len, action_dim)
+    reward_starts = []      # shape (num_sequences,)
+    terminal_starts = []  # shape (num_sequences,)
+
+    start_idx = 0
+    for idx, done in enumerate(terminals):
+        if done:
+            end_idx = idx - 1 # for next obs
+            ep_obs = observations[start_idx:end_idx+1]
+            ep_actions = actions[start_idx:end_idx+1]
+            ep_rewards = rewards[start_idx:end_idx+1]
+            ep_terminals = terminals[start_idx:end_idx+1]
+            ep_len = end_idx - start_idx + 1
+
+            if ep_len >= seq_len:
+                # slide window: get all valid sequences of length seq_len
+                for seq_start in range(ep_len - seq_len + 1):
+                    obs_start = ep_obs[seq_start]  # single obs at start
+                    next_obs_start = ep_obs[seq_start+1]
+                    action_seq = ep_actions[seq_start:seq_start+seq_len]
+                    rew_start = ep_rewards[seq_start]
+                    terminal_start = ep_terminals[seq_start]
+
+                    obs_starts.append(obs_start)
+                    next_obs_starts.append(next_obs_start)
+                    action_seqs.append(action_seq)
+                    reward_starts.append(rew_start)
+                    terminal_starts.append(terminal_start)
+
+            start_idx = idx+1
+
+    print(f"Built {len(action_seqs)} action sequences of length {seq_len}")
 
     return_dict = {
-        "observations": np.array(obs_),
-        "actions": np.array(action_),
-        "next_observations": np.array(next_obs_),
-        "rewards": np.array(reward_),
-        "terminals": np.array(done_),
+        "observations": np.array(obs_starts, dtype=np.float32),      # shape (num_sequences, obs_dim)
+        "next_observations": np.array(next_obs_starts, dtype=np.float32),  # shape (num_sequences, obs_dim)
+        "actions": np.array(action_seqs, dtype=np.float32),  # shape (num_sequences, seq_len, action_dim)
+        "rewards": np.array(reward_starts, dtype=np.float32),  # shape (num_sequences,)
+        "terminals": np.array(terminal_starts, dtype=bool),  # shape (num_sequences,)
     }
-    
-    if "images" in dataset:
-        return_dict["images"] = np.array(images_)
 
-    print(f"Total transitions: {len(return_dict['observations'])}")
-        
+    print("Final dataset shapes:")
+    for k, v in return_dict.items():
+        print(f"{k}: {v.shape}")
+
     return return_dict
 
 def MetaWorld_dataset(config):

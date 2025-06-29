@@ -16,6 +16,7 @@ from tqdm import trange
 import utils_env
 import wandb
 from iql import ReplayBuffer, eval_actor, print_dataset_statistics
+from models.flow_policy import FlowNoisePredictionNet, FlowPolicy
 from reward_utils import normalize_states
 from utils.wandb import wandb_init
 
@@ -35,7 +36,6 @@ def wrap_env(
     state_std: Union[np.ndarray, float] = 1.0,
     reward_scale: float = 1.0,
 ) -> gym.Env:
-    # PEP 8: E731 do not assign a lambda expression, use a def
     def normalize_state(state):
         return (
             state - state_mean
@@ -140,6 +140,7 @@ def set_seed(
 
 #         return action_preds.squeeze()
     
+
 
 class Actor(nn.Module):
     """
@@ -253,7 +254,6 @@ class Actor(nn.Module):
         return actions.cpu().numpy().squeeze()
 
 
-
 class BC:
     def __init__(
         self,
@@ -275,22 +275,15 @@ class BC:
         log_dict = {}
         self.total_it += 1
 
-        state, action, _, _, _ = batch        
-
-        # TODO: seq_len is 10 right now split into 5 for history and 6 for action horizon adjust this for the configs
-        # history = state[:, :5]
-        # action_horizon = action[:, 4:]
-        # actor_loss, loss_dict = self.actor.compute_loss(history, action_horizon)
-        # if state.dim() == 3:
-        #     state = state[:, 0:1] # take only the first frame for now
+        state, action, _, _, _ = batch
 
         # Compute actor loss using the actor's compute_loss method
-        actor_loss, loss_dict = self.actor.compute_loss(state, action)
-        log_dict.update(loss_dict)
-        
+        loss = self.actor(state, action)
+        log_dict.update({"loss": loss.item()})
+
         # Optimize the actor
         self.actor_optimizer.zero_grad()
-        actor_loss.backward()
+        loss.backward()
         self.actor_optimizer.step()
 
         return log_dict
@@ -310,7 +303,6 @@ class BC:
 
 @hydra.main(config_path="configs", config_name="bc", version_base=None)
 def train(config):
-    
     wandb_init(config) if config.use_wandb else None
 
     rich.print("config ", config)
@@ -322,7 +314,7 @@ def train(config):
         dataset = utils_env.DMC_dataset(config)
     elif "robomimic" in config.env:
         env = utils_env.get_robomimic_env(config.data_path, seed=config.seed)
-        dataset = utils_env.Robomimic_dataset(config.data_path)
+        dataset = utils_env.Robomimic_dataset(config.data_path, seq_len=config.seq_len, history_len=config.history_len)
     else:
         env = gym.make(config.env)
 
@@ -353,8 +345,8 @@ def train(config):
         state_dim,
         action_dim,
         config.buffer_size,
-        config.device,
-        # seq_len=config.model.seq_len + config.model.action_horizon - 1, # seq_len + action_horizon
+        seq_len=config.seq_len if hasattr(config, 'seq_len') else None,
+        device=config.device,
     )
     replay_buffer.load_dataset(dataset)
 
@@ -371,12 +363,19 @@ def train(config):
     set_seed(seed, env)
 
     # actor = Actor(state_dim=state_dim, action_dim=action_dim, max_action=max_action,model_config=config.model).to(config.device)
-    actor = Actor(
-        state_dim=state_dim,
+    # actor = Actor(
+    #     state_dim=state_dim,
+    #     action_dim=action_dim,
+    #     max_action=max_action,
+    #     pos_weight=config.model.gripper_pos_weight if hasattr(config.model, 'gripper_pos_weight') else 12.5
+    # ).to(config.device)
+    
+    noise_pred_net = FlowNoisePredictionNet(
         action_dim=action_dim,
-        max_action=max_action,
-        pos_weight=config.model.gripper_pos_weight if hasattr(config.model, 'gripper_pos_weight') else 12.5
+        global_cond_dim=state_dim
     ).to(config.device)
+
+    actor = FlowPolicy(action_len=config.seq_len, action_dim=action_dim, noise_pred_net=noise_pred_net)
 
     # Print model architecture after model initialization
     print("\n" + "=" * 50)
@@ -409,8 +408,6 @@ def train(config):
         trainer.load_state_dict(torch.load(policy_file))
         actor = trainer.actor
 
-    
-    evaluations = []
     for t in trange(int(config.max_timesteps)):
         batch = replay_buffer.sample(config.batch_size)
         log_dict = trainer.train(batch)
@@ -421,11 +418,10 @@ def train(config):
             
             eval_scores, eval_success, eval_frames = eval_actor(
                 env,
-                config.env,
                 actor,
-                device=config.device,
-                n_episodes=config.n_episodes,
-                seed=config.seed,
+                config.n_episodes,
+                config.seed,
+                seq_len=config.seq_len,
                 record_video=config.record_video,
             )
             eval_score = eval_scores.mean()  # For DMControl

@@ -203,16 +203,13 @@ def wrap_env(
         env = gym.wrappers.TransformReward(env, scale_reward)
     return env
 
-
-
-
-
 class ReplayBuffer:
     def __init__(
         self,
         state_dim: int,
         action_dim: int,
         buffer_size: int,
+        seq_len: Optional[int] = None,
         device: str = "cpu",
     ):
         self._buffer_size = buffer_size
@@ -222,9 +219,10 @@ class ReplayBuffer:
         self._states = torch.zeros(
             (buffer_size, state_dim), dtype=torch.float32, device=device
         )
-        self._actions = torch.zeros(
-            (buffer_size, action_dim), dtype=torch.float32, device=device
-        )
+
+        action_shape = (buffer_size, seq_len, action_dim) if seq_len is not None else (buffer_size, action_dim)
+        self._actions = torch.zeros(action_shape, dtype=torch.float32, device=device)
+
         self._rewards = torch.zeros((buffer_size, 1), dtype=torch.float32, device=device)
         self._next_states = torch.zeros(
             (buffer_size, state_dim), dtype=torch.float32, device=device
@@ -254,7 +252,7 @@ class ReplayBuffer:
 
         print(f"Dataset size: {n_transitions}")
 
-    def sample(self, batch_size: int) -> TensorBatch:
+    def sample(self, batch_size: int, seq_len: int=None) -> TensorBatch:
         indices = np.random.randint(0, min(self._size, self._pointer), size=batch_size)
         states = self._states[indices]
         actions = self._actions[indices]
@@ -283,7 +281,7 @@ def set_seed(
 
 
 
-def _eval_episode(env, actor, device, max_steps, seed, record_video=False, state_mean=None, state_std=None, seq_len=5):
+def _eval_episode(env, actor, max_steps, seed, seq_len=None, record_video=False):
     """Helper function to evaluate a single episode."""
     env.seed(seed)
     
@@ -296,54 +294,46 @@ def _eval_episode(env, actor, device, max_steps, seed, record_video=False, state
         except Exception as e:
             print(f"Warning: Could not capture initial frame: {e}")
     
-    # actor.temporal_ensembler.reset() # reset the temporal ensembler
     state, info = env.reset()
-    
-    # Initialize state history with the first frame repeated seq_len times
-    if state_mean is not None and state_std is not None:
-        normalized_state = (state - state_mean) / state_std
-    else:
-        normalized_state = state
-    
-    # Create initial state history by repeating the first state
-    # state_history = [normalized_state] * seq_len
     
     episode_reward = 0.0
     episode_success = False
     steps = 0
 
     while steps < max_steps:
-        # # Convert state history to tensor for actor input
-        # if isinstance(state_history[0], np.ndarray):
-        #     state_tensor = torch.tensor(np.array(state_history), dtype=torch.float32, device=device).unsqueeze(0)
-        # else:
-        #     state_tensor = torch.stack(state_history, dim=0).unsqueeze(0).to(device)
-        
-        action = actor.act(state)
+        # action = actor.act(state)
+        actions = actor.sample(torch.from_numpy(state).unsqueeze(0).float())
 
-        if isinstance(action, torch.Tensor):
+        if isinstance(actions, torch.Tensor):
             # Convert gripper logits to binary action
-            arm_actions = action[..., :-1]
-            gripper_logits = action[..., -1:]
+            arm_actions = actions[..., :-1]
+            gripper_logits = actions[..., -1:]
             gripper_action = torch.where(gripper_logits > 0.0,  # >0 -> close (1)
                                     torch.tensor(1.0, device=gripper_logits.device),
                                     torch.tensor(-1.0, device=gripper_logits.device))
-            action = torch.cat([arm_actions, gripper_action], dim=-1)
-            action = action.cpu().numpy()  # Convert to numpy
-    
-        state, reward, terminated, truncated, info = env.step(action)
-        done = terminated or truncated
-        steps += 1
-        episode_reward += reward
-        
-        # Update state history: remove oldest state and add new state
-        if state_mean is not None and state_std is not None:
-            normalized_state = (state - state_mean) / state_std
+            actions = torch.cat([arm_actions, gripper_action], dim=-1)
+            actions = actions.squeeze().cpu().numpy()  # Convert to numpy
+
+        if seq_len is not None:
+            for i in range(seq_len):
+                action = actions[i]
+                state, reward, terminated, truncated, info = env.step(action)
+
+                if record_video:
+                    frame = env.render(mode="rgb_array")
+                    frames.append(frame)
+                steps += 1
         else:
-            normalized_state = state
+            action = actions
+            state, reward, terminated, truncated, info = env.step(action)
+            if record_video:
+                frame = env.render(mode="rgb_array")
+                frames.append(frame)
+            steps += 1
+
+        done = terminated or truncated
         
-        # state_history.pop(0)  # Remove oldest state
-        # state_history.append(normalized_state)  # Add new state
+        episode_reward += reward
     
         # Check for success
         if "success" in info:
@@ -366,22 +356,17 @@ def _eval_episode(env, actor, device, max_steps, seed, record_video=False, state
 @torch.no_grad()
 def eval_actor(
     env: gym.Env,
-    env_name: str,
     actor: nn.Module,
-    device: str,
     n_episodes: int,
     seed: int,
+    seq_len: Optional[int] = None,
     max_steps: int = 500,
-    parallel: bool = False,
     record_video: bool = True,
-    state_mean: Optional[np.ndarray] = None,
-    state_std: Optional[np.ndarray] = None,
-    seq_len: int = 5,
 ) -> Tuple[np.ndarray, np.ndarray, List[np.ndarray]]:
     """Evaluate the actor on the environment."""
+    # TODO: implement parallel
     actor.eval()
 
-    # Sequential evaluation (fallback or if parallel not requested)
     episode_rewards = []
     episode_success_list = []
     episode_frames = []
@@ -390,13 +375,10 @@ def eval_actor(
         reward, success, frames = _eval_episode(
             env, 
             actor, 
-            device, 
             max_steps, 
-            seed + i,
-            record_video=record_video and i < 5,  # Record up to 5 episodes
-            state_mean=state_mean,
-            state_std=state_std,
+            seed + (i * 5),
             seq_len=seq_len,
+            record_video=record_video and i < 5,  # Record up to 5 episodes
         )
         episode_rewards.append(reward)
         episode_success_list.append(success)
@@ -405,7 +387,6 @@ def eval_actor(
     actor.train()
     
     return np.array(episode_rewards), np.array(episode_success_list), episode_frames
-
 
 def return_reward_range(dataset, max_episode_steps):
     returns, lengths = [], []
@@ -626,6 +607,10 @@ class TwinQ(nn.Module):
     def both(
         self, state: torch.Tensor, action: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor]:
+
+        if len(action.shape) > 2:
+            action = action[:, 0]
+
         sa = torch.cat([state, action], 1)
         return self.q1(sa), self.q2(sa)
 
@@ -724,9 +709,9 @@ class ImplicitQLearning:
         terminals: torch.Tensor,
         log_dict: Dict,
     ):
-        # targets = rewards + (1.0 - terminals.float()) * self.discount * next_v.detach()
+        targets = rewards + (1.0 - terminals.float()) * self.discount * next_v.detach()
         # MetaWolrd has no terminals (only time limit)
-        targets = rewards + self.discount * next_v.detach()
+        # targets = rewards + self.discount * next_v.detach()
         qs = self.qf.both(observations, actions)
         q_loss = sum(F.mse_loss(q, targets) for q in qs) / len(qs)
         log_dict["q_loss"] = q_loss.item()
@@ -898,7 +883,7 @@ def train(config):
         dataset = utils_env.DMC_dataset(config)
     elif "robomimic" in config.env:
         env = utils_env.get_robomimic_env(config.data_path, seed=config.seed)
-        dataset = utils_env.Robomimic_dataset(config.data_path)
+        dataset = utils_env.Robomimic_dataset(config.data_path, seq_len=config.seq_len)
     else:
         env = gym.make(config.env)
 
@@ -909,8 +894,6 @@ def train(config):
         state_mean, state_std = compute_mean_std(dataset["observations"], eps=1e-5)
     else:
         state_mean, state_std = 0, 1
-
-    
 
     dataset["observations"] = normalize_states(
         dataset["observations"], state_mean, state_std
@@ -953,13 +936,12 @@ def train(config):
     # )
 
     env = wrap_env(env, state_mean=state_mean, state_std=state_std)
-    config.buffer_size = dataset["observations"].shape[0]
-
     replay_buffer = ReplayBuffer(
         state_dim,
         action_dim,
         config.buffer_size,
-        config.device,
+        seq_len=config.seq_len if hasattr(config, 'seq_len') else None,
+        device=config.device,
     )
     replay_buffer.load_dataset(dataset)
 
@@ -986,6 +968,13 @@ def train(config):
         max_action=max_action,
         pos_weight=config.model.gripper_pos_weight if hasattr(config.model, 'gripper_pos_weight') else 12.5
     ).to(config.device)
+
+    # noise_pred_net = FlowNoisePredictionNet(
+    #     action_dim=action_dim,
+    #     global_cond_dim=state_dim
+    # ).to(config.device)
+
+    # actor = FlowPolicy(action_len=config.seq_len, action_dim=action_dim, noise_pred_net=noise_pred_net)
 
     # Print model architecture after model initialization
     print("\n" + "=" * 50)
@@ -1031,7 +1020,6 @@ def train(config):
         trainer.load_state_dict(torch.load(policy_file))
         actor = trainer.actor
 
-    
     
     for t in trange(int(config.max_timesteps)):
         batch = replay_buffer.sample(config.batch_size)

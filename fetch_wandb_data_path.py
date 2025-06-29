@@ -150,8 +150,8 @@ def save_run_df(run_data, output_dir="run_data"):
         # Get SR metrics
         if "history" in run and "eval_success_rates" in run["history"]:
             success_rates = run["history"]["eval_success_rates"]
-            top_3_rates = success_rates[-5:]
-            # top_3_rates = sorted(success_rates, reverse=True)[:3]
+            # top_3_rates = success_rates[-5:]
+            top_3_rates = sorted(success_rates, reverse=True)[:5]
             row["top3_avg_eval_success_rate"] = sum(top_3_rates) / len(top_3_rates)
 
         rows.append(row)
@@ -305,7 +305,7 @@ def plot_data_path_comparisons(df, output_dir="data_path_plots"):
         # Save the plot
         output_path = os.path.join(
             output_dir,
-            f"{Path(data_path)}_comparison.png"
+            f"{Path(data_path).name}_comparison.png"
         )
         plt.savefig(output_path, dpi=300, bbox_inches="tight")
         print(f"Saved comparison plot to {output_path}")
