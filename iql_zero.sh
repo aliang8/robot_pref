@@ -4,8 +4,6 @@ data_path="/scr/shared/datasets/robot_pref/stack_panda/stack_panda.hdf5"
 use_wandb=True
 seeds=(4 5 6)
 
-seq_len=5
-
 # Run zero rewards IQL for three seeds
 for seed in "${seeds[@]}"; do
     echo "Running seed $seed"

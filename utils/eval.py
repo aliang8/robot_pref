@@ -3,12 +3,16 @@ import os
 import random
 import time
 from pathlib import Path
+from typing import List, Optional, Tuple
 
 import gym
 import imageio
 import numpy as np
+import torch
+import torch.nn as nn
 from tqdm import tqdm
 
+# sys.path.append("./Reward_learning")
 import wandb
 from utils.env import MetaWorldEnvCreator, RobomimicEnvCreator
 
@@ -983,3 +987,112 @@ def create_env(cfg):
 
 
     return env
+
+
+
+def _eval_episode(env, actor, max_steps, seed, seq_len=None, record_video=False):
+    """Helper function to evaluate a single episode."""
+    env.seed(seed)
+    
+    # Setup video recording if requested
+    frames = []
+    if record_video:
+        try:
+            frame = env.render(mode="rgb_array")
+            frames.append(frame)
+        except Exception as e:
+            print(f"Warning: Could not capture initial frame: {e}")
+    
+    state, info = env.reset()
+    
+    episode_reward = 0.0
+    episode_success = False
+    steps = 0
+
+    while steps < max_steps:
+        # action = actor.act(state)
+        actions = actor.sample(torch.from_numpy(state).unsqueeze(0).float())
+
+        if isinstance(actions, torch.Tensor):
+            # Convert gripper logits to binary action
+            arm_actions = actions[..., :-1]
+            gripper_logits = actions[..., -1:]
+            gripper_action = torch.where(gripper_logits > 0.0,  # >0 -> close (1)
+                                    torch.tensor(1.0, device=gripper_logits.device),
+                                    torch.tensor(-1.0, device=gripper_logits.device))
+            actions = torch.cat([arm_actions, gripper_action], dim=-1)
+            actions = actions.squeeze().cpu().numpy()  # Convert to numpy
+
+        if seq_len is not None:
+            for i in range(seq_len):
+                action = actions[i]
+                state, reward, terminated, truncated, info = env.step(action)
+
+                if record_video:
+                    frame = env.render(mode="rgb_array")
+                    frames.append(frame)
+                steps += 1
+        else:
+            action = actions
+            state, reward, terminated, truncated, info = env.step(action)
+            if record_video:
+                frame = env.render(mode="rgb_array")
+                frames.append(frame)
+            steps += 1
+
+        done = terminated or truncated
+        
+        episode_reward += reward
+    
+        # Check for success
+        if "success" in info:
+            episode_success = episode_success or info["success"]
+        
+        # Record frame if recording
+        if record_video:
+            try:
+                frame = env.render(mode="rgb_array")
+                frames.append(frame)
+            except Exception as e:
+                print(f"Warning: Could not capture frame: {e}")
+
+        if episode_success:
+            break
+            
+    return episode_reward, int(episode_success), frames if record_video else None
+
+
+@torch.no_grad()
+def eval_actor(
+    env: gym.Env,
+    actor: nn.Module,
+    n_episodes: int,
+    seed: int,
+    seq_len: Optional[int] = None,
+    max_steps: int = 500,
+    record_video: bool = True,
+) -> Tuple[np.ndarray, np.ndarray, List[np.ndarray]]:
+    """Evaluate the actor on the environment."""
+    # TODO: implement parallel
+    actor.eval()
+
+    episode_rewards = []
+    episode_success_list = []
+    episode_frames = []
+    
+    for i in range(n_episodes):
+        reward, success, frames = _eval_episode(
+            env, 
+            actor, 
+            max_steps, 
+            seed + (i * 5),
+            seq_len=seq_len,
+            record_video=record_video and i < 5,  # Record up to 5 episodes
+        )
+        episode_rewards.append(reward)
+        episode_success_list.append(success)
+        episode_frames.append(frames)
+
+    actor.train()
+    
+    return np.array(episode_rewards), np.array(episode_success_list), episode_frames

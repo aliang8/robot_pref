@@ -24,6 +24,8 @@ import models.reward_model as reward_model
 import utils_env
 import wandb
 from learn_reward import build_rm_checkpoint_path
+from models.flow_policy import FlowNoisePredictionNet, FlowPolicy
+from utils.eval import eval_actor
 from utils.wandb import wandb_init
 
 TensorBatch = List[torch.Tensor]
@@ -281,112 +283,7 @@ def set_seed(
 
 
 
-def _eval_episode(env, actor, max_steps, seed, seq_len=None, record_video=False):
-    """Helper function to evaluate a single episode."""
-    env.seed(seed)
-    
-    # Setup video recording if requested
-    frames = []
-    if record_video:
-        try:
-            frame = env.render(mode="rgb_array")
-            frames.append(frame)
-        except Exception as e:
-            print(f"Warning: Could not capture initial frame: {e}")
-    
-    state, info = env.reset()
-    
-    episode_reward = 0.0
-    episode_success = False
-    steps = 0
 
-    while steps < max_steps:
-        # action = actor.act(state)
-        actions = actor.sample(torch.from_numpy(state).unsqueeze(0).float())
-
-        if isinstance(actions, torch.Tensor):
-            # Convert gripper logits to binary action
-            arm_actions = actions[..., :-1]
-            gripper_logits = actions[..., -1:]
-            gripper_action = torch.where(gripper_logits > 0.0,  # >0 -> close (1)
-                                    torch.tensor(1.0, device=gripper_logits.device),
-                                    torch.tensor(-1.0, device=gripper_logits.device))
-            actions = torch.cat([arm_actions, gripper_action], dim=-1)
-            actions = actions.squeeze().cpu().numpy()  # Convert to numpy
-
-        if seq_len is not None:
-            for i in range(seq_len):
-                action = actions[i]
-                state, reward, terminated, truncated, info = env.step(action)
-
-                if record_video:
-                    frame = env.render(mode="rgb_array")
-                    frames.append(frame)
-                steps += 1
-        else:
-            action = actions
-            state, reward, terminated, truncated, info = env.step(action)
-            if record_video:
-                frame = env.render(mode="rgb_array")
-                frames.append(frame)
-            steps += 1
-
-        done = terminated or truncated
-        
-        episode_reward += reward
-    
-        # Check for success
-        if "success" in info:
-            episode_success = episode_success or info["success"]
-        
-        # Record frame if recording
-        if record_video:
-            try:
-                frame = env.render(mode="rgb_array")
-                frames.append(frame)
-            except Exception as e:
-                print(f"Warning: Could not capture frame: {e}")
-
-        if episode_success:
-            break
-            
-    return episode_reward, int(episode_success), frames if record_video else None
-
-
-@torch.no_grad()
-def eval_actor(
-    env: gym.Env,
-    actor: nn.Module,
-    n_episodes: int,
-    seed: int,
-    seq_len: Optional[int] = None,
-    max_steps: int = 500,
-    record_video: bool = True,
-) -> Tuple[np.ndarray, np.ndarray, List[np.ndarray]]:
-    """Evaluate the actor on the environment."""
-    # TODO: implement parallel
-    actor.eval()
-
-    episode_rewards = []
-    episode_success_list = []
-    episode_frames = []
-    
-    for i in range(n_episodes):
-        reward, success, frames = _eval_episode(
-            env, 
-            actor, 
-            max_steps, 
-            seed + (i * 5),
-            seq_len=seq_len,
-            record_video=record_video and i < 5,  # Record up to 5 episodes
-        )
-        episode_rewards.append(reward)
-        episode_success_list.append(success)
-        episode_frames.append(frames)
-
-    actor.train()
-    
-    return np.array(episode_rewards), np.array(episode_success_list), episode_frames
 
 def return_reward_range(dataset, max_episode_steps):
     returns, lengths = [], []
@@ -740,12 +637,13 @@ class ImplicitQLearning:
         # else:
         #     raise NotImplementedError
 
-        bc_losses, loss_dict = self.actor.compute_loss(observations, actions)
-
+        # bc_losses, loss_dict = self.actor.compute_loss(observations, actions)
+        loss = self.actor(observations, actions)
+        log_dict.update({"loss": loss.item()})
         # update log_dict
-        log_dict.update(loss_dict)
+        # log_dict.update(loss_dict)
 
-        policy_loss = torch.mean(exp_adv * bc_losses)
+        policy_loss = torch.mean(exp_adv * loss)
         log_dict["actor_loss"] = policy_loss.item()
         self.actor_optimizer.zero_grad()
         policy_loss.backward()
@@ -962,19 +860,19 @@ def train(config):
     q_network = TwinQ(state_dim, action_dim).to(config.device)
     v_network = ValueFunction(state_dim).to(config.device)
     
-    actor = Actor(
-        state_dim=state_dim,
-        action_dim=action_dim,
-        max_action=max_action,
-        pos_weight=config.model.gripper_pos_weight if hasattr(config.model, 'gripper_pos_weight') else 12.5
-    ).to(config.device)
-
-    # noise_pred_net = FlowNoisePredictionNet(
+    # actor = Actor(
+    #     state_dim=state_dim,
     #     action_dim=action_dim,
-    #     global_cond_dim=state_dim
+    #     max_action=max_action,
+    #     pos_weight=config.model.gripper_pos_weight if hasattr(config.model, 'gripper_pos_weight') else 12.5
     # ).to(config.device)
 
-    # actor = FlowPolicy(action_len=config.seq_len, action_dim=action_dim, noise_pred_net=noise_pred_net)
+    noise_pred_net = FlowNoisePredictionNet(
+        action_dim=action_dim,
+        global_cond_dim=state_dim
+    ).to(config.device)
+
+    actor = FlowPolicy(action_len=config.seq_len, action_dim=action_dim, noise_pred_net=noise_pred_net)
 
     # Print model architecture after model initialization
     print("\n" + "=" * 50)
@@ -1019,7 +917,6 @@ def train(config):
         policy_file = Path(config.load_model)
         trainer.load_state_dict(torch.load(policy_file))
         actor = trainer.actor
-
     
     for t in trange(int(config.max_timesteps)):
         batch = replay_buffer.sample(config.batch_size)
@@ -1033,15 +930,11 @@ def train(config):
 
             eval_scores, eval_success, eval_frames = eval_actor(
                 env,
-                config.env,
                 actor,
-                device=config.device,
-                n_episodes=config.n_episodes,
-                seed=config.seed,
+                config.n_episodes,
+                config.seed,
+                seq_len=config.seq_len,
                 record_video=config.record_video,
-                state_mean=state_mean if config.normalize else None,
-                state_std=state_std if config.normalize else None,
-                # seq_len=config.model.seq_len,
             )
             eval_score = eval_scores.mean()  # For DMControl
             eval_success = eval_success.mean() * 100  # For MetaWorld

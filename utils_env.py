@@ -38,7 +38,7 @@ def make_dmc_env(env_name, seed):
     )
     return env
 
-def Robomimic_dataset(data_path, seq_len=1):
+def Robomimic_dataset(data_path, seq_len=3):
     """
     Load Robomimic dataset and build:
         - action sequences of length seq_len (staying inside episodes)
@@ -104,7 +104,7 @@ def Robomimic_dataset(data_path, seq_len=1):
 
             if ep_len >= seq_len:
                 # slide window: get all valid sequences of length seq_len
-                for seq_start in range(ep_len - seq_len + 1):
+                for seq_start in range(ep_len - seq_len):
                     obs_start = ep_obs[seq_start]  # single obs at start
                     next_obs_start = ep_obs[seq_start+1]
                     action_seq = ep_actions[seq_start:seq_start+seq_len]
@@ -132,6 +132,7 @@ def Robomimic_dataset(data_path, seq_len=1):
     print("Final dataset shapes:")
     for k, v in return_dict.items():
         print(f"{k}: {v.shape}")
+
 
     return return_dict
 
@@ -327,7 +328,7 @@ def get_robomimic_env(
             "robot0_joint_vel",
             "object",
         ],
-        "rgb": ["agentview_image"],
+        "rgb": ["agentview_image", "robot0_eye_in_hand_image"],
     }
 
     # Force EGL for offscreen rendering

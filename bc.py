@@ -314,7 +314,7 @@ def train(config):
         dataset = utils_env.DMC_dataset(config)
     elif "robomimic" in config.env:
         env = utils_env.get_robomimic_env(config.data_path, seed=config.seed)
-        dataset = utils_env.Robomimic_dataset(config.data_path, seq_len=config.seq_len, history_len=config.history_len)
+        dataset = utils_env.Robomimic_dataset(config.data_path, seq_len=config.seq_len)
     else:
         env = gym.make(config.env)
 

@@ -8,10 +8,10 @@ Modified from https://github.com/real-stanford/diffusion_policy/blob/main/diffus
 For consistency, we will use Dict{} for the observation space, with the key "state" for the state observation.
 """
 
-import numpy as np
 import gym
-from gym import spaces
 import imageio
+import numpy as np
+from gym import spaces
 
 
 class RobomimicLowdimWrapper(gym.Env):

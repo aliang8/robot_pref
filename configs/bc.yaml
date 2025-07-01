@@ -1,6 +1,5 @@
 batch_size: 256
 seq_len: 3
-history_len: 3
 buffer_size: 1_000_000
 checkpoints_path: checkpoints
 device: "cpu"
@@ -17,7 +16,7 @@ normalize: false
 seed: 0
 
 data_path: null
-record_video: true
+record_video: false
 
 # wandb
 use_wandb: false
@@ -25,7 +24,3 @@ wandb:
   project: "robot_pref"
   entity: "clvr"
   name: "bc-${env}-${seed}"
-
-
-defaults:
-- model: act
