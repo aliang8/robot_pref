@@ -2,7 +2,7 @@ batch_size: 256
 seq_len: 3
 buffer_size: 1_000_000
 checkpoints_path: checkpoints
-device: "cpu"
+device: "cuda"
 discount: 0.99
 env: robomimic_lift
 eval_freq: 5000
@@ -12,7 +12,7 @@ max_timesteps: 150_000
 max_traj_len: 1000
 n_episodes: 30
 name: BC
-normalize: false
+normalize: true
 seed: 0
 
 data_path: null

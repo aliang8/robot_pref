@@ -52,14 +52,17 @@ def Robomimic_dataset(data_path, seq_len=3):
     with h5py.File(data_path, 'r') as f:
         data = f["data"]
 
-        observations = []
-        actions = []
-        episodes = []
-
+        all_observations = []
+        all_actions = []
+        all_rewards = []
+        episode_boundaries = [0]  # Track episode start indices
+        
         print(f"Found {len(data.keys())} trajectories in dataset")
 
         for demo in sorted(data.keys(), key=lambda x: int(x.split('_')[1])):
             demo_data = data[demo]
+            
+            # Concatenate observation components
             obs = np.concatenate([
                 demo_data["obs"]["robot0_eef_pos"][:],
                 demo_data["obs"]["robot0_eef_quat"][:],
@@ -67,74 +70,79 @@ def Robomimic_dataset(data_path, seq_len=3):
                 demo_data["obs"]["object"][:]
             ], axis=1)
 
-            observations.append(obs)
-            actions.append(demo_data["actions"][:])
-            episodes.append(np.full(len(demo_data["actions"]), int(demo.split('_')[1])))
+            all_observations.append(obs)
+            all_actions.append(demo_data["actions"][:])
+            all_rewards.append(demo_data["rewards"][:])
+            episode_boundaries.append(episode_boundaries[-1] + len(demo_data["actions"]))
 
-        observations = np.concatenate(observations, axis=0)
-        actions = np.concatenate(actions, axis=0)
-        episodes = np.concatenate(episodes, axis=0)
-        rewards = np.zeros(len(observations))
-
-        # Identify terminals: last step of each episode
-        terminals = np.zeros(len(episodes), dtype=bool)
-        for i in range(len(episodes)-1):
-            if episodes[i] != episodes[i+1]:
-                terminals[i] = True
-        terminals[-1] = True
+        # Convert to numpy arrays
+        observations = np.concatenate(all_observations, axis=0)
+        actions = np.concatenate(all_actions, axis=0)
+        rewards = np.concatenate(all_rewards, axis=0)
 
     print(f"Total number of transitions: {len(observations)}")
 
     # === Build single starting obs + action sequences ===
-    obs_starts = []         # shape (num_sequences, obs_dim)
-    next_obs_starts = []  # shape (num_sequences, obs_dim)
-    action_seqs = []        # shape (num_sequences, seq_len, action_dim)
-    reward_starts = []      # shape (num_sequences,)
-    terminal_starts = []  # shape (num_sequences,)
+    obs_starts = []
+    next_obs_starts = []
+    action_seqs = []
+    reward_starts = []
+    terminal_starts = []
 
-    start_idx = 0
-    for idx, done in enumerate(terminals):
-        if done:
-            end_idx = idx - 1 # for next obs
-            ep_obs = observations[start_idx:end_idx+1]
-            ep_actions = actions[start_idx:end_idx+1]
-            ep_rewards = rewards[start_idx:end_idx+1]
-            ep_terminals = terminals[start_idx:end_idx+1]
-            ep_len = end_idx - start_idx + 1
+    # Process each episode
+    for i in range(len(episode_boundaries) - 1):
+        start_idx = episode_boundaries[i]
+        end_idx = episode_boundaries[i + 1]
+        
+        ep_len = end_idx - start_idx
+        
+        # Skip episodes that are too short (need at least seq_len + 1 for next_obs)
+        if ep_len < seq_len + 1:
+            continue
+            
+        # Create sequences within this episode
+        # For next_obs at end of action sequence, we need seq_len more observations
+        max_seq_start = ep_len - seq_len
+        
+        for seq_start in range(max_seq_start):
+            abs_start = start_idx + seq_start
+            
+            # Single observation at start of sequence
+            obs_start = observations[abs_start]
+            # Next observation at the end of the action sequence
+            next_obs_start = observations[abs_start + seq_len]
+            
+            # Action sequence
+            action_seq = actions[abs_start:abs_start + seq_len]
+            
+            # Reward and terminal at start
+            rew_start = rewards[abs_start]
+            terminal_start = (seq_start == max_seq_start - 1)  # True if this is the last possible sequence in episode
+            
+            obs_starts.append(obs_start)
+            next_obs_starts.append(next_obs_start)
+            action_seqs.append(action_seq)
+            reward_starts.append(rew_start)
+            terminal_starts.append(terminal_start)
 
-            if ep_len >= seq_len:
-                # slide window: get all valid sequences of length seq_len
-                for seq_start in range(ep_len - seq_len):
-                    obs_start = ep_obs[seq_start]  # single obs at start
-                    next_obs_start = ep_obs[seq_start+1]
-                    action_seq = ep_actions[seq_start:seq_start+seq_len]
-                    rew_start = ep_rewards[seq_start]
-                    terminal_start = ep_terminals[seq_start]
-
-                    obs_starts.append(obs_start)
-                    next_obs_starts.append(next_obs_start)
-                    action_seqs.append(action_seq)
-                    reward_starts.append(rew_start)
-                    terminal_starts.append(terminal_start)
-
-            start_idx = idx+1
+    # Convert to numpy arrays
+    obs_starts = np.array(obs_starts)
+    next_obs_starts = np.array(next_obs_starts)
+    action_seqs = np.array(action_seqs)
+    reward_starts = np.array(reward_starts)
+    terminal_starts = np.array(terminal_starts)
 
     print(f"Built {len(action_seqs)} action sequences of length {seq_len}")
-
-    return_dict = {
-        "observations": np.array(obs_starts, dtype=np.float32),      # shape (num_sequences, obs_dim)
-        "next_observations": np.array(next_obs_starts, dtype=np.float32),  # shape (num_sequences, obs_dim)
-        "actions": np.array(action_seqs, dtype=np.float32),  # shape (num_sequences, seq_len, action_dim)
-        "rewards": np.array(reward_starts, dtype=np.float32),  # shape (num_sequences,)
-        "terminals": np.array(terminal_starts, dtype=bool),  # shape (num_sequences,)
+    print(f"Observation shape: {obs_starts.shape}")
+    print(f"Action sequence shape: {action_seqs.shape}")
+    
+    return {
+        'observations': obs_starts,
+        'next_observations': next_obs_starts,
+        'actions': action_seqs,
+        'rewards': reward_starts,
+        'terminals': terminal_starts
     }
-
-    print("Final dataset shapes:")
-    for k, v in return_dict.items():
-        print(f"{k}: {v.shape}")
-
-
-    return return_dict
 
 def MetaWorld_dataset(config):
     """

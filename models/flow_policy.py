@@ -85,7 +85,7 @@ class FlowPolicy(nn.Module):
 
         for tcont, tcont_next in zip(self.timesteps[:-1], self.timesteps[1:]):
             # Predict noise
-            t = (tcont * self.num_train_steps).long()
+            t = (tcont * self.num_train_steps).long().to(obs.device)
             noise_pred = self.noise_pred_net(action, t, global_cond=obs)
 
             # Flow step

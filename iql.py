@@ -4,7 +4,6 @@ import copy
 import os
 import random
 import uuid
-from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import gym
@@ -33,118 +32,6 @@ TensorBatch = List[torch.Tensor]
 EXP_ADV_MAX = 100.0
 LOG_STD_MIN = -20.0
 LOG_STD_MAX = 2.0
-
-
-class Actor(nn.Module):
-    """
-    Arm:  continuous actions in [-max_action, max_action]^6
-    Gripper: discrete {-1, 1}  (open / close)
-    """
-
-    def __init__(
-        self,
-        state_dim:   int,
-        action_dim:  int,
-        max_action:  float = 1.0,
-        pos_weight:  float = 12.5 # To punish false negatives (close grippers)
-    ):
-        super().__init__()
-
-        # ------- shared hyper‑params -------
-        hidden = 256
-
-        # ------- arm head -------
-        self.arm_net = nn.Sequential(
-            nn.Linear(state_dim, hidden), nn.ReLU(),
-            nn.Linear(hidden,  hidden),   nn.ReLU(),
-            nn.Linear(hidden,  action_dim - 1)           # 6 dims
-        )
-
-        # ------- gripper head (logits) -------
-        self.gripper_net = nn.Sequential(
-            nn.Linear(state_dim, hidden), nn.ReLU(),
-            nn.Linear(hidden,  hidden),   nn.ReLU(),
-            nn.Linear(hidden,  1)                         # raw logits
-        )
-
-        self.max_action = float(max_action)
-        # buffer so it moves with the model between CPU / GPU
-        self.register_buffer("bce_pos_weight",
-                             torch.tensor(pos_weight, dtype=torch.float32))
-
-    # --------------------------------------------------------------------- #
-    # Forward                                                                #
-    # --------------------------------------------------------------------- #
-    def forward(self, state: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        Returns:
-            arm_actions      -- shape (B, 6), scaled to [-max_action, max_action]
-            gripper_logits   -- shape (B, 1), un‑activated
-        """
-        arm_actions    = torch.tanh(self.arm_net(state)) * self.max_action
-        gripper_logits = self.gripper_net(state)          # raw
-        return arm_actions, gripper_logits
-
-    # --------------------------------------------------------------------- #
-    # Loss                                                                   #
-    # --------------------------------------------------------------------- #
-    def compute_loss(
-        self, state: torch.Tensor, target_action: torch.Tensor
-    ) -> Tuple[torch.Tensor, Dict[str, float]]:
-
-        arm_pred, grip_logits = self(state)
-
-        # Split labelled targets
-        arm_target     = target_action[:, :-1]                 # (B, 6)
-        grip_target_01 = (target_action[:, -1:] + 1) / 2       # {-1,1} -> {0,1}
-
-        # Losses
-        arm_loss = F.mse_loss(arm_pred, arm_target)
-
-        grip_loss = F.binary_cross_entropy_with_logits(
-            grip_logits,
-            grip_target_01,
-            pos_weight=self.bce_pos_weight
-        )
-
-        total = arm_loss + grip_loss
-
-        return total, {
-            "arm_mse":   arm_loss.item(),
-            "grip_bce":  grip_loss.item(),
-            "total":     total.item()
-        }
-
-    # --------------------------------------------------------------------- #
-    # Act (no‑grad)                                                          #
-    # --------------------------------------------------------------------- #
-    @torch.no_grad()
-    def act(self, state: torch.Tensor) -> torch.Tensor:
-        """
-        Args
-        ----
-        state : torch.Tensor | np.ndarray
-          shape (state_dim,) or (B, state_dim)
-
-        Returns
-        -------
-        np.ndarray shape (action_dim,) or (B, action_dim)
-        """
-        if not torch.is_tensor(state):
-            state = torch.as_tensor(state, dtype=torch.float32)
-        if state.dim() == 1:
-            state = state[None]                              # add batch
-
-        state = state.to(next(self.parameters()).device)
-
-        arm, grip_logits = self(state)
-
-        grip_bin = torch.where(grip_logits > 0.0,  # >0 -> close (1)
-                               torch.tensor(1.0,  device=grip_logits.device),
-                               torch.tensor(-1.0, device=grip_logits.device))
-
-        actions = torch.cat([arm, grip_bin], dim=-1)
-        return actions.cpu().numpy().squeeze()
 
 
 
@@ -187,22 +74,35 @@ def wrap_env(
     state_std: Union[np.ndarray, float] = 1.0,
     reward_scale: float = 1.0,
 ) -> gym.Env:
-    # PEP 8: E731 do not assign a lambda expression, use a def
     def normalize_state(state):
-        # if state 2 dim
-        if len(state) == 2:
-            state = state[0]
-        return (
-            state - state_mean
-        ) / state_std  # epsilon should be already added in std.
+        # Handle different state formats
+        if isinstance(state, (list, tuple)):
+            # If state is wrapped in a container, extract the observation
+            if len(state) == 2:
+                state = state[0]
+            else:
+                # For other cases, convert to numpy array
+                state = np.array(state)
+        
+        # Ensure state is a numpy array
+        if not isinstance(state, np.ndarray):
+            state = np.array(state)
+        
+        # Apply normalization
+        normalized = (state - state_mean) / state_std
+        
+        # Ensure output format matches input format
+        return normalized.astype(np.float32)
 
     def scale_reward(reward):
-        # Please be careful, here reward is multiplied by scale!
         return reward_scale * reward
 
+    # Apply transformations
     env = gym.wrappers.TransformObservation(env, normalize_state)
+    
     if reward_scale != 1.0:
         env = gym.wrappers.TransformReward(env, scale_reward)
+    
     return env
 
 class ReplayBuffer:
@@ -494,10 +394,11 @@ class DeterministicPolicy(nn.Module):
 
 class TwinQ(nn.Module):
     def __init__(
-        self, state_dim: int, action_dim: int, hidden_dim: int = 256, n_hidden: int = 2
+        self, state_dim: int, action_dim: int, hidden_dim: int = 256, n_hidden: int = 2, seq_len=1
     ):
         super().__init__()
-        dims = [state_dim + action_dim, *([hidden_dim] * n_hidden), 1]
+        dims = [state_dim + action_dim * seq_len, *([hidden_dim] * n_hidden), 1]
+        self.seq_len = seq_len
         self.q1 = MLP(dims, squeeze_output=True)
         self.q2 = MLP(dims, squeeze_output=True)
 
@@ -505,8 +406,9 @@ class TwinQ(nn.Module):
         self, state: torch.Tensor, action: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor]:
 
-        if len(action.shape) > 2:
-            action = action[:, 0]
+        if self.seq_len > 1:
+            batch_size = action.shape[0]
+            action = action.view(batch_size, -1) # flatten the sequence      
 
         sa = torch.cat([state, action], 1)
         return self.q1(sa), self.q2(sa)
@@ -558,26 +460,6 @@ class ImplicitQLearning:
 
         self.total_it = 0
         self.device = device
-
-    def _compute_gripper_accuracy(self, pred_actions: torch.Tensor, target_actions: torch.Tensor) -> float:
-        """Compute accuracy of gripper actions (last dimension)."""
-        # Handle case where pred_actions is a tuple (arm_actions, gripper_logits)
-        if isinstance(pred_actions, tuple):
-            arm_actions, gripper_logits = pred_actions
-            pred_gripper = torch.where(gripper_logits > 0.0,  # >0 -> close (1)
-                                     torch.tensor(1.0, device=gripper_logits.device),
-                                     torch.tensor(-1.0, device=gripper_logits.device))
-        else:
-            pred_gripper = torch.sign(pred_actions[:, -1])
-            
-        target_gripper = target_actions[:, -1]
-        accuracy = (pred_gripper == target_gripper).float().mean().item()
-        return accuracy
-
-    def _compute_arm_loss(self, pred_actions: torch.Tensor, target_actions: torch.Tensor) -> float:
-        """Compute MSE loss for arm actions (all dimensions except last)."""
-        arm_loss = F.mse_loss(pred_actions[:, :-1], target_actions[:, :-1]).item()
-        return arm_loss
 
     def _update_v(self, observations, actions, log_dict) -> torch.Tensor:
         # Update value function
@@ -721,11 +603,13 @@ def print_dataset_statistics(dataset: Dict[str, np.ndarray]) -> None:
             mean_val = np.mean(data)
             min_val = np.min(data)
             max_val = np.max(data)
+            std_val = np.std(data)
             
             # Print statistics in a formatted way
             print(f"  Mean:  {mean_val:>12.6f}")
             print(f"  Min:   {min_val:>12.6f}")
             print(f"  Max:   {max_val:>12.6f}")
+            print(f"  Std:   {std_val:>12.6f}")
             
             # If it's a 2D array, also show per-dimension statistics
             if data.ndim == 2 and data.shape[1] <= 10:  # Only for reasonable number of dimensions
@@ -765,7 +649,12 @@ def print_dataset_statistics(dataset: Dict[str, np.ndarray]) -> None:
     
     print("\n" + "="*60)
 
+class EnvFactory:
+    def __init__(self, data_path):
+        self.data_path = data_path
 
+    def __call__(self, seed):
+        return utils_env.get_robomimic_env(self.data_path, seed=seed)
 
 @hydra.main(config_path="configs", config_name="iql", version_base=None)
 def train(config):
@@ -781,31 +670,30 @@ def train(config):
         dataset = utils_env.DMC_dataset(config)
     elif "robomimic" in config.env:
         env = utils_env.get_robomimic_env(config.data_path, seed=config.seed)
+        # env_fn = EnvFactory(config.data_path)
         dataset = utils_env.Robomimic_dataset(config.data_path, seq_len=config.seq_len)
     else:
         env = gym.make(config.env)
-
-    state_dim = env.observation_space["state"].shape[0] # robomimic
-    action_dim = env.action_space.shape[0]  # 4 for metaworld
+    
+    state_dim = env.observation_space["state"].shape[0]
+    action_dim = env.action_space.shape[0]
 
     if config.normalize:
         state_mean, state_std = compute_mean_std(dataset["observations"], eps=1e-5)
-    else:
-        state_mean, state_std = 0, 1
+        dataset["observations"] = normalize_states(
+            dataset["observations"], state_mean, state_std
+        )
+        dataset["next_observations"] = normalize_states(
+            dataset["next_observations"], state_mean, state_std
+        )
 
-    dataset["observations"] = normalize_states(
-        dataset["observations"], state_mean, state_std
-    )
-    dataset["next_observations"] = normalize_states(
-        dataset["next_observations"], state_mean, state_std
-    )
-    
-    if config.eef_rm:
-        dimension = 3 + dataset["actions"].shape[1]
-    else:
-        dimension = dataset["observations"].shape[1] + dataset["actions"].shape[1]
-
+    # label with trained rm rewards
     if config.use_reward_model:
+        # end effector reward model
+        if config.eef_rm:
+            dimension = 3 + dataset["actions"].shape[1]
+        else:
+            dimension = dataset["observations"].shape[1] + dataset["actions"].shape[1]
         print(f"Using reward model with dimension {dimension}")
         
         if config.use_distributional_model:
@@ -820,20 +708,17 @@ def train(config):
         model.load_model(path)
         print(f"Successfully loaded reward model from {path}")
         dataset["rewards"] = model.get_reward(dataset)
-
-    if config.trivial_reward == 1:
+    # iql zero
+    elif config.trivial_reward == 1:
         dataset["rewards"] *= 0.0
+    # iql gt rewards
+    else:
+        print("Using ground truth rewards (no reward model)")
 
     print_dataset_statistics(dataset)
-    
-    # if config.normalize_reward: # TODO
-    # modify_reward(
-    #     dataset,
-    #     max_episode_steps=500,
-    #     trivial_reward=config.trivial_reward,
-    # )
 
     env = wrap_env(env, state_mean=state_mean, state_std=state_std)
+
     replay_buffer = ReplayBuffer(
         state_dim,
         action_dim,
@@ -843,8 +728,6 @@ def train(config):
     )
     replay_buffer.load_dataset(dataset)
 
-    max_action = float(env.action_space.high[0])
-
     if config.checkpoints_path is not None:
         print(f"Checkpoints path: {config.checkpoints_path}")
         checkpoint_name = build_iql_checkpoint_path(config)
@@ -853,19 +736,11 @@ def train(config):
         os.makedirs(config.checkpoints_path, exist_ok=True)
         OmegaConf.save(config=config, f=os.path.join(config.checkpoints_path, "config.yaml"))
 
-    # Set seeds
-    seed = config.seed
-    set_seed(seed, env)
+    # Set seed
+    set_seed(config.seed, env)
 
-    q_network = TwinQ(state_dim, action_dim).to(config.device)
+    q_network = TwinQ(state_dim, action_dim, seq_len=config.seq_len).to(config.device)
     v_network = ValueFunction(state_dim).to(config.device)
-    
-    # actor = Actor(
-    #     state_dim=state_dim,
-    #     action_dim=action_dim,
-    #     max_action=max_action,
-    #     pos_weight=config.model.gripper_pos_weight if hasattr(config.model, 'gripper_pos_weight') else 12.5
-    # ).to(config.device)
 
     noise_pred_net = FlowNoisePredictionNet(
         action_dim=action_dim,
@@ -894,7 +769,7 @@ def train(config):
     actor_optimizer = torch.optim.Adam(actor.parameters(), lr=config.actor_lr)
 
     kwargs = {
-        "max_action": max_action,
+        "max_action": float(env.action_space.high[0]),
         "actor": actor,
         "actor_optimizer": actor_optimizer,
         "q_network": q_network,
@@ -912,11 +787,6 @@ def train(config):
 
     # Initialize actor
     trainer = ImplicitQLearning(**kwargs)
-
-    if config.load_model != "":
-        policy_file = Path(config.load_model)
-        trainer.load_state_dict(torch.load(policy_file))
-        actor = trainer.actor
     
     for t in trange(int(config.max_timesteps)):
         batch = replay_buffer.sample(config.batch_size)
@@ -930,6 +800,7 @@ def train(config):
 
             eval_scores, eval_success, eval_frames = eval_actor(
                 env,
+                # env_fn,
                 actor,
                 config.n_episodes,
                 config.seed,

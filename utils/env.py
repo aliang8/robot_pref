@@ -1,6 +1,7 @@
 import inspect
 import random
 import time
+from pathlib import Path
 
 from env.robomimic_lowdim import RobomimicLowdimWrapper
 
@@ -11,7 +12,9 @@ try:
 except:
     pass
 import os
-from pathlib import Path
+
+os.environ["MUJOCO_GL"] = "egl"
+
 
 
 def get_metaworld_env(env_name, seed=42):
@@ -91,7 +94,7 @@ def get_robomimic_env(
     env_name,
     render=False,
     render_offscreen=False,
-    use_image_obs=True,
+    use_image_obs=False,
     base_path=None,
     seed=42,
 ):
@@ -116,9 +119,6 @@ def get_robomimic_env(
         ],
         "rgb": ["agentview_image"],
     }
-
-    if render_offscreen or use_image_obs:
-        os.environ["MUJOCO_GL"] = "egl"
 
     ObsUtils.initialize_obs_modality_mapping_from_dict(obs_modality_dict)
     env = EnvUtils.create_env_from_metadata(
