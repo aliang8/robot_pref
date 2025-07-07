@@ -68,7 +68,7 @@ class BC:
         state, action, _, _, _ = batch
 
         # Compute actor loss using the actor's compute_loss method
-        loss = self.actor(state, action)
+        loss = self.actor(state, action).mean()
         log_dict.update({"loss": loss.item()})
 
         # Optimize the actor
@@ -114,7 +114,7 @@ def train(config):
     elif "robomimic" in config.env:
         env = utils_env.get_robomimic_env(config.data_path, seed=config.seed)
         # env_fn = EnvFactory(config.data_path)
-        dataset = utils_env.Robomimic_dataset(config.data_path, seq_len=config.seq_len)
+        dataset = utils_env.Robomimic_dataset(config.data_path)
     else:
         env = gym.make(config.env)
 
@@ -142,7 +142,6 @@ def train(config):
         state_dim,
         action_dim,
         config.buffer_size,
-        seq_len=config.seq_len if hasattr(config, 'seq_len') else None,
         device=config.device,
     )
     replay_buffer.load_dataset(dataset)
@@ -164,7 +163,7 @@ def train(config):
         global_cond_dim=state_dim
     ).to(config.device)
 
-    actor = FlowPolicy(action_len=config.seq_len, action_dim=action_dim, noise_pred_net=noise_pred_net)
+    actor = FlowPolicy(action_dim=action_dim, noise_pred_net=noise_pred_net)
 
     # Print model architecture after model initialization
     print("\n" + "=" * 50)
@@ -212,7 +211,6 @@ def train(config):
                 actor,
                 config.n_episodes,
                 config.seed,
-                seq_len=config.seq_len,
                 # record_video=config.record_video,
                 record_video=False,  # Disable video recording for now, TODO: run with rendering in series
             )

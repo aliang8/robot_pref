@@ -4,10 +4,11 @@ import sys
 parent_dir = os.path.abspath('..')
 if parent_dir not in sys.path:
     sys.path.append(parent_dir)
+from pathlib import Path
+
 import cv2
 import h5py
 import imageio
-from pathlib import Path
 import numpy as np
 
 import utils_env
@@ -19,10 +20,16 @@ def main():
     
     # expert/suboptimal split
     expert_trajs = 100
-    suboptimal_trajs = 200
+    suboptimal_trajs = 100
 
-    output_path = Path(expert_data_path).parent / f"demo_exp-{expert_trajs}_sub-{suboptimal_trajs}.hdf5"
-    video_path = Path("/scr/matthewh6/robot_pref/mixed_data_vids")
+    # randomness of data
+    noise_std = 1.0
+
+    # make name
+    name = f"demo_exp-{expert_trajs}_sub-{suboptimal_trajs}_noise-{noise_std}.hdf5"
+    output_path = Path(expert_data_path).parent / name
+    video_path = Path("/scr/matthewh6/robot_pref/mixed_data_vids") / name.replace('.hdf5', '_videos')
+    video_path.mkdir(parents=True, exist_ok=True)
 
     env = utils_env.get_robomimic_env(expert_data_path)
 
@@ -101,7 +108,7 @@ def main():
             # Save expert video
             frames = np.array(frames)            
             imageio.mimsave(video_path / f"expert_{demo_key_num}.mp4", frames, fps=30)
-            print(f"Saved expert video to {video_path}")
+            print(f"Saved expert video to {video_path / f'expert_{demo_key_num}.mp4'}")
                 
             demo_key_num += 1
 
@@ -126,8 +133,9 @@ def main():
             print(f"Generating suboptimal demo {i+1}/{suboptimal_trajs} from {sampled_demo_key} with {actions.shape[0]} timesteps")
 
             # inject noise to actions
-            noise_std = 0.3 # adjust noise level
             noisy_actions = actions + np.random.randn(*actions.shape) * noise_std
+            # clip from -1 to 1
+            noisy_actions = np.clip(noisy_actions, -1.0, 1.0)
 
             # reset env to start of demo and random half the time
             if i % 2 == 0:
@@ -189,7 +197,7 @@ def main():
             # Save video
             frames = np.array(frames)  # (T, H, W, C)
             imageio.mimsave(video_path / f"sub_{demo_key_num}.mp4", frames, fps=30)
-            print(f"Saved video to {video_path}")
+            print(f"Saved video to {video_path / f'sub_{demo_key_num}.mp4'}")
 
         print(f"Data augmentation complete! Generated {expert_trajs} expert + {suboptimal_trajs} suboptimal = {expert_trajs + suboptimal_trajs} total trajectories")
         print(f"Output file saved to {output_path}")

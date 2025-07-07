@@ -17,6 +17,16 @@ from models.image_embedder import ImageEmbedder
 from utils.data import load_tensordict, segment_episodes_random
 from utils.seed import set_seed
 
+from pathlib import Path
+import shutil
+
+def copy_to_parent(output_dir: Path):
+    for item in output_dir.iterdir():
+        dest = output_dir.parent / item.name
+        if item.is_dir():
+            shutil.copytree(item, dest, dirs_exist_ok=True)
+        else:
+            shutil.copy2(item, dest)
 
 def compute_dtw_distance_matrix(segments: List[Dict], use_relative_eef: bool, dtw_type: str = "dtw") -> np.ndarray:
     """Compute DTW distance matrix between segments.
@@ -156,16 +166,24 @@ def main(cfg: DictConfig):
 
     # Segment episodes
     print(f"\nSegmenting episodes with length {cfg.data.segment_length}")
-    segments, segment_indices = segment_episodes_random(data, cfg.data.segment_length, num_segments=cfg.data.num_segments)
-    
+    segments, segment_indices, val_segments, val_segment_indices, val_samples = segment_episodes_random(data, cfg.data.segment_length, num_segments=cfg.data.num_segments, val_split=cfg.data.val_split)
+
     # Create segment pairs
     segment_indices_array = np.array(segment_indices)
     segment_pairs = list(itertools.combinations(range(len(segments)), 2))
     segment_pairs = np.array(segment_pairs)
 
+    val_segment_indices_array = np.array(val_segment_indices)
+    val_segment_pairs = list(itertools.combinations(range(len(val_segments)), 2))
+    val_segment_pairs = np.array(val_segment_pairs)
+
     # Save segment indices and pairs
     np.save(output_dir / 'segment_start_end_indices.npy', segment_indices_array)
     np.save(output_dir / 'segment_pairs.npy', segment_pairs)
+    np.save(output_dir / 'val_segment_start_end_indices.npy', val_segment_indices_array)
+    np.save(output_dir / 'val_segment_pairs.npy', val_segment_pairs)
+    np.save(output_dir / 'val_episodes.npy', val_samples)
+    
     print(f"Saved segment indices and pairs to {output_dir}")
 
     # Compute DTW matrices if enabled
@@ -229,6 +247,7 @@ def main(cfg: DictConfig):
         torch.save(embedded_data, output_path)
         print(f"Saved embedded dataset to: {output_path}")
 
+    copy_to_parent(output_dir)
     print("\nPreprocessing complete!")
 
 if __name__ == "__main__":

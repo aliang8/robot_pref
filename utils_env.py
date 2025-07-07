@@ -38,12 +38,152 @@ def make_dmc_env(env_name, seed):
     )
     return env
 
-def Robomimic_dataset(data_path, seq_len=3):
+# def Robomimic_dataset(data_path, seq_len=1):
+#     """
+#     Load Robomimic dataset and build:
+#         - action sequences of length seq_len (staying inside episodes)
+#         - corresponding single starting observations
+#     """
+#     import cv2
+#     import h5py
+#     import numpy as np
+
+#     print(f"Loading data from: {data_path}")
+
+#     with h5py.File(data_path, 'r') as f:
+#         data = f["data"]
+
+#         all_observations = []
+#         all_next_observations = []
+#         all_actions = []
+#         all_rewards = []
+#         all_images = []
+#         all_terminals = []
+#         episode_boundaries = [0]  # Track episode start indices
+        
+#         print(f"Found {len(data.keys())} trajectories in dataset")
+
+#         for demo in sorted(data.keys(), key=lambda x: int(x.split('_')[1])):
+#             demo_data = data[demo]
+            
+#             # Concatenate observation components
+#             obs = np.concatenate([
+#                 demo_data["obs"]["robot0_eef_pos"][:],
+#                 demo_data["obs"]["robot0_eef_quat"][:],
+#                 demo_data["obs"]["robot0_gripper_qpos"][:],
+#                 demo_data["obs"]["object"][:]
+#             ], axis=1)
+
+#             next_obs = obs[1:]
+#             obs = obs[:-1]  # Use all but last observation for starting obs
+
+#             all_observations.append(obs)
+#             all_next_observations.append(next_obs)
+#             all_actions.append(demo_data["actions"][:-1])
+#             all_rewards.append(demo_data["rewards"][:-1])
+
+#             images = demo_data["obs"]["agentview_image"][:-1]
+#             if images.shape[1] != 84:
+#                 # Assuming images are in format (batch, height, width, channels)
+#                 resized_images = np.array([cv2.resize(img, (84, 84)) for img in images])
+#                 all_images.append(resized_images)
+#             else:
+#                 all_images.append(images)
+#             # Create terminals array - True only for the last step of each episode
+#             episode_length = len(demo_data["actions"][:-1])
+#             terminals = np.zeros(episode_length, dtype=bool)
+#             terminals[-1] = True  # Mark the last step as terminal
+#             all_terminals.append(terminals)
+            
+#             episode_boundaries.append(episode_boundaries[-1] + episode_length)
+
+#         # Convert to numpy arrays
+#         observations = np.concatenate(all_observations, axis=0)
+#         next_observations = np.concatenate(all_next_observations, axis=0)
+#         actions = np.concatenate(all_actions, axis=0)
+#         rewards = np.concatenate(all_rewards, axis=0)
+#         images = np.concatenate(all_images, axis=0)
+#         terminals = np.concatenate(all_terminals, axis=0)
+
+#     print(f"Total number of transitions: {len(observations)}")
+#     if seq_len == 1 or seq_len is None:
+#         return {
+#             'observations': observations,
+#             'next_observations': next_observations,
+#             'actions': np.expand_dims(actions, axis=1),  # Keep actions as (N, 1, action_dim)
+#             'rewards': rewards,
+#             'terminals': terminals,
+#             'images': images,
+#         }
+
+#     # === Build single starting obs + action sequences ===
+#     obs_starts = []
+#     next_obs_starts = []
+#     action_seqs = []
+#     reward_starts = []
+#     terminal_starts = []
+
+#     # Process each episode
+#     for i in range(len(episode_boundaries) - 1):
+#         start_idx = episode_boundaries[i]
+#         end_idx = episode_boundaries[i + 1]
+        
+#         ep_len = end_idx - start_idx
+        
+#         # Skip episodes that are too short (need at least seq_len + 1 for next_obs)
+#         if ep_len < seq_len + 1:
+#             continue
+            
+#         # Create sequences within this episode
+#         # For next_obs at end of action sequence, we need seq_len more observations
+#         max_seq_start = ep_len - seq_len
+        
+#         for seq_start in range(max_seq_start):
+#             abs_start = start_idx + seq_start
+            
+#             # Single observation at start of sequence
+#             obs_start = observations[abs_start]
+#             # Next observation at the end of the action sequence
+#             next_obs_start = observations[abs_start + seq_len]
+            
+#             # Action sequence
+#             action_seq = actions[abs_start:abs_start + seq_len]
+            
+#             # Reward and terminal at start
+#             rew_start = rewards[abs_start]
+#             terminal_start = (seq_start == max_seq_start - 1)  # True if this is the last possible sequence in episode
+            
+#             obs_starts.append(obs_start)
+#             next_obs_starts.append(next_obs_start)
+#             action_seqs.append(action_seq)
+#             reward_starts.append(rew_start)
+#             terminal_starts.append(terminal_start)
+
+#     # Convert to numpy arrays
+#     obs_starts = np.array(obs_starts)
+#     next_obs_starts = np.array(next_obs_starts)
+#     action_seqs = np.array(action_seqs)
+#     reward_starts = np.array(reward_starts)
+#     terminal_starts = np.array(terminal_starts)
+
+#     print(f"Built {len(action_seqs)} action sequences of length {seq_len}")
+#     print(f"Observation shape: {obs_starts.shape}")
+#     print(f"Action sequence shape: {action_seqs.shape}")
+    
+#     return {
+#         'observations': obs_starts,
+#         'next_observations': next_obs_starts,
+#         'actions': action_seqs,
+#         'rewards': reward_starts,
+#         'terminals': terminal_starts
+#     }
+
+def Robomimic_dataset(data_path, return_images=False, clip_last=False):
     """
     Load Robomimic dataset and build:
-        - action sequences of length seq_len (staying inside episodes)
-        - corresponding single starting observations
+    If clip_last, we don't use the last transition for IQL
     """
+    import cv2
     import h5py
     import numpy as np
 
@@ -53,9 +193,11 @@ def Robomimic_dataset(data_path, seq_len=3):
         data = f["data"]
 
         all_observations = []
+        all_next_observations = []
         all_actions = []
         all_rewards = []
-        episode_boundaries = [0]  # Track episode start indices
+        all_images = []
+        all_terminals = []
         
         print(f"Found {len(data.keys())} trajectories in dataset")
 
@@ -70,79 +212,60 @@ def Robomimic_dataset(data_path, seq_len=3):
                 demo_data["obs"]["object"][:]
             ], axis=1)
 
-            all_observations.append(obs)
-            all_actions.append(demo_data["actions"][:])
-            all_rewards.append(demo_data["rewards"][:])
-            episode_boundaries.append(episode_boundaries[-1] + len(demo_data["actions"]))
+            if clip_last:
+                next_obs = obs[1:]
+                obs = obs[:-1]
 
+                acts = demo_data["actions"][:-1]
+                rewards = demo_data["rewards"][:-1]
+                images = demo_data["obs"]["agentview_image"][:-1]
+            else:
+                next_obs = obs
+
+                acts = demo_data["actions"]
+                rewards = demo_data["rewards"]
+                images = demo_data["obs"]["agentview_image"]
+
+            all_observations.append(obs)
+            all_next_observations.append(next_obs)
+            all_actions.append(acts)
+            all_rewards.append(rewards)
+
+            if images.shape[1] != 84:
+                # Assuming images are in format (batch, height, width, channels)
+                resized_images = np.array([cv2.resize(img, (84, 84)) for img in images])
+                all_images.append(resized_images)
+            else:
+                all_images.append(images)
+            # Create terminals array - True only for the last step of each episode
+            episode_length = len(acts)
+            terminals = np.zeros(episode_length, dtype=bool)
+            terminals[-1] = True  # Mark the last step as terminal
+            all_terminals.append(terminals)
+            
         # Convert to numpy arrays
         observations = np.concatenate(all_observations, axis=0)
+        next_observations = np.concatenate(all_next_observations, axis=0)
         actions = np.concatenate(all_actions, axis=0)
         rewards = np.concatenate(all_rewards, axis=0)
+        images = np.concatenate(all_images, axis=0)
+        terminals = np.concatenate(all_terminals, axis=0)
 
     print(f"Total number of transitions: {len(observations)}")
-
-    # === Build single starting obs + action sequences ===
-    obs_starts = []
-    next_obs_starts = []
-    action_seqs = []
-    reward_starts = []
-    terminal_starts = []
-
-    # Process each episode
-    for i in range(len(episode_boundaries) - 1):
-        start_idx = episode_boundaries[i]
-        end_idx = episode_boundaries[i + 1]
-        
-        ep_len = end_idx - start_idx
-        
-        # Skip episodes that are too short (need at least seq_len + 1 for next_obs)
-        if ep_len < seq_len + 1:
-            continue
-            
-        # Create sequences within this episode
-        # For next_obs at end of action sequence, we need seq_len more observations
-        max_seq_start = ep_len - seq_len
-        
-        for seq_start in range(max_seq_start):
-            abs_start = start_idx + seq_start
-            
-            # Single observation at start of sequence
-            obs_start = observations[abs_start]
-            # Next observation at the end of the action sequence
-            next_obs_start = observations[abs_start + seq_len]
-            
-            # Action sequence
-            action_seq = actions[abs_start:abs_start + seq_len]
-            
-            # Reward and terminal at start
-            rew_start = rewards[abs_start]
-            terminal_start = (seq_start == max_seq_start - 1)  # True if this is the last possible sequence in episode
-            
-            obs_starts.append(obs_start)
-            next_obs_starts.append(next_obs_start)
-            action_seqs.append(action_seq)
-            reward_starts.append(rew_start)
-            terminal_starts.append(terminal_start)
-
-    # Convert to numpy arrays
-    obs_starts = np.array(obs_starts)
-    next_obs_starts = np.array(next_obs_starts)
-    action_seqs = np.array(action_seqs)
-    reward_starts = np.array(reward_starts)
-    terminal_starts = np.array(terminal_starts)
-
-    print(f"Built {len(action_seqs)} action sequences of length {seq_len}")
-    print(f"Observation shape: {obs_starts.shape}")
-    print(f"Action sequence shape: {action_seqs.shape}")
-    
-    return {
-        'observations': obs_starts,
-        'next_observations': next_obs_starts,
-        'actions': action_seqs,
-        'rewards': reward_starts,
-        'terminals': terminal_starts
+    dataset = {
+        'observations': observations,
+        'next_observations': next_observations,
+        'actions': actions,
+        'rewards': rewards,
+        'terminals': terminals,
     }
+    if return_images:
+        dataset['images'] = images
+
+    return dataset
+
+
+
 
 def MetaWorld_dataset(config):
     """

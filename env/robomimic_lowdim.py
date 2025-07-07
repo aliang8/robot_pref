@@ -27,7 +27,7 @@ class RobomimicLowdimWrapper(gym.Env):
         ],
         clamp_obs=False,
         init_state=None,
-        render_hw=(256, 256),
+        render_hw=(84, 84),
         render_camera_name="agentview",
     ):
         self.env = env

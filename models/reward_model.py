@@ -1,4 +1,5 @@
 import logging
+
 logging.getLogger('matplotlib.animation').setLevel(logging.WARNING)
 
 import io
@@ -36,6 +37,8 @@ class RewardModel:
         self.segment_size = config.segment_size
         self.lr = config.lr
         self.hidden_sizes = config.hidden_sizes
+        self.dropout = config.dropout
+        self.n_layers = config.n_layers
         self.loss = None
         self.model_type = config.model_type
         if self.model_type == "BT":
@@ -104,6 +107,7 @@ class RewardModel:
         test_binary_labels,
         test_images1=None,
         test_images2=None,
+        test_episodes=None, # held out episodes from dataset for validation
     ):
         self.test_obs_act_1 = torch.from_numpy(test_obs_act_1).float().to(self.device)
         self.test_obs_act_2 = torch.from_numpy(test_obs_act_2).float().to(self.device)
@@ -115,15 +119,38 @@ class RewardModel:
             self.test_images1 = test_images1
         if test_images2 is not None:
             self.test_images2 = test_images2
+        if test_episodes is not None:
+            self.test_episodes = test_episodes
 
-    def model_net(self, in_dim=39, out_dim=1, H=128, n_layers=1):
+    def model_net(self, in_dim=39, out_dim=1, H=128, n_layers=2):
+        """
+        Create a neural network for reward modeling.
+        
+        Args:
+            in_dim: Input dimension (obs + action)
+            out_dim: Output dimension (typically 1 for reward)
+            H: Hidden layer size
+            n_layers: Number of hidden layers
+        """
         net = []
-        for i in range(n_layers):
-            net.append(nn.Linear(in_dim, H))
+        
+        # Input layer
+        net.append(nn.Linear(in_dim, H))
+        net.append(nn.LayerNorm(H))  # Add layer norm for stability
+        net.append(nn.LeakyReLU())
+        net.append(nn.Dropout(self.dropout)) if self.dropout > 0 else None
+        
+        # Hidden layers
+        for i in range(n_layers - 1):  # -1 because we already added the first layer
+            net.append(nn.Linear(H, H))
+            net.append(nn.LayerNorm(H))
             net.append(nn.LeakyReLU())
-            net.append(nn.Dropout(0.2))
-            in_dim = H
+            net.append(nn.Dropout(self.dropout)) if self.dropout > 0 else None
+        
+        # Output layer (no activation in the middle, we'll add it at the end)
         net.append(nn.Linear(H, out_dim))
+        
+        # Final activation based on configuration
         if self.activation == "tanh":
             net.append(nn.Tanh())
         elif self.activation == "sigmoid":
@@ -132,21 +159,31 @@ class RewardModel:
             net.append(nn.ReLU())
         elif self.activation == "leaky_relu":
             net.append(nn.LeakyReLU())
-        elif self.activation == "none":
-            pass
         elif self.activation == "gelu":
             net.append(nn.GELU())
+        elif self.activation == "none":
+            pass  # No final activation
+        else:
+            raise ValueError(f"Unknown activation: {self.activation}")
 
         return nn.Sequential(*net)
 
     def construct_ensemble(self):
+        
         ensemble_model = []
+        
         for i in range(self.ensemble_num):
             ensemble_model.append(
                 self.model_net(
-                    in_dim=self.dimension, out_dim=1, H=self.hidden_sizes
+                    in_dim=self.dimension, out_dim=1, H=self.hidden_sizes, n_layers=self.n_layers
                 ).to(self.device)
             )
+
+        print("----------------------------------------")
+        print(f"Model Architecture for {self.ensemble_num} ensemble members:")
+        print(ensemble_model[0])
+        print("----------------------------------------")
+
         return ensemble_model
 
     def single_model_forward(self, obs_act):
@@ -242,8 +279,12 @@ class RewardModel:
                 ] = pred_batch.squeeze(-1).cpu().numpy()
         return dataset["rewards"]
 
-    def get_full_trajectory_rewards(self, dataset):
-        """Get reward predictions for each trajectory as a list of lists (num_trajectories x trajectory_length)."""
+    def get_trajectory_rewards(self, dataset, trajectory_indices):
+        """
+        Get reward predictions for each trajectory as a list of lists (num_selected_trajectories x trajectory_length),
+        but only for trajectories whose indices are in trajectory_indices.
+        Returns rewards in the same order as trajectory_indices.
+        """
         obs = dataset["observations"]
         act = dataset["actions"]
         terminals = dataset["terminals"]
@@ -254,7 +295,6 @@ class RewardModel:
         obs_act = np.concatenate((obs, act), axis=-1)
         obs_act = torch.from_numpy(obs_act).float().to(self.device)
 
-        rewards = []
         with torch.no_grad():
             # Find the start and end indices for each trajectory
             trajectory_starts = [0]
@@ -264,64 +304,104 @@ class RewardModel:
                     trajectory_ends.append(i + 1)
                     if i + 1 < len(terminals):
                         trajectory_starts.append(i + 1)
-            # For each trajectory, get reward predictions
-            for start, end in zip(trajectory_starts, trajectory_ends):
+
+            # Create a dictionary to store rewards for each trajectory
+            trajectory_rewards_dict = {}
+            
+            # For each trajectory whose index is in trajectory_indices, get reward predictions
+            for idx, (start, end) in enumerate(zip(trajectory_starts, trajectory_ends)):
+                if idx not in trajectory_indices:
+                    continue
+                    
                 traj_obs_act = obs_act[start:end]
                 traj_rewards = []
+                
+                # Process in batches to handle memory constraints
                 for i in range((traj_obs_act.shape[0] - 1) // 10000 + 1):
                     start_idx = i * 10000
                     end_idx = min((i + 1) * 10000, traj_obs_act.shape[0])
                     obs_act_batch = traj_obs_act[start_idx:end_idx]
                     pred_batch = self.ensemble_model_forward(obs_act_batch).reshape(-1)
                     traj_rewards.extend(pred_batch.cpu().numpy())
-                rewards.append(traj_rewards)
+                
+                trajectory_rewards_dict[idx] = traj_rewards
+
+            # Return rewards in the same order as trajectory_indices
+            rewards = []
+            for traj_idx in trajectory_indices:
+                if traj_idx in trajectory_rewards_dict:
+                    rewards.append(trajectory_rewards_dict[traj_idx])
+                else:
+                    # This shouldn't happen if trajectory_indices is valid
+                    print(f"Warning: Trajectory {traj_idx} not found in dataset")
+                    rewards.append([])
 
         return rewards
 
-    def create_full_trajectory_visualization(self, dataset, name, epoch=0, num_comparisons=4):
+
+    def _get_trajectory_boundaries(self, terminals):
+        """Helper function to get trajectory start and end indices."""
+        trajectory_starts = [0]
+        trajectory_ends = []
+        
+        for i in range(len(terminals)):
+            if terminals[i]:
+                trajectory_ends.append(i + 1)
+                if i + 1 < len(terminals):
+                    trajectory_starts.append(i + 1)
+        
+        return trajectory_starts, trajectory_ends
+
+    def val_trajectory_viz(self, dataset, name, epoch=0):
         """Create visualization of reward predictions for full trajectory comparisons."""
         # Get rewards for full trajectories
-        trajectory_rewards = self.get_full_trajectory_rewards(dataset)
+        trajectory_rewards = self.get_trajectory_rewards(dataset, self.test_episodes)
         videos = []
 
-        for comp_idx in range(num_comparisons):
-            # Sample two different trajectories
-            traj1_idx = comp_idx * 2
-            traj2_idx = comp_idx * 2 + 1
+        terminals = self.dataset.get('terminals', None)
+        trajectory_starts, trajectory_ends = self._get_trajectory_boundaries(terminals)
 
-            if traj2_idx >= len(trajectory_rewards):
-                break
+        # Use sequential trajectory pairs: (0,1), (2,3), (4,5), ...
+        num_pairs = len(trajectory_rewards)//2
 
-            r1 = np.array(trajectory_rewards[traj1_idx])
-            r2 = np.array(trajectory_rewards[traj2_idx])
+        for pair_idx in range(num_pairs):
+            
+            traj1_test_idx = pair_idx * 2
+            traj2_test_idx = pair_idx * 2 + 1
 
-            # Calculate predicted preference based on total rewards
-            total_reward1 = np.sum(r1)
-            total_reward2 = np.sum(r2)
+            r1 = np.array(trajectory_rewards[traj1_test_idx])
+            r2 = np.array(trajectory_rewards[traj2_test_idx])
 
-            if total_reward1 > total_reward2:
-                pred_pref = 0  # Trajectory 1 preferred
-            elif total_reward2 > total_reward1:
-                pred_pref = 1  # Trajectory 2 preferred
-            else:
-                pred_pref = 0.5  # Equal preference
+            traj1_idx = self.test_episodes[traj1_test_idx]
+            traj2_idx = self.test_episodes[traj2_test_idx]
+
+            traj1_length = trajectory_ends[traj1_idx] - trajectory_starts[traj1_idx]
+            traj2_length = trajectory_ends[traj2_idx] - trajectory_starts[traj2_idx]
+
+            assert traj1_length == len(r1) and traj2_length == len(r2)
+
+            total_reward1 = np.mean(r1)
+            total_reward2 = np.mean(r2)
+
+            pred_pref = 1 if total_reward1 > total_reward2 else 0
 
             # Create visualization
-            fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(15, 4), gridspec_kw={'width_ratios': [1.2, 1, 1]})
+            fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(15, 4), 
+                                            gridspec_kw={'width_ratios': [1.2, 1, 1]})
             fig.subplots_adjust(wspace=0.3, left=0.05, right=0.95, top=0.9, bottom=0.1)
 
-            ax1.set_title(f"Full Trajectory Pair {comp_idx+1}: Pred={pred_pref} (T1: {total_reward1:.3f}, T2: {total_reward2:.3f})", fontsize=10)
+            # Setup plot
+            ax1.set_title(f"Pred={pred_pref} (T1: {total_reward1:.3f}, T2: {total_reward2:.3f})", fontsize=10)
             ax1.set_xlabel("Timestep", fontsize=9)
             ax1.set_ylabel("Reward", fontsize=9)
             ax1.grid(True, alpha=0.3)
 
-            # Plot mean rewards
+            # Plot lines
             line1, = ax1.plot([], [], label="Traj 1", color="blue")
             line2, = ax1.plot([], [], label="Traj 2", color="red")
-
             ax1.legend(loc="upper right", fontsize=8)
-            ax1.tick_params(axis='both', which='major', labelsize=8)
 
+            # Setup image displays
             ax2.set_title("Trajectory 1", fontsize=10)
             ax2.axis('off')
             img1 = ax2.imshow(np.zeros((64, 64, 3)), animated=True)
@@ -330,11 +410,10 @@ class RewardModel:
             ax3.axis('off')
             img2 = ax3.imshow(np.zeros((64, 64, 3)), animated=True)
 
+            # Set plot limits based on actual trajectory lengths
             max_len = max(len(r1), len(r2))
             ax1.set_xlim(0, max_len-1)
-            min_y = min(np.min(r1), np.min(r2))
-            max_y = max(np.max(r1), np.max(r2))
-            ax1.set_ylim(min_y - 0.1 * abs(min_y), max_y + 0.1 * abs(max_y))
+            ax1.set_ylim(-1, 1)
 
             def init():
                 line1.set_data([], [])
@@ -343,51 +422,43 @@ class RewardModel:
                 img2.set_data(np.zeros((64, 64, 3)))
                 return line1, line2, img1, img2
 
-            def animate(i):
-                # Update mean reward lines
-                # Only plot up to the available length for each trajectory
-                x1 = np.arange(min(i+1, len(r1)))
-                y1 = r1[:min(i+1, len(r1))]
-                x2 = np.arange(min(i+1, len(r2)))
-                y2 = r2[:min(i+1, len(r2))]
-                # To avoid shape mismatch, always plot up to the available length
-                line1.set_data(x1, y1)
-                line2.set_data(x2, y2)
-
-                # Update images if available
+            def animate(frame):
+                # Plot rewards up to current frame
+                if frame < len(r1):
+                    x1 = np.arange(frame + 1)
+                    y1 = r1[:frame + 1]
+                    line1.set_data(x1, y1)
+                    
+                    # Update image for trajectory 1
+                    img_idx1 = trajectory_starts[traj1_idx] + frame
+                    if img_idx1 < len(dataset["images"]):
+                        img1_data = dataset["images"][img_idx1]
+                        if img1_data.max() > 1.0:
+                            img1_data = img1_data / 255.0
+                        img1.set_data(img1_data)
                 
-                # Find the start indices for these trajectories
-                terminals = self.dataset.get('terminals', None)
-                if terminals is not None:
-                    # Calculate trajectory start indices
-                    trajectory_starts = [0]
-                    for j in range(len(terminals)):
-                        if terminals[j] and j + 1 < len(terminals):
-                            trajectory_starts.append(j + 1)
-
-                    if traj1_idx < len(trajectory_starts) and traj2_idx < len(trajectory_starts):
-                        traj1_start = trajectory_starts[traj1_idx]
-                        traj2_start = trajectory_starts[traj2_idx]
-
-                        if i < len(r1) and traj1_start + i < len(self.dataset["images"]):
-                            img1_data = self.dataset["images"][traj1_start + i]
-                            if img1_data.max() > 1.0:
-                                img1_data = img1_data / 255.0
-                            img1.set_data(img1_data)
-
-                        if i < len(r2) and traj2_start + i < len(self.dataset["images"]):
-                            img2_data = self.dataset["images"][traj2_start + i]
-                            if img2_data.max() > 1.0:
-                                img2_data = img2_data / 255.0
-                            img2.set_data(img2_data)
+                if frame < len(r2):
+                    x2 = np.arange(frame + 1)
+                    y2 = r2[:frame + 1]
+                    line2.set_data(x2, y2)
+                    
+                    # Update image for trajectory 2
+                    img_idx2 = trajectory_starts[traj2_idx] + frame
+                    if img_idx2 < len(dataset["images"]):
+                        img2_data = dataset["images"][img_idx2]
+                        if img2_data.max() > 1.0:
+                            img2_data = img2_data / 255.0
+                        img2.set_data(img2_data)
 
                 return line1, line2, img1, img2
 
+            # Create animation with correct frame count
             ani = animation.FuncAnimation(
                 fig, animate, init_func=init, frames=max_len,
                 interval=100, blit=True
             )
 
+            # Save video
             with tempfile.NamedTemporaryFile(suffix='.mp4', delete=False) as tmp:
                 ani.save(tmp.name, writer="ffmpeg", fps=10)
                 with open(tmp.name, 'rb') as f:
@@ -396,10 +467,17 @@ class RewardModel:
 
             plt.close(fig)
             buf.seek(0)
-            videos.append(wandb.Video(buf, caption=f"Full Trajectory Pair {comp_idx+1}: Pred={pred_pref} (T1: {total_reward1:.3f}, T2: {total_reward2:.3f})", format="mp4"))
+            videos.append(
+                wandb.Video(
+                    buf,
+                    caption=f"Pred={pred_pref} (T1: {total_reward1:.3f}, T2: {total_reward2:.3f})",
+                    format="mp4"
+                )
+            )
 
         if len(videos) > 0:
             wandb.log({f"{name}/full_trajectory_videos": videos}, step=epoch)
+
 
     def eval(self, obs_act_1, obs_act_2, labels, binary_labels, name, epoch, images1=None, images2=None):
         """Evaluate the ensemble of distributional reward models."""
@@ -506,9 +584,8 @@ class RewardModel:
             
             max_len = max(len(r1), len(r2))
             ax1.set_xlim(0, max_len-1)
-            min_y = min(np.min(r1), np.min(r2))
-            max_y = max(np.max(r1), np.max(r2))
-            ax1.set_ylim(min_y - 0.1 * abs(min_y), max_y + 0.1 * abs(max_y))
+            ax1.set_ylim(-1, 1)
+
             
             def init():
                 line1.set_data([], [])
@@ -558,20 +635,20 @@ class RewardModel:
         for member in range(self.ensemble_num):
             self.ensemble_model[member].train()
             self.optimizer.append(
-                optim.Adam(self.ensemble_model[member].parameters(), lr=self.lr, weight_decay=1e-4)
+                optim.Adam(self.ensemble_model[member].parameters(), lr=self.lr, weight_decay=1e-3)
             )
             self.lr_scheduler.append(
                 optim.lr_scheduler.StepLR(
                     self.optimizer[member],
-                    step_size=10 if self.epochs <= 500 else 1000,
-                    gamma=0.9,
+                    step_size=5 if self.epochs <= 500 else 1000,
+                    gamma=0.7,
                 )
             )
 
         self.obs_act_1 = torch.from_numpy(self.obs_act_1).float().to(self.device)
         self.obs_act_2 = torch.from_numpy(self.obs_act_2).float().to(self.device)
         self.labels = torch.from_numpy(self.labels).float().to(self.device)
-        for epoch in tqdm.tqdm(range(self.epochs)):
+        for epoch in tqdm.tqdm(range(1, self.epochs + 1)):
             train_loss = 0
             for member in range(self.ensemble_num):
                 self.optimizer[member].zero_grad()
@@ -612,6 +689,7 @@ class RewardModel:
                         ]
                     pred_1 = self.single_model_forward(obs_act_1_batch)
                     pred_2 = self.single_model_forward(obs_act_2_batch)
+
                     pred_seg_sum_1 = torch.sum(pred_1, dim=1)
                     pred_seg_sum_2 = torch.sum(pred_2, dim=1)
                     pred_hat = torch.cat([pred_seg_sum_1, pred_seg_sum_2], dim=-1)
@@ -672,10 +750,10 @@ class RewardModel:
                     self._create_visualization(train_vis_data, "train", epoch)
 
             # Full trajectory reward visualization
-            if epoch % 1000 == 0 and wandb.run is not None:
-                self.create_full_trajectory_visualization(
+            if epoch % 2000 == 0 and wandb.run is not None:
+                self.val_trajectory_viz(
                     self.dataset, 
-                    name="train", 
+                    name="eval",
                     epoch=epoch
                 )
 
@@ -1229,7 +1307,8 @@ class DistributionalRewardModel:
         self.obs_act_2 = torch.from_numpy(self.obs_act_2).float().to(self.device)
         self.labels = torch.from_numpy(self.labels).float().to(self.device)
         
-        for epoch in tqdm.tqdm(range(self.epochs)):
+        for epoch in tqdm.tqdm(range(1, self.epochs + 1)):
+
             train_loss = 0
             train_bt_mean_loss = 0
             train_bt_samples_loss = 0

@@ -1,5 +1,5 @@
 device: cuda
-env: robomimic_lift
+env: robomimic_stack
 seed: 0
 checkpoints_path: logs/
 load_model: null
@@ -10,7 +10,7 @@ test_feedback_num: 100 # Number of human preferences from the target dataset to 
 
 data_quality: 5.0
 segment_size: 32
-normalize: false
+normalize: true
 threshold: 0.5
 data_aug: none
 q_budget: 1
@@ -19,12 +19,14 @@ model_type: BT
 noise: 0.0
 human: false
 # MLP
-epochs: 3001
+epochs: 6000
 batch_size: 256
 activation: tanh
 lr: 1e-3
 hidden_sizes: 128
-ensemble_num: 3
+dropout: 0.5
+n_layers: 1
+ensemble_num: 3 # not using active querying for now
 ensemble_method: mean
 use_distributional_model: false # Use distributional reward model
 
@@ -35,8 +37,8 @@ use_dtw_augmentations: false # DTW augs
 dtw_k_augment: 1
 
 # Data
-data_path: "/scr/shared/datasets/robot_pref/lift_panda/lift_panda.hdf5"
-target_data_path: "/scr/shared/datasets/robot_pref/lift_sawyer/lift_sawyer.hdf5"
+data_path: ""
+target_data_path: ""
 
 # wandb
 use_wandb: false

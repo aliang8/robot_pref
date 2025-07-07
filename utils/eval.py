@@ -995,7 +995,6 @@ def eval_actor(
     actor: nn.Module,
     n_episodes: int,
     seed: int,
-    seq_len: Optional[int] = None,
     max_steps: int = 500,
     record_video: bool = True,
 ) -> Tuple[np.ndarray, np.ndarray, List[np.ndarray]]:
@@ -1013,7 +1012,6 @@ def eval_actor(
             actor, 
             max_steps, 
             seed + (i * 5),
-            seq_len=seq_len,
             record_video=record_video and i < 5,  # Record up to 5 episodes
         )
         episode_rewards.append(reward)
@@ -1025,7 +1023,7 @@ def eval_actor(
     return np.array(episode_rewards), np.array(episode_success_list), episode_frames
 
 
-def _eval_episode(env, actor, max_steps, seed, seq_len=None, record_video=False, device="cuda"):
+def _eval_episode(env, actor, max_steps, seed, record_video=False, device="cuda"):
     """Helper function to evaluate a single episode."""
     env.seed(seed)
     
@@ -1058,25 +1056,12 @@ def _eval_episode(env, actor, max_steps, seed, seq_len=None, record_video=False,
             actions = torch.cat([arm_actions, gripper_action], dim=-1)
             actions = actions.squeeze().cpu().numpy()  # Convert to numpy
 
-        if seq_len is not None:
-            for i in range(seq_len):
-                action = actions[i]
-                state, reward, terminated, truncated, info = env.step(action)
-
-                if record_video:
-                    frame = env.render(mode="rgb_array")
-                    frames.append(frame)
-                steps += 1
-        else:
-            action = actions
-            state, reward, terminated, truncated, info = env.step(action)
-            if record_video:
-                frame = env.render(mode="rgb_array")
-                frames.append(frame)
-            steps += 1
-
-        done = terminated or truncated
-        
+        action = actions
+        state, reward, terminated, truncated, info = env.step(action)
+        if record_video:
+            frame = env.render(mode="rgb_array")
+            frames.append(frame)
+        steps += 1        
         episode_reward += reward
     
         # Check for success
@@ -1085,18 +1070,14 @@ def _eval_episode(env, actor, max_steps, seed, seq_len=None, record_video=False,
         
         # Record frame if recording
         if record_video:
-            try:
-                frame = env.render(mode="rgb_array")
-                frames.append(frame)
-            except Exception as e:
-                print(f"Warning: Could not capture frame: {e}")
+            frame = env.render(mode="rgb_array")
+            frames.append(frame)
+
 
         if episode_success:
             break
             
     return episode_reward, int(episode_success), frames if record_video else None
-
-
 
 
 # def _eval_episode(env, actor, max_steps, seed, seq_len=None, record_video=False):

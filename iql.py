@@ -111,7 +111,6 @@ class ReplayBuffer:
         state_dim: int,
         action_dim: int,
         buffer_size: int,
-        seq_len: Optional[int] = None,
         device: str = "cpu",
     ):
         self._buffer_size = buffer_size
@@ -122,7 +121,7 @@ class ReplayBuffer:
             (buffer_size, state_dim), dtype=torch.float32, device=device
         )
 
-        action_shape = (buffer_size, seq_len, action_dim) if seq_len is not None else (buffer_size, action_dim)
+        action_shape = (buffer_size, action_dim)
         self._actions = torch.zeros(action_shape, dtype=torch.float32, device=device)
 
         self._rewards = torch.zeros((buffer_size, 1), dtype=torch.float32, device=device)
@@ -154,7 +153,7 @@ class ReplayBuffer:
 
         print(f"Dataset size: {n_transitions}")
 
-    def sample(self, batch_size: int, seq_len: int=None) -> TensorBatch:
+    def sample(self, batch_size: int) -> TensorBatch:
         indices = np.random.randint(0, min(self._size, self._pointer), size=batch_size)
         states = self._states[indices]
         actions = self._actions[indices]
@@ -394,22 +393,16 @@ class DeterministicPolicy(nn.Module):
 
 class TwinQ(nn.Module):
     def __init__(
-        self, state_dim: int, action_dim: int, hidden_dim: int = 256, n_hidden: int = 2, seq_len=1
+        self, state_dim: int, action_dim: int, hidden_dim: int = 256, n_hidden: int = 2,
     ):
         super().__init__()
-        dims = [state_dim + action_dim * seq_len, *([hidden_dim] * n_hidden), 1]
-        self.seq_len = seq_len
+        dims = [state_dim + action_dim, *([hidden_dim] * n_hidden), 1]
         self.q1 = MLP(dims, squeeze_output=True)
         self.q2 = MLP(dims, squeeze_output=True)
 
     def both(
         self, state: torch.Tensor, action: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-
-        if self.seq_len > 1:
-            batch_size = action.shape[0]
-            action = action.view(batch_size, -1) # flatten the sequence      
-
         sa = torch.cat([state, action], 1)
         return self.q1(sa), self.q2(sa)
 
@@ -460,6 +453,7 @@ class ImplicitQLearning:
 
         self.total_it = 0
         self.device = device
+
 
     def _update_v(self, observations, actions, log_dict) -> torch.Tensor:
         # Update value function
@@ -521,12 +515,11 @@ class ImplicitQLearning:
 
         # bc_losses, loss_dict = self.actor.compute_loss(observations, actions)
         loss = self.actor(observations, actions)
-        log_dict.update({"loss": loss.item()})
-        # update log_dict
-        # log_dict.update(loss_dict)
+        log_dict.update({"bc_loss": loss.mean().item()})
 
+        # AWR
         policy_loss = torch.mean(exp_adv * loss)
-        log_dict["actor_loss"] = policy_loss.item()
+        log_dict["policy_loss"] = policy_loss.item()
         self.actor_optimizer.zero_grad()
         policy_loss.backward()
         self.actor_optimizer.step()
@@ -671,7 +664,7 @@ def train(config):
     elif "robomimic" in config.env:
         env = utils_env.get_robomimic_env(config.data_path, seed=config.seed)
         # env_fn = EnvFactory(config.data_path)
-        dataset = utils_env.Robomimic_dataset(config.data_path, seq_len=config.seq_len)
+        dataset = utils_env.Robomimic_dataset(config.data_path, clip_last=True)
     else:
         env = gym.make(config.env)
     
@@ -689,11 +682,12 @@ def train(config):
 
     # label with trained rm rewards
     if config.use_reward_model:
+        print("Using relabeled rewards from trained reward model")
         # end effector reward model
         if config.eef_rm:
             dimension = 3 + dataset["actions"].shape[1]
         else:
-            dimension = dataset["observations"].shape[1] + dataset["actions"].shape[1]
+            dimension = dataset["observations"].shape[1] + dataset["actions"].shape[1] #TODO
         print(f"Using reward model with dimension {dimension}")
         
         if config.use_distributional_model:
@@ -705,15 +699,24 @@ def train(config):
         # Use the helper function to build checkpoint path
         path = build_rm_checkpoint_path(config)
         path = os.path.join(config.checkpoints_path, path)
+        print(f"Loading reward model from {path}")
         model.load_model(path)
-        print(f"Successfully loaded reward model from {path}")
+        print("Successfully loaded reward model")
         dataset["rewards"] = model.get_reward(dataset)
     # iql zero
     elif config.trivial_reward == 1:
+        print("Using zero rewards (trivial reward)")
         dataset["rewards"] *= 0.0
     # iql gt rewards
     else:
         print("Using ground truth rewards (no reward model)")
+
+    # if config.normalize_reward:
+    #     reward_mean = np.mean(dataset["rewards"])
+    #     reward_std = np.std(dataset["rewards"])
+    #     normalized_reward = (dataset["rewards"] - reward_mean) / reward_std
+
+    #     dataset["rewards"] = normalized_reward
 
     print_dataset_statistics(dataset)
 
@@ -723,7 +726,6 @@ def train(config):
         state_dim,
         action_dim,
         config.buffer_size,
-        seq_len=config.seq_len if hasattr(config, 'seq_len') else None,
         device=config.device,
     )
     replay_buffer.load_dataset(dataset)
@@ -739,7 +741,7 @@ def train(config):
     # Set seed
     set_seed(config.seed, env)
 
-    q_network = TwinQ(state_dim, action_dim, seq_len=config.seq_len).to(config.device)
+    q_network = TwinQ(state_dim, action_dim).to(config.device)
     v_network = ValueFunction(state_dim).to(config.device)
 
     noise_pred_net = FlowNoisePredictionNet(
@@ -747,7 +749,7 @@ def train(config):
         global_cond_dim=state_dim
     ).to(config.device)
 
-    actor = FlowPolicy(action_len=config.seq_len, action_dim=action_dim, noise_pred_net=noise_pred_net)
+    actor = FlowPolicy(action_dim=action_dim, noise_pred_net=noise_pred_net)
 
     # Print model architecture after model initialization
     print("\n" + "=" * 50)
@@ -804,7 +806,6 @@ def train(config):
                 actor,
                 config.n_episodes,
                 config.seed,
-                seq_len=config.seq_len,
                 record_video=config.record_video,
             )
             eval_score = eval_scores.mean()  # For DMControl

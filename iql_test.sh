@@ -1,11 +1,15 @@
 #!/bin/bash
 # run iql zero and iql gt rewards
-data_path="/tmp/mimicgen_stack_100/stack/demo_src_stack_task_D0_r_Panda/demo_exp-100_sub-150.hdf5"
+data_path="/tmp/mimicgen_stack_100/stack/demo_src_stack_task_D0_r_Panda/demo_exp-100_sub-100_noise-1.0.hdf5"
 
 use_wandb=True
-seeds=(521 522 523)
+seeds=(527 528 529 530 531 532 533 534 535)
 record_video=False
 trivial_reward=(0 1)
+
+# iql_tau=0.3
+# beta=0.5
+
 
 for seed in "${seeds[@]}"; do
     for trivial in "${trivial_reward[@]}"; do

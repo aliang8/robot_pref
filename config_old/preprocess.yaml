@@ -2,11 +2,12 @@ defaults:
   - _self_
 
 data:
-  data_path: "/scr/shared/datasets/robot_pref/stack_panda/stack_panda.pt"
+  data_path: "/scr/shared/datasets/robot_pref/stack_mixed/stack_mixed.pt"
   segment_length: 32
   use_relative_eef: false
   overwrite: true
   num_segments: 2500
+  val_split: 0.1 # percentage of data to hold out for eval
 
 image_embedding:
   enabled: false

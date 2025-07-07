@@ -150,8 +150,8 @@ def save_run_df(run_data, output_dir="run_data"):
         # Get SR metrics
         if "history" in run and "eval_success_rates" in run["history"]:
             success_rates = run["history"]["eval_success_rates"]
-            # top_3_rates = success_rates[-5:]
-            top_3_rates = sorted(success_rates, reverse=True)[:5]
+            top_3_rates = success_rates[-5:]
+            # top_3_rates = sorted(success_rates, reverse=True)[:5]
             row["top3_avg_eval_success_rate"] = sum(top_3_rates) / len(top_3_rates)
 
         rows.append(row)
@@ -245,6 +245,8 @@ def plot_data_path_comparisons(df, output_dir="data_path_plots"):
             elif get_config_value(row, "trivial_reward", None) == 1:
                 return add_tag("Zero Rewards", is_dist)
             elif get_config_value(row, "trivial_reward", None) == 0:
+                return add_tag("GT Rewards", is_dist)
+            elif get_config_value(row, "trivial_reward", None) == 0:
                 return add_tag("Aug Prefs", is_dist, feedback_num)
             else:
                 return "IQL_Zero"
@@ -293,6 +295,8 @@ def plot_data_path_comparisons(df, output_dir="data_path_plots"):
         # Customize plot
         plt.title(f"Performance Comparison for {Path(data_path)}", fontsize=14)
         plt.ylabel("Success Rate")
+        ax.set_xticklabels(ax.get_xticklabels(), fontsize=10)
+
         
         # Remove top and right spines
         ax.spines["top"].set_visible(False)

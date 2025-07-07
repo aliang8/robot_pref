@@ -220,20 +220,29 @@ def segment_episodes(data, segment_length):
     return segments, segment_indices
 
 
-def segment_episodes_random(data, segment_length, num_segments=None):
-    """Segment episodes into num_segments segments of segment_length randomly.
+def segment_episodes_random(data, segment_length, num_segments=None, val_split=0.1):
+    """Segment episodes into num_segments segments of segment_length randomly. Split into test and train segments.
 
     Args:
         data: Raw TensorDict data to segment
         segment_length: Base length of each segment
-        num_segments: Number of segments to sample (if None, uses all possible segments)
+        num_segments: Number of segments to sample
+        val_split: Percentage of data to hold our for validation. Additioanlly, samples val_split * num_segments segments.
 
     Returns:
         segments: List of segments
         segment_indices: List of (start_idx, end_idx) tuples for each segment
+        val_segments: List of validation segments
+        val_segment_indices: List of (start_idx, end_idx) tuples for each validation segment
+        val_samples: List of unique episode IDs used for validation
     """
     # Get unique episodes and their lengths
     unique_episodes = np.unique(data["episode"])
+
+    # Randomly sample episodes to be held out for validation
+    num_val_samples = int(len(unique_episodes) * val_split)
+    val_samples = np.random.choice(unique_episodes, size=num_val_samples, replace=False)
+
     episode_lens = {
         int(ep): len(np.where(data["episode"] == ep)[0]) 
         for ep in unique_episodes
@@ -242,43 +251,38 @@ def segment_episodes_random(data, segment_length, num_segments=None):
     print(f"Found {len(unique_episodes)} episodes")
     print(f"Episode lengths range: min={min(episode_lens.values())}, max={max(episode_lens.values())}")
     
-    # Create list of valid episodes (those long enough for at least one segment)
-    valid_episodes = []
+    # Create list of train episodes and val episodes
+    train_episodes = []
+    val_episodes = []
     episode_start_indices = {}  # Track start index of each episode
     current_idx = 0
     
     for episode_idx in unique_episodes:
         episode_len = episode_lens[int(episode_idx)]
-        if episode_len >= segment_length:
-            valid_episodes.append((episode_idx, episode_len))
-            episode_start_indices[episode_idx] = current_idx
+        if episode_len <= segment_length:
+            raise ValueError(f"Episode {episode_idx} is too short, use a shorter segment_length")
+        if episode_idx not in val_samples:
+            train_episodes.append((episode_idx, episode_len))
+        else:
+            val_episodes.append((episode_idx, episode_len))
+        episode_start_indices[episode_idx] = current_idx
         current_idx += episode_len
-    
-    print(f"Found {len(valid_episodes)} valid episodes (length >= {segment_length})")
-    
-    if not valid_episodes:
-        raise ValueError(f"No episodes found with length >= {segment_length}")
+    import ipdb; ipdb.set_trace()  # Debugging line to inspect train and val episodes
+    print(f"Using {len(train_episodes)} train episodes and {len(val_episodes)} val episodes")
     
     # Sample segments
     segments = []
     segment_indices = []
     
-    # Sample episodes and their segments
-    remaining_segments = num_segments if num_segments is not None else float('inf')
-    attempts = 0
-    max_attempts = len(valid_episodes) * 100  # Increased max attempts
-    
-    while remaining_segments > 0 and valid_episodes and attempts < max_attempts:
-        attempts += 1
-        
+    # Sample num_segments segments
+    total_segments = 0
+    while total_segments < num_segments:
         # Randomly select an episode
-        episode_idx, episode_len = random.choice(valid_episodes)
+        episode_idx, episode_len = random.choice(train_episodes)
         episode_abs_start = episode_start_indices[episode_idx]
         
-        # Find the maximum possible start index for the segment based on segment length
-        max_start = episode_len - segment_length
-        if max_start < 0:
-            continue
+        # Sample a random valid segment
+        max_start = episode_len - segment_length - 1 # we don't want to sample next obs
         start_idx = random.randint(0, max_start)
         end_idx = start_idx + segment_length
         
@@ -286,28 +290,52 @@ def segment_episodes_random(data, segment_length, num_segments=None):
         abs_start_idx = episode_abs_start + start_idx
         abs_end_idx = episode_abs_start + end_idx
         
-        # Create segment dictionary and validate data
+        # Create segment dictionary
         segment = {}
-        valid_segment = True
         for key in data.keys():
             segment_data = data[key][abs_start_idx:abs_end_idx]
-            if len(segment_data) != segment_length:
-                valid_segment = False
-                break
             segment[key] = segment_data
-        
-        if not valid_segment:
-            continue
             
         segment_indices.append((abs_start_idx, abs_end_idx))
         segments.append(segment)
-        remaining_segments -= 1
-    
-    if not segments:
-        raise ValueError("Failed to create any valid segments")
+        total_segments += 1
+
+    print(f"Created {len(segments)} valid train segments")
+
+    # Sample val segments as well
+    num_val_segments = num_segments * val_split
+    total_segments = 0
+
+    val_segments = []
+    val_segment_indices = []
+
+    while total_segments < num_val_segments:
+        # Randomly select an episode
+        episode_idx, episode_len = random.choice(val_episodes)
+        episode_abs_start = episode_start_indices[episode_idx]
         
-    print(f"Created {len(segments)} valid segments")
-    return segments, segment_indices
+        # Sample a random valid segment
+        max_start = episode_len - segment_length
+        start_idx = random.randint(0, max_start)
+        end_idx = start_idx + segment_length
+        
+        # Compute absolute indices in the full dataset
+        abs_start_idx = episode_abs_start + start_idx
+        abs_end_idx = episode_abs_start + end_idx
+        
+        # Create segment dictionary
+        segment = {}
+        for key in data.keys():
+            segment_data = data[key][abs_start_idx:abs_end_idx]
+            segment[key] = segment_data
+            
+        val_segment_indices.append((abs_start_idx, abs_end_idx))
+        val_segments.append(segment)
+        total_segments += 1
+
+    print(f"Created {len(val_segments)} valid val segments")
+
+    return segments, segment_indices, val_segments, val_segment_indices, val_samples
 
 
 def load_dataset(

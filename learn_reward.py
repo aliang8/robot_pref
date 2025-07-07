@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 
 import hydra
 import numpy as np
@@ -6,8 +7,15 @@ import rich
 from omegaconf import DictConfig, OmegaConf
 
 import utils_env
-from models.reward_model import DistributionalRewardModel, RewardModel
-from reward_utils import *
+from models.reward_model import RewardModel
+from reward_utils import (
+    compute_dtw_matrix_cross,
+    compute_mean_std,
+    create_augmented_preferences_from_dtw,
+    get_feedbacks,
+    normalize_states,
+    set_seed,
+)
 from utils.wandb import log_query_videos_to_wandb, wandb_init
 
 
@@ -36,43 +44,32 @@ def train(config: DictConfig):
         dataset = utils_env.DMC_dataset(config)
         config.threshold *= 0.1  # because reward scaling is different from metaworld
     elif "robomimic" in config.env:
-        dataset = utils_env.Robomimic_dataset(config.data_path)
-        target_dataset = utils_env.Robomimic_dataset(config.target_data_path) if config.target_data_path else None
+        dataset = utils_env.Robomimic_dataset(config.data_path, return_images=True)
+        target_dataset = utils_env.Robomimic_dataset(config.target_data_path, return_images=True) if config.target_data_path else None
     else:
         raise ValueError(f"Unsupported environment type: {config.env}")
-
+    
     # Normalize observations if required
     if config.normalize:
         state_mean, state_std = compute_mean_std(dataset["observations"], eps=1e-4)
-        target_state_mean, target_state_std = compute_mean_std(
-            dataset["next_observations"], eps=1e-4
-        )
-    else:
-        state_mean, state_std = 0, 1
-        target_state_mean, target_state_std = 0, 1
-
+        
     dataset["observations"] = normalize_states(
         dataset["observations"], state_mean, state_std
-    )
-    dataset["next_observations"] = normalize_states(
-        dataset["next_observations"], state_mean, state_std
     )
     if target_dataset is not None:
         target_dataset["observations"] = normalize_states(
             target_dataset["observations"], state_mean, state_std
         )
-        target_dataset["next_observations"] = normalize_states(
-            target_dataset["next_observations"], target_state_mean, target_state_std
-        )
-
+    
     # Get source and target dataset preferences
-    labels, idx_st_1, idx_st_2 = get_human_feedbacks(config.data_path, getattr(config, 'feedback_num', 100))
-    target_labels, target_idx_st_1, target_idx_st_2 = get_human_feedbacks(config.target_data_path, getattr(config, 'test_feedback_num', 100))
+    labels, idx_st_1, idx_st_2, val_labels, val_idx_st_1, val_idx_st_2 = get_feedbacks(config.data_path, config.feedback_num, human=config.human)
 
-    obs_act = np.concatenate(
-        (dataset["observations"][0], dataset["actions"][0]), axis=-1
-    )
-    obs_act_dim = obs_act.shape[-1]
+    val_episodes_path = Path(config.data_path).parent / "val_episodes.npy"
+    val_episodes = np.load(val_episodes_path, allow_pickle=True)
+    if target_dataset is not None:
+        target_labels, target_idx_st_1, target_idx_st_2 = get_feedbacks(config.target_data_path, config.test_feedback_num, human=config.human) if config.target_data_path else (None, None, None)
+    
+    obs_act_dim = dataset["observations"].shape[-1] + dataset["actions"].shape[-1]
     print(f"Observation-action dimension: {obs_act_dim}")
 
     # Convert labels to [1,0], [0,1], or [0.5,0.5] format for both labels and target_labels
@@ -88,41 +85,32 @@ def train(config: DictConfig):
         return np.array(new_labels)
 
     labels = convert_labels_to_array(labels)
-    target_labels = convert_labels_to_array(target_labels)
-
+    val_labels = convert_labels_to_array(val_labels)
+    
+    if target_dataset is not None:
+        target_labels = convert_labels_to_array(target_labels)
+    
     # After collecting feedback log the source preferences
     log_query_videos_to_wandb(dataset, idx_st_1, idx_st_2, labels, config)
 
-    if getattr(config, 'use_gt_prefs', False):
+    if config.use_gt_prefs:
         print(f"Using ground truth preferences for {config.data_path} for reward learning")
-
-        # Split into train/val sets (80/20 split)
-        n_feedbacks = len(labels)
-        n_train = int(0.9 * n_feedbacks)
-        
-        # Shuffle indices
-        indices = np.random.permutation(n_feedbacks)
-        train_indices = indices[:n_train]
-        val_indices = indices[n_train:]
-
-        print(f"Using {len(train_indices)} train indices and {len(val_indices)} val indices")
-        
         # Split the data into train and validation sets
-        train_labels = labels[train_indices]
-        train_idx_st_1 = idx_st_1[train_indices]
-        train_idx_st_2 = idx_st_2[train_indices]
-        
-        val_labels = labels[val_indices]
-        val_idx_st_1 = idx_st_1[val_indices]
-        val_idx_st_2 = idx_st_2[val_indices] 
+        train_labels = labels
+        train_idx_st_1 = idx_st_1
+        train_idx_st_2 = idx_st_2
+
+        val_labels = val_labels
+        val_idx_st_1 = val_idx_st_1
+        val_idx_st_2 = val_idx_st_2
         
         # Create indices for segments
-        train_idx_1 = [[j for j in range(i, i + getattr(config, 'segment_size', 25))] for i in train_idx_st_1]
-        train_idx_2 = [[j for j in range(i, i + getattr(config, 'segment_size', 25))] for i in train_idx_st_2]
-        
-        val_idx_1 = [[j for j in range(i, i + getattr(config, 'segment_size', 25))] for i in val_idx_st_1]
-        val_idx_2 = [[j for j in range(i, i + getattr(config, 'segment_size', 25))] for i in val_idx_st_2]
-        
+        train_idx_1 = [[j for j in range(i, i + config.segment_size)] for i in train_idx_st_1]
+        train_idx_2 = [[j for j in range(i, i + config.segment_size)] for i in train_idx_st_2]
+
+        val_idx_1 = [[j for j in range(i, i + config.segment_size)] for i in val_idx_st_1]
+        val_idx_2 = [[j for j in range(i, i + config.segment_size)] for i in val_idx_st_2]
+
         # Get observations and actions for segments
         train_obs_act_1 = np.concatenate(
             (dataset["observations"][train_idx_1], dataset["actions"][train_idx_1]), axis=-1
@@ -147,26 +135,19 @@ def train(config: DictConfig):
         
         obs_act_dim = train_obs_act_1.shape[-1]
 
-        if getattr(config, 'use_distributional_model', False):
-            print("Using distributional reward model")
-            reward_model = DistributionalRewardModel(config, dataset, train_obs_act_1, train_obs_act_2, train_labels, obs_act_dim, train_images1, train_images2)
-        else:
-            print("Using regular reward model")
-            reward_model = RewardModel(config, dataset, train_obs_act_1, train_obs_act_2, train_labels, obs_act_dim, train_images1, train_images2)
-
-        print(reward_model)
+        reward_model = RewardModel(config, dataset, train_obs_act_1, train_obs_act_2, train_labels, obs_act_dim, train_images1, train_images2)
         
-        reward_model.save_test_dataset(val_obs_act_1, val_obs_act_2, val_labels, val_labels, val_images1, val_images2)
+        reward_model.save_test_dataset(val_obs_act_1, val_obs_act_2, val_labels, val_labels, val_images1, val_images2, val_episodes)
         reward_model.train_model()
         
-    elif getattr(config, 'eef_rm', False):
+    elif config.eef_rm:
         print("Using 3d EEF positions as reward model input")
         
         # Create segment indices
-        train_idx_1 = [[j for j in range(i, i + getattr(config, 'segment_size', 25))] for i in idx_st_1]
-        train_idx_2 = [[j for j in range(i, i + getattr(config, 'segment_size', 25))] for i in idx_st_2]
-        val_idx_1 = [[j for j in range(i, i + getattr(config, 'segment_size', 25))] for i in target_idx_st_1]
-        val_idx_2 = [[j for j in range(i, i + getattr(config, 'segment_size', 25))] for i in target_idx_st_2]
+        train_idx_1 = [[j for j in range(i, i + config.segment_size)] for i in idx_st_1]
+        train_idx_2 = [[j for j in range(i, i + config.segment_size)] for i in idx_st_2]
+        val_idx_1 = [[j for j in range(i, i + config.segment_size)] for i in target_idx_st_1]
+        val_idx_2 = [[j for j in range(i, i + config.segment_size)] for i in target_idx_st_2]
 
         # Get observations and actions for segments
         train_obs_act_1 = np.concatenate(
@@ -225,9 +206,9 @@ def train(config: DictConfig):
         log_query_videos_to_wandb(target_dataset, aug_idx_st_1, aug_idx_st_2, aug_labels, config, prefix="aug_prefs")
         
         # Create indices for augmented segments
-        aug_idx_1 = [[j for j in range(i, i + getattr(config, 'segment_size', 25))] for i in aug_idx_st_1]
-        aug_idx_2 = [[j for j in range(i, i + getattr(config, 'segment_size', 25))] for i in aug_idx_st_2]
-        
+        aug_idx_1 = [[j for j in range(i, i + config.segment_size)] for i in aug_idx_st_1]
+        aug_idx_2 = [[j for j in range(i, i + config.segment_size)] for i in aug_idx_st_2]
+
         # Get observations and actions for augmented segments
         aug_obs_act_1 = np.concatenate(
             (dataset["observations"][aug_idx_1], dataset["actions"][aug_idx_1]), axis=-1
@@ -248,9 +229,9 @@ def train(config: DictConfig):
         # Use target embodiment human preferences for testing
         if target_labels is not None:
             # Create indices for target segments
-            target_idx_1 = [[j for j in range(i, i + getattr(config, 'segment_size', 25))] for i in target_idx_st_1]
-            target_idx_2 = [[j for j in range(i, i + getattr(config, 'segment_size', 25))] for i in target_idx_st_2]
-            
+            target_idx_1 = [[j for j in range(i, i + config.segment_size)] for i in target_idx_st_1]
+            target_idx_2 = [[j for j in range(i, i + config.segment_size)] for i in target_idx_st_2]
+
             # Get observations and actions for target segments
             test_obs_act_1 = np.concatenate(
                 (target_dataset["observations"][target_idx_1], target_dataset["actions"][target_idx_1]), axis=-1
@@ -281,17 +262,19 @@ def build_rm_checkpoint_path(config: DictConfig) -> str:
     
     # Build checkpoint path components
     checkpoint_components = [
-        f"{getattr(config, 'env', 'unknown')}",
-        f"fn_{getattr(config, 'feedback_num', 100)}",
-        f"gt_{int(getattr(config, 'use_gt_prefs', False))}",
-        f"eef_{int(getattr(config, 'eef_rm', False))}",
-        f"dist_{int(getattr(config, 'use_distributional_model', False))}"
+        f"{config.env}",
+        f"fn_{config.feedback_num}",
+        f"gt_{int(config.use_gt_prefs)}",
+        f"eef_{int(config.eef_rm)}",
+        f"dtw_{int(config.use_dtw_augmentations)}",
+        f"s_{config.seed}",
+        # f"dist_{int(config.use_distributional_model)}"
     ]
     
-    checkpoint_components.append(f"s_{getattr(config, 'seed', 0)}")
+    # checkpoint_components.append(f"s_{getattr(config, 'seed', 0)}")
 
-    if getattr(config, 'use_dtw_augmentations', False):
-        checkpoint_components.append(f"dtw_k_{getattr(config, 'dtw_k_augment', None)}")
+    # if getattr(config, 'use_dtw_augmentations', False):
+    #     checkpoint_components.append(f"dtw_k_{getattr(config, 'dtw_k_augment', None)}")
     
     checkpoints_name = "/".join(checkpoint_components)
     return checkpoints_name

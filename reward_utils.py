@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import gym
+import h5py
 import numpy as np
 import torch
 from tqdm import tqdm
@@ -40,6 +41,7 @@ def get_indices(traj_total, config):
     idx_st = 500 * traj_idx + np.random.randint(0, 500 - config.segment_size)
     idx = [[j for j in range(idx_st, idx_st + config.segment_size)]]
     return idx
+
 
 
 def consist_test_dataset(
@@ -81,8 +83,9 @@ def consist_test_dataset(
     )
     return test_obs_act_1, test_obs_act_2, test_labels, test_binary_labels
 
-def get_human_feedbacks(data_path, num_prefs):
-    """Get human feedbacks from the dataset.
+def get_feedbacks(data_path, num_prefs, human=False):
+    # TODO: implement validation set for human preferenbces (use the human prefs or gt?)
+    """Get ground truth or human feedbacks from the dataset.
     
     Args:
         data_path: Path to the dataset
@@ -92,30 +95,98 @@ def get_human_feedbacks(data_path, num_prefs):
     data_path = Path(data_path)
     seg_indices_path = data_path.parent / "segment_start_end_indices.npy"
     seg_pairs_path = data_path.parent / "segment_pairs.npy"
+    val_indices_path = data_path.parent / "val_segment_start_end_indices.npy"
+    val_pairs_path = data_path.parent / "val_segment_pairs.npy"
     prefs_path = data_path.parent / "preferences"
 
     # Load everything
     seg_indices = np.load(seg_indices_path, allow_pickle=True)
     seg_pairs = np.load(seg_pairs_path, allow_pickle=True)
-    prefs, _ = load_preferences_from_directory(prefs_path)
+    val_seg_indices = np.load(val_indices_path, allow_pickle=True)
+    val_seg_pairs = np.load(val_pairs_path, allow_pickle=True)
 
-    # Randomly sample preferences if needed
-    if len(prefs) > num_prefs:
-        print(f"Sampling {num_prefs} preferences from {len(prefs)} available preferences")
-        indices = np.random.choice(len(prefs), num_prefs, replace=False)
-        prefs = [prefs[i] for i in indices]
-    else:
-        print(f"Using all {len(prefs)} since num_prefs={num_prefs} > {len(prefs)} preferences from dataset")
-    
     # Initialize lists to store processed data
     labels = []
     idx_st_1 = []
     idx_st_2 = []
+    val_labels = []
+    val_idx_st_1 = []
+    val_idx_st_2 = []
+
+    if human:
+        prefs, _ = load_preferences_from_directory(prefs_path)
+        print(f"Loaded {len(prefs)} human preferences")
+    else:
+        with h5py.File(data_path, 'r') as f:
+            sorted_keys = sorted(f["data"].keys(), key=lambda k: int(k.split('_')[-1]))
+            # Collect all rewards in order
+            all_rewards = []
+            for demo_key in sorted_keys:
+                rewards = f["data"][demo_key]["rewards"]
+                all_rewards.extend(rewards)
+        all_rewards = np.array(all_rewards)
+
+        # Generate ground truth preferences for all segment pairs
+        equal_threshold = 1e-2  # Threshold for considering equal preferences
+        prefs = []
+
+        for i, (seg1, seg2) in enumerate(tqdm(seg_pairs, desc="Generating ground truth preferences from rewards (TRAIN)")):
+            seg1_start, seg1_end = seg_indices[seg1]
+            seg2_start, seg2_end = seg_indices[seg2]
+            
+            # Calculate reward for each segment
+            seg1_reward = np.sum(all_rewards[seg1_start:seg1_end])
+            seg2_reward = np.sum(all_rewards[seg2_start:seg2_end])
+            
+            # Create preference based on rewards
+            if np.abs(seg1_reward - seg2_reward) < equal_threshold:  # Equal rewards
+                preference = 'equal'
+            elif seg1_reward > seg2_reward:
+                preference = 'A'  # First segment preferred
+            else:
+                preference = 'B'  # Second segment preferred
+            
+            prefs.append({
+                'pair_index': i,
+                'preference': preference
+            })
+        print(f"Generated {len(prefs)} ground truth preferences from rewards (TRAIN)")
+
+        # Load the val set as well
+        val_prefs = []
+        
+        for i, (seg1, seg2) in enumerate(tqdm(val_seg_pairs, desc="Generating ground truth preferences from rewards (VAL)")):
+            seg1_start, seg1_end = val_seg_indices[seg1]
+            seg2_start, seg2_end = val_seg_indices[seg2]
+            
+            # Calculate reward for each segment
+            seg1_reward = np.sum(all_rewards[seg1_start:seg1_end])
+            seg2_reward = np.sum(all_rewards[seg2_start:seg2_end])
+            
+            # Create preference based on rewards (no equal prefs for validation)
+            if seg1_reward > seg2_reward:
+                preference = 'A'  # First segment preferred
+            else:
+                preference = 'B'  # Second segment preferred
+            
+            val_prefs.append({
+                'pair_index': i,
+                'preference': preference
+            })
+        print(f"Generated {len(val_prefs)} ground truth preferences from rewards (VAL)")
+
+    # Randomly sample preferences if needed
+    if num_prefs is not None and len(prefs) > num_prefs:
+        print(f"Sampling {num_prefs} preferences from {len(prefs)} available preferences")
+        indices = np.random.choice(len(prefs), num_prefs, replace=False)
+        prefs = [prefs[i] for i in indices]
+    else:
+        print(f"Using all {len(prefs)} preferences")
 
     for pref in prefs:
         pair_ind = pref["pair_index"]
         preference = pref["preference"]  # Should be 'A', 'B', or 'equal'
-        
+
         seg1, seg2 = seg_pairs[pair_ind]
         
         # Get the actual segment data using indices
@@ -127,18 +198,51 @@ def get_human_feedbacks(data_path, num_prefs):
         if preference == 'equal':
             binary_pref = 0.5
         else:
-            binary_pref = 0 if preference == 'B' else 1
+            binary_pref = 1 if preference == 'A' else 0
         
         # Store data in the format used by learn_reward.py
         labels.append(binary_pref)
         idx_st_1.append(seg1_start)
         idx_st_2.append(seg2_start)
 
+    # Sample val prefs as well
+    if num_prefs is not None and len(val_prefs) > num_prefs:
+        indices = np.random.choice(len(val_prefs), num_prefs, replace=False)
+        val_prefs = [val_prefs[i] for i in indices]
+    else:
+        print(f"Using all {len(val_prefs)} validation preferences")
+
+    for pref in val_prefs: # use same amount of prefs for val
+        pair_ind = pref["pair_index"]
+        preference = pref["preference"]  # Should be 'A', 'B', or 'equal'
+        
+        seg1, seg2 = val_seg_pairs[pair_ind]
+        
+        # Get the actual segment data using indices
+        seg1_start, seg1_end = val_seg_indices[seg1]
+        seg2_start, seg2_end = val_seg_indices[seg2]
+        
+        # Convert preference to numeric value
+        # 'A' means first segment preferred, 'B' means second segment preferred, 'equal' means equal preference
+        if preference == 'equal':
+            binary_pref = 0.5
+        else:
+            binary_pref = 1 if preference == 'A' else 0
+        
+        # Store data in the format used by learn_reward.py
+        val_labels.append(binary_pref)
+        val_idx_st_1.append(seg1_start)
+        val_idx_st_2.append(seg2_start)
+
     # Convert to numpy arrays
     labels = np.array(labels)
     idx_st_1 = np.array(idx_st_1)
     idx_st_2 = np.array(idx_st_2)
-    return labels, idx_st_1, idx_st_2
+    val_labels = np.array(val_labels)
+    val_idx_st_1 = np.array(val_idx_st_1)
+    val_idx_st_2 = np.array(val_idx_st_2)
+
+    return labels, idx_st_1, idx_st_2, val_labels, val_idx_st_1, val_idx_st_2
 
 
 def collect_simple_pairwise_feedback(dataset, traj_total, config):
@@ -888,91 +992,91 @@ def collect_human_feedback(dataset, config):
                         single_ranked_list.append(group)
                 multiple_ranked_list.append(single_ranked_list)
 
-    elif config.feedback_type == "SeqRank":
-        print("Sequential Pairwise feedback (SeqRank)")
-        path = f"./human_feedback/{config.env}/_SeqRank.txt"
-        single_ranked_list = []
-        idx_st_1 = []
-        idx_st_2 = []
-        labels = []
-        raw_labels = []
-        reward_1 = []
-        reward_2 = []
-        with open(path, "r") as f:
-            for line in f:
-                line = line.split("\t")
-                index_1 = int(line[0])
-                index_2 = int(line[1])
-                label = int(line[2])
-                idx_st_1.append(index_1)
-                idx_st_2.append(index_2)
-                raw_labels.append(label)
-            idx_1 = [[j for j in range(i, i + config.segment_size)] for i in idx_st_1]
-            idx_2 = [[j for j in range(i, i + config.segment_size)] for i in idx_st_2]
-            reward_1 = np.sum(dataset["rewards"][idx_1], axis=1)
-            reward_2 = np.sum(dataset["rewards"][idx_2], axis=1)
-            for i in range(len(raw_labels)):
-                if raw_labels[i] == 1:
-                    labels.append([1, 0])
-                elif raw_labels[i] == 2:
-                    labels.append([0.5, 0.5])
-                elif raw_labels[i] == 3:
-                    labels.append([0, 1])
-            labels = np.array(labels)
-        if np.all(labels[0] == [1, 0]):
-            group_1, group_2 = [(idx_st_1[0], reward_1[0])], [
-                (idx_st_2[0], reward_2[0])
-            ]
-            single_ranked_list.append(group_2)
-            single_ranked_list.append(group_1)
-            up = -1
-        elif np.all(labels[0] == [0.5, 0.5]):
-            group = [(idx_st_1[0], reward_1[0]), (idx_st_2[0], reward_2[0])]
-            single_ranked_list.append(group)
-            up = 0
-        elif np.all(labels[0] == [0, 1]):
-            group_1, group_2 = [(idx_st_1[0], reward_1[0])], [
-                (idx_st_2[0], reward_2[0])
-            ]
-            single_ranked_list.append(group_1)
-            single_ranked_list.append(group_2)
-            up = 1
-        for i in range(1, len(labels)):
-            if np.all(labels[i] == [1, 0]):
-                group_1, group_2 = [(idx_st_1[i], reward_1[i])], [
-                    (idx_st_2[i], reward_2[i])
-                ]
-                curr_up = -1
-                if up == curr_up or up == 0:
-                    # insert front of single_ranked_list
-                    single_ranked_list.insert(0, group_2)
-                    up = -1
-                else:
-                    multiple_ranked_list.append(single_ranked_list)
-                    single_ranked_list = []
-                    single_ranked_list.append(group_2)
-                    single_ranked_list.append(group_1)
-                    up = -1
-            elif np.all(labels[i] == [0.5, 0.5]):
-                if up == -1:
-                    single_ranked_list[0].append((idx_st_2[i], reward_2[i]))
-                else:
-                    single_ranked_list[-1].append((idx_st_2[i], reward_2[i]))
-            elif np.all(labels[i] == [0, 1]):
-                group_1, group_2 = [(idx_st_1[i], reward_1[i])], [
-                    (idx_st_2[i], reward_2[i])
-                ]
-                curr_up = 1
-                if up == curr_up or up == 0:
-                    single_ranked_list.append(group_2)
-                    up = 1
-                else:
-                    multiple_ranked_list.append(single_ranked_list)
-                    single_ranked_list = []
-                    single_ranked_list.append(group_1)
-                    single_ranked_list.append(group_2)
-                    up = 1
-        multiple_ranked_list.append(single_ranked_list)
+    # elif config.feedback_type == "SeqRank":
+    #     print("Sequential Pairwise feedback (SeqRank)")
+    #     path = f"./human_feedback/{config.env}/_SeqRank.txt"
+    #     single_ranked_list = []
+    #     idx_st_1 = []
+    #     idx_st_2 = []
+    #     labels = []
+    #     raw_labels = []
+    #     reward_1 = []
+    #     reward_2 = []
+    #     with open(path, "r") as f:
+    #         for line in f:
+    #             line = line.split("\t")
+    #             index_1 = int(line[0])
+    #             index_2 = int(line[1])
+    #             label = int(line[2])
+    #             idx_st_1.append(index_1)
+    #             idx_st_2.append(index_2)
+    #             raw_labels.append(label)
+    #         idx_1 = [[j for j in range(i, i + config.segment_size)] for i in idx_st_1]
+    #         idx_2 = [[j for j in range(i, i + config.segment_size)] for i in idx_st_2]
+    #         reward_1 = np.sum(dataset["rewards"][idx_1], axis=1)
+    #         reward_2 = np.sum(dataset["rewards"][idx_2], axis=1)
+    #         for i in range(len(raw_labels)):
+    #             if raw_labels[i] == 1:
+    #                 labels.append([1, 0])
+    #             elif raw_labels[i] == 2:
+    #                 labels.append([0.5, 0.5])
+    #             elif raw_labels[i] == 3:
+    #                 labels.append([0, 1])
+    #         labels = np.array(labels)
+    #     if np.all(labels[0] == [1, 0]):
+    #         group_1, group_2 = [(idx_st_1[0], reward_1[0])], [
+    #             (idx_st_2[0], reward_2[0])
+    #         ]
+    #         single_ranked_list.append(group_2)
+    #         single_ranked_list.append(group_1)
+    #         up = -1
+    #     elif np.all(labels[0] == [0.5, 0.5]):
+    #         group = [(idx_st_1[0], reward_1[0]), (idx_st_2[0], reward_2[0])]
+    #         single_ranked_list.append(group)
+    #         up = 0
+    #     elif np.all(labels[0] == [0, 1]):
+    #         group_1, group_2 = [(idx_st_1[0], reward_1[0])], [
+    #             (idx_st_2[0], reward_2[0])
+    #         ]
+    #         single_ranked_list.append(group_1)
+    #         single_ranked_list.append(group_2)
+    #         up = 1
+    #     for i in range(1, len(labels)):
+    #         if np.all(labels[i] == [1, 0]):
+    #             group_1, group_2 = [(idx_st_1[i], reward_1[i])], [
+    #                 (idx_st_2[i], reward_2[i])
+    #             ]
+    #             curr_up = -1
+    #             if up == curr_up or up == 0:
+    #                 # insert front of single_ranked_list
+    #                 single_ranked_list.insert(0, group_2)
+    #                 up = -1
+    #             else:
+    #                 multiple_ranked_list.append(single_ranked_list)
+    #                 single_ranked_list = []
+    #                 single_ranked_list.append(group_2)
+    #                 single_ranked_list.append(group_1)
+    #                 up = -1
+    #         elif np.all(labels[i] == [0.5, 0.5]):
+    #             if up == -1:
+    #                 single_ranked_list[0].append((idx_st_2[i], reward_2[i]))
+    #             else:
+    #                 single_ranked_list[-1].append((idx_st_2[i], reward_2[i]))
+    #         elif np.all(labels[i] == [0, 1]):
+    #             group_1, group_2 = [(idx_st_1[i], reward_1[i])], [
+    #                 (idx_st_2[i], reward_2[i])
+    #             ]
+    #             curr_up = 1
+    #             if up == curr_up or up == 0:
+    #                 single_ranked_list.append(group_2)
+    #                 up = 1
+    #             else:
+    #                 multiple_ranked_list.append(single_ranked_list)
+    #                 single_ranked_list = []
+    #                 single_ranked_list.append(group_1)
+    #                 single_ranked_list.append(group_2)
+    #                 up = 1
+    #     multiple_ranked_list.append(single_ranked_list)
     return multiple_ranked_list
 
 
@@ -984,8 +1088,10 @@ def obtain_labels(dataset, idx_1, idx_2, segment_size=25, threshold=0.5, noise=0
         labels = []
         reward_1 = np.sum(dataset["rewards"][idx_1], axis=1)
         reward_2 = np.sum(dataset["rewards"][idx_2], axis=1)
-        labels = np.where(reward_1 < reward_2, 1, 0)
+        # labels = np.where(reward_1 < reward_2, 1, 0)
+        labels = np.where(reward_1 > reward_2, 1, 0) 
         labels = np.array([[1, 0] if i == 0 else [0, 1] for i in labels]).astype(float)
+        
         
     gap = segment_size * threshold
 
@@ -1360,7 +1466,7 @@ def compute_full_dtw_matrix(segments: List[Dict], use_relative_eef: bool, use_go
                 # Extract EE positions (assuming first 3 dimensions are EE positions)
                 query = segments[i]["obs"].numpy()[:, :3]
                 reference = segments[j]["obs"].numpy()[:, :3]
-                import ipdb; ipdb.set_trace()
+                
                 if use_goal_pos:
                     query = np.concatenate((query, segments[i]["obs"].numpy()[:, 36:]), axis=1)
                     reference = np.concatenate((reference, segments[j]["obs"].numpy()[:, 36:]), axis=1)
