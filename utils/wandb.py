@@ -73,7 +73,7 @@ def log_query_videos_to_wandb(dataset, idx_st_1, idx_st_2, labels, config, prefi
             # Overlay reward labels on each frame
             font = cv2.FONT_HERSHEY_SIMPLEX
             font_scale = 0.2
-            font_color = (0, 0, 0)  # Black text
+            font_color = (255, 255, 255)
             thickness = 1
             
             for i in range(num_frames):

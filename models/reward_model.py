@@ -353,108 +353,83 @@ class RewardModel:
         return trajectory_starts, trajectory_ends
 
     def val_trajectory_viz(self, dataset, name, epoch=0):
-        """Create visualization of reward predictions for full trajectory comparisons."""
-        # Get rewards for full trajectories
+        """
+        Visualize predicted vs ground truth rewards for each test trajectory in dataset.
+        """
+        # Get predicted rewards for all test trajectories
         trajectory_rewards = self.get_trajectory_rewards(dataset, self.test_episodes)
-        videos = []
 
-        terminals = self.dataset.get('terminals', None)
+        # Dataset info
+        terminals = self.dataset['terminals']
+        gt_rewards_all = self.dataset['rewards']
+
+        min_rew = gt_rewards_all.min()
+        max_rew = gt_rewards_all.max()
+
+        images_all = dataset["images"]
         trajectory_starts, trajectory_ends = self._get_trajectory_boundaries(terminals)
 
-        # Use sequential trajectory pairs: (0,1), (2,3), (4,5), ...
-        num_pairs = len(trajectory_rewards)//2
+        videos = []
 
-        for pair_idx in range(num_pairs):
-            
-            traj1_test_idx = pair_idx * 2
-            traj2_test_idx = pair_idx * 2 + 1
+        for i, traj_idx in enumerate(self.test_episodes):
+            pred_rewards = np.array(trajectory_rewards[i])
 
-            r1 = np.array(trajectory_rewards[traj1_test_idx])
-            r2 = np.array(trajectory_rewards[traj2_test_idx])
+            # Trajectory start/end
+            traj_start = trajectory_starts[traj_idx]
+            traj_end = trajectory_ends[traj_idx]
 
-            traj1_idx = self.test_episodes[traj1_test_idx]
-            traj2_idx = self.test_episodes[traj2_test_idx]
+            # Ground truth rewards and images for this trajectory
+            gt_rewards = gt_rewards_all[traj_start:traj_end]
+            traj_images = images_all[traj_start:traj_end]
 
-            traj1_length = trajectory_ends[traj1_idx] - trajectory_starts[traj1_idx]
-            traj2_length = trajectory_ends[traj2_idx] - trajectory_starts[traj2_idx]
+            assert len(pred_rewards) == len(gt_rewards)
 
-            assert traj1_length == len(r1) and traj2_length == len(r2)
+            # Mean rewards
+            total_pred_reward = np.mean(pred_rewards)
+            total_gt_reward = np.mean(gt_rewards)
 
-            total_reward1 = np.mean(r1)
-            total_reward2 = np.mean(r2)
-
-            pred_pref = 1 if total_reward1 > total_reward2 else 0
-
-            # Create visualization
-            fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(15, 4), 
-                                            gridspec_kw={'width_ratios': [1.2, 1, 1]})
+            # Create figure: left = reward curves, right = trajectory image
+            fig, (ax_plot, ax_img) = plt.subplots(1, 2, figsize=(12, 4))
             fig.subplots_adjust(wspace=0.3, left=0.05, right=0.95, top=0.9, bottom=0.1)
 
-            # Setup plot
-            ax1.set_title(f"Pred={pred_pref} (T1: {total_reward1:.3f}, T2: {total_reward2:.3f})", fontsize=10)
-            ax1.set_xlabel("Timestep", fontsize=9)
-            ax1.set_ylabel("Reward", fontsize=9)
-            ax1.grid(True, alpha=0.3)
+            ax_plot.set_title(f"Pred: {total_pred_reward:.3f}, GT: {total_gt_reward:.3f}", fontsize=10)
+            ax_plot.set_xlabel("timestep", fontsize=9)
+            ax_plot.set_ylabel("reward", fontsize=9)
+            ax_plot.grid(True, alpha=0.3)
+            ax_plot.set_xlim(0, len(gt_rewards) - 1)
+            ax_plot.set_ylim(min_rew - 0.1, max_rew + 0.1)
 
             # Plot lines
-            line1, = ax1.plot([], [], label="Traj 1", color="blue")
-            line2, = ax1.plot([], [], label="Traj 2", color="red")
-            ax1.legend(loc="upper right", fontsize=8)
+            pred_line, = ax_plot.plot([], [], label="Predicted", color="blue")
+            gt_line, = ax_plot.plot([], [], label="Ground Truth", color="red")
+            ax_plot.legend(loc="upper right", fontsize=8)
 
-            # Setup image displays
-            ax2.set_title("Trajectory 1", fontsize=10)
-            ax2.axis('off')
-            img1 = ax2.imshow(np.zeros((64, 64, 3)), animated=True)
+            # Image display
+            ax_img.set_title("Trajectory", fontsize=10)
+            ax_img.axis('off')
+            img_display = ax_img.imshow(np.zeros_like(traj_images[0]), animated=True)
 
-            ax3.set_title("Trajectory 2", fontsize=10)
-            ax3.axis('off')
-            img2 = ax3.imshow(np.zeros((64, 64, 3)), animated=True)
-
-            # Set plot limits based on actual trajectory lengths
-            max_len = max(len(r1), len(r2))
-            ax1.set_xlim(0, max_len-1)
-            ax1.set_ylim(-1, 1)
-
+            # Animation functions
             def init():
-                line1.set_data([], [])
-                line2.set_data([], [])
-                img1.set_data(np.zeros((64, 64, 3)))
-                img2.set_data(np.zeros((64, 64, 3)))
-                return line1, line2, img1, img2
+                pred_line.set_data([], [])
+                gt_line.set_data([], [])
+                img_display.set_data(np.zeros_like(traj_images[0]))
+                return pred_line, gt_line, img_display
 
             def animate(frame):
-                # Plot rewards up to current frame
-                if frame < len(r1):
-                    x1 = np.arange(frame + 1)
-                    y1 = r1[:frame + 1]
-                    line1.set_data(x1, y1)
-                    
-                    # Update image for trajectory 1
-                    img_idx1 = trajectory_starts[traj1_idx] + frame
-                    if img_idx1 < len(dataset["images"]):
-                        img1_data = dataset["images"][img_idx1]
-                        if img1_data.max() > 1.0:
-                            img1_data = img1_data / 255.0
-                        img1.set_data(img1_data)
-                
-                if frame < len(r2):
-                    x2 = np.arange(frame + 1)
-                    y2 = r2[:frame + 1]
-                    line2.set_data(x2, y2)
-                    
-                    # Update image for trajectory 2
-                    img_idx2 = trajectory_starts[traj2_idx] + frame
-                    if img_idx2 < len(dataset["images"]):
-                        img2_data = dataset["images"][img_idx2]
-                        if img2_data.max() > 1.0:
-                            img2_data = img2_data / 255.0
-                        img2.set_data(img2_data)
+                x = np.arange(frame + 1)
+                pred_line.set_data(x, pred_rewards[:frame+1])
+                gt_line.set_data(x, gt_rewards[:frame+1])
 
-                return line1, line2, img1, img2
+                img = traj_images[frame]
+                if img.max() > 1.0:
+                    img = img / 255.0
+                img_display.set_data(img)
 
-            # Create animation with correct frame count
+                return pred_line, gt_line, img_display
+
             ani = animation.FuncAnimation(
-                fig, animate, init_func=init, frames=max_len,
+                fig, animate, init_func=init, frames=len(gt_rewards),
                 interval=100, blit=True
             )
 
@@ -462,22 +437,22 @@ class RewardModel:
             with tempfile.NamedTemporaryFile(suffix='.mp4', delete=False) as tmp:
                 ani.save(tmp.name, writer="ffmpeg", fps=10)
                 with open(tmp.name, 'rb') as f:
-                    buf = io.BytesIO(f.read())
+                    video_buf = io.BytesIO(f.read())
             os.unlink(tmp.name)
-
             plt.close(fig)
-            buf.seek(0)
+
+            # Add to wandb videos
+            video_buf.seek(0)
             videos.append(
                 wandb.Video(
-                    buf,
-                    caption=f"Pred={pred_pref} (T1: {total_reward1:.3f}, T2: {total_reward2:.3f})",
+                    video_buf,
+                    caption=f"Traj {traj_idx} | Pred: {total_pred_reward:.3f}, GT: {total_gt_reward:.3f}",
                     format="mp4"
                 )
             )
 
-        if len(videos) > 0:
-            wandb.log({f"{name}/full_trajectory_videos": videos}, step=epoch)
-
+        if videos:
+            wandb.log({f"{name}/trajectory_videos": videos}, step=epoch)
 
     def eval(self, obs_act_1, obs_act_2, labels, binary_labels, name, epoch, images1=None, images2=None):
         """Evaluate the ensemble of distributional reward models."""
@@ -584,9 +559,8 @@ class RewardModel:
             
             max_len = max(len(r1), len(r2))
             ax1.set_xlim(0, max_len-1)
-            ax1.set_ylim(-1, 1)
+            ax1.set_ylim(0, 1)
 
-            
             def init():
                 line1.set_data([], [])
                 line2.set_data([], [])

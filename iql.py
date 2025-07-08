@@ -753,7 +753,7 @@ def train(config):
 
     # Print model architecture after model initialization
     print("\n" + "=" * 50)
-    print("MODEL ARCHITECTURE:")
+    print("Model Network:")
     print("=" * 50)
     print("Q-Network (TwinQ):")
     print(q_network)
@@ -800,7 +800,7 @@ def train(config):
         if (t + 1) % config.eval_freq == 0:
             print(f"Eval at step: {t + 1}")
 
-            eval_scores, eval_success, eval_frames = eval_actor(
+            eval_mean_rewards, eval_success, eval_frames = eval_actor(
                 env,
                 # env_fn,
                 actor,
@@ -808,19 +808,19 @@ def train(config):
                 config.seed,
                 record_video=config.record_video,
             )
-            eval_score = eval_scores.mean()  # For DMControl
+            eval_mean_rewards = eval_mean_rewards.mean()  # For DMControl
             eval_success = eval_success.mean() * 100  # For MetaWorld
             print("---------------------------------------")
             print(
                 f"Evaluation over {config.n_episodes} episodes: "
-                f"{eval_score:.3f} , success: {eval_success:.3f}"
+                f"{eval_mean_rewards:.3f} , success: {eval_success:.3f}"
             )
             print("---------------------------------------")
             
             # Log metrics to wandb
             wandb.log(
                 {
-                    "eval/eval_score": eval_score,
+                    "eval/eval_mean_rewards": eval_mean_rewards,
                     "eval/eval_success": eval_success,
                 },
                 step=trainer.total_it,

@@ -3,7 +3,7 @@ import os
 import random
 import time
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import List, Tuple
 
 import gym
 import imageio
@@ -1002,63 +1002,43 @@ def eval_actor(
     # TODO: implement parallel
     actor.eval()
 
-    episode_rewards = []
+    episode_mean_rewards = []
     episode_success_list = []
     episode_frames = []
     
     for i in range(n_episodes):
-        reward, success, frames = _eval_episode(
+        mean_reward, success, frames = _eval_episode(
             env, 
             actor, 
             max_steps, 
             seed + (i * 5),
-            record_video=record_video and i < 5,  # Record up to 5 episodes
+            record_video=record_video # and i < 5,  # Record up to 5 episodes
         )
-        episode_rewards.append(reward)
+        episode_mean_rewards.append(mean_reward)
         episode_success_list.append(success)
         episode_frames.append(frames)
 
     actor.train()
-    
-    return np.array(episode_rewards), np.array(episode_success_list), episode_frames
+
+    return np.array(episode_mean_rewards), np.array(episode_success_list), episode_frames
 
 
 def _eval_episode(env, actor, max_steps, seed, record_video=False, device="cuda"):
     """Helper function to evaluate a single episode."""
     env.seed(seed)
-    
-    # Setup video recording if requested
-    frames = []
-    if record_video:
-        try:
-            frame = env.render(mode="rgb_array")
-            frames.append(frame)
-        except Exception as e:
-            print(f"Warning: Could not capture initial frame: {e}")
-    
     state, info = env.reset()
+
+    # Setup video recording if requested
+    frames = [env.render(mode="rgb_array")] if record_video else None
     
     episode_reward = 0.0
     episode_success = False
     steps = 0
 
     while steps < max_steps:
-        # action = actor.act(state)
-        actions = actor.sample(torch.from_numpy(state).unsqueeze(0).float().to(device))
-
-        if isinstance(actions, torch.Tensor):
-            # Convert gripper logits to binary action
-            arm_actions = actions[..., :-1]
-            gripper_logits = actions[..., -1:]
-            gripper_action = torch.where(gripper_logits > 0.0,  # >0 -> close (1)
-                                    torch.tensor(1.0, device=gripper_logits.device),
-                                    torch.tensor(-1.0, device=gripper_logits.device))
-            actions = torch.cat([arm_actions, gripper_action], dim=-1)
-            actions = actions.squeeze().cpu().numpy()  # Convert to numpy
-
-        action = actions
+        action = actor.sample(torch.from_numpy(state).unsqueeze(0).to(device)).squeeze().cpu().numpy()
         state, reward, terminated, truncated, info = env.step(action)
-        if record_video:
+        if frames:
             frame = env.render(mode="rgb_array")
             frames.append(frame)
         steps += 1        
@@ -1067,17 +1047,11 @@ def _eval_episode(env, actor, max_steps, seed, record_video=False, device="cuda"
         # Check for success
         if "success" in info:
             episode_success = episode_success or info["success"]
-        
-        # Record frame if recording
-        if record_video:
-            frame = env.render(mode="rgb_array")
-            frames.append(frame)
-
 
         if episode_success:
             break
-            
-    return episode_reward, int(episode_success), frames if record_video else None
+    
+    return episode_reward / steps, int(episode_success), frames
 
 
 # def _eval_episode(env, actor, max_steps, seed, seq_len=None, record_video=False):

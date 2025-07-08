@@ -180,7 +180,8 @@ def train(config: DictConfig):
         reward_model.save_test_dataset(val_obs_act_1, val_obs_act_2, target_labels, target_labels, val_images1, val_images2)
         reward_model.train_model()
         
-    elif getattr(config, 'use_dtw_augmentations', False):
+    elif config.use_dtw:
+        import ipdb; ipdb.set_trace()
         # Load source and target segment indices
         data_path = Path(config.data_path)
         seg_indices_path = data_path.parent / "segment_start_end_indices.npy"
@@ -188,6 +189,7 @@ def train(config: DictConfig):
         target_data_path = Path(config.target_data_path)
         seg_indices_path = target_data_path.parent / "segment_start_end_indices.npy"
         target_seg_indices = np.load(seg_indices_path, allow_pickle=True)
+        import ipdb; ipdb.set_trace()
 
         # Compute cross-embodiment DTW matrix
         cross_dtw_matrix = compute_dtw_matrix_cross(dataset, seg_indices, target_dataset, target_seg_indices, config, train_images1, train_images2)
@@ -266,14 +268,14 @@ def build_rm_checkpoint_path(config: DictConfig) -> str:
         f"fn_{config.feedback_num}",
         f"gt_{int(config.use_gt_prefs)}",
         f"eef_{int(config.eef_rm)}",
-        f"dtw_{int(config.use_dtw_augmentations)}",
+        f"dtw_{int(config.use_dtw)}",
         f"s_{config.seed}",
         # f"dist_{int(config.use_distributional_model)}"
     ]
     
     # checkpoint_components.append(f"s_{getattr(config, 'seed', 0)}")
 
-    # if getattr(config, 'use_dtw_augmentations', False):
+    # if getattr(config, 'use_dtw', False):
     #     checkpoint_components.append(f"dtw_k_{getattr(config, 'dtw_k_augment', None)}")
     
     checkpoints_name = "/".join(checkpoint_components)

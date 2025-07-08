@@ -127,7 +127,7 @@ def get_feedbacks(data_path, num_prefs, human=False):
         all_rewards = np.array(all_rewards)
 
         # Generate ground truth preferences for all segment pairs
-        equal_threshold = 1e-2  # Threshold for considering equal preferences
+        # equal_threshold = 1e-5  # Threshold for considering equal preferences
         prefs = []
 
         for i, (seg1, seg2) in enumerate(tqdm(seg_pairs, desc="Generating ground truth preferences from rewards (TRAIN)")):
@@ -139,9 +139,9 @@ def get_feedbacks(data_path, num_prefs, human=False):
             seg2_reward = np.sum(all_rewards[seg2_start:seg2_end])
             
             # Create preference based on rewards
-            if np.abs(seg1_reward - seg2_reward) < equal_threshold:  # Equal rewards
-                preference = 'equal'
-            elif seg1_reward > seg2_reward:
+            # if np.abs(seg1_reward - seg2_reward) < equal_threshold:  # Equal rewards
+            #     preference = 'equal'
+            if seg1_reward > seg2_reward:
                 preference = 'A'  # First segment preferred
             else:
                 preference = 'B'  # Second segment preferred

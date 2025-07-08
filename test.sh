@@ -18,7 +18,7 @@ noise=0.0           # probability of preference labels (0.0 is noiseless label a
 human=False         # [True, False]: use human feedback or not
 
 # augmentation settings
-use_dtw_augmentations=True
+use_dtw=True
 dtw_subsample_size=20000
 dtw_augmentation_size=2000
 dtw_k_augment=1 # How many augmentations to generate for each source human
@@ -41,7 +41,7 @@ for seed in "${seeds[@]}"; do
     --data_quality=$data_quality --feedback_num=$feedback_num --q_budget=$q_budget --feedback_type=$feedback_type --model_type=$model_type \
     --threshold=$threshold --activation=$activation --epochs=$epochs --noise=$noise --seed=$seed \
     --segment_size=$segment_size --data_aug=$data_aug  --ensemble_num=$ensemble_num --ensemble_method=$ensemble_method --batch_size=$batch_size \
-    --use_dtw_augmentations=$use_dtw_augmentations --dtw_subsample_size=$dtw_subsample_size --dtw_augmentation_size=$dtw_augmentation_size \
+    --use_dtw=$use_dtw --dtw_subsample_size=$dtw_subsample_size --dtw_augmentation_size=$dtw_augmentation_size \
     --dtw_k_augment=$dtw_k_augment --acquisition_threshold_low=$acquisition_threshold_low --acquisition_threshold_high=$acquisition_threshold_high \
     --dtw_augment_before_training=$dtw_augment_before_training --use_goal_pos=$use_goal_pos --use_relative_eef=$use_relative_eef --use_gt_prefs=$use_gt_prefs \
     --data_path=$data_path --target_data_path=$data_path
@@ -51,7 +51,7 @@ for seed in "${seeds[@]}"; do
     --data_quality=$data_quality --feedback_num=$feedback_num --q_budget=$q_budget --feedback_type=$feedback_type --model_type=$model_type \
     --threshold=$threshold --activation=$activation --epochs=$epochs --noise=$noise --seed=$seed \
     --segment_size=$segment_size --data_aug=$data_aug --ensemble_num=$ensemble_num --ensemble_method=$ensemble_method \
-    --use_dtw_augmentations=$use_dtw_augmentations --dtw_subsample_size=$dtw_subsample_size --dtw_augmentation_size=$dtw_augmentation_size \
+    --use_dtw=$use_dtw --dtw_subsample_size=$dtw_subsample_size --dtw_augmentation_size=$dtw_augmentation_size \
     --dtw_k_augment=$dtw_k_augment --acquisition_threshold_low=$acquisition_threshold_low --acquisition_threshold_high=$acquisition_threshold_high \
     --dtw_augment_before_training=$dtw_augment_before_training --data_path=$data_path --use_gt_prefs=$use_gt_prefs
 done

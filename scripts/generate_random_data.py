@@ -16,14 +16,14 @@ import utils_env
 
 def main():
     # define this
-    expert_data_path = "/tmp/mimicgen_stack_100/stack/demo_src_stack_task_D0_r_Panda/demo.hdf5"
+    expert_data_path = "/tmp/mimicgen_stack_1000/stack/demo_src_stack_task_D0_r_Sawyer/demo_success.hdf5"
     
     # expert/suboptimal split
     expert_trajs = 100
     suboptimal_trajs = 100
 
     # randomness of data
-    noise_std = 1.0
+    noise_std = 0.8
 
     # make name
     name = f"demo_exp-{expert_trajs}_sub-{suboptimal_trajs}_noise-{noise_std}.hdf5"
@@ -96,7 +96,7 @@ def main():
                     f"Expert - Reward: {rew:.2f}",
                     (10, 30),
                     cv2.FONT_HERSHEY_SIMPLEX,
-                    0.5,
+                    0.2,
                     (0, 255, 0),
                     1,
                     cv2.LINE_AA
@@ -163,7 +163,7 @@ def main():
                     f"Reward: {rew:.2f}",
                     (10, 30),  # position (x, y)
                     cv2.FONT_HERSHEY_SIMPLEX,
-                    0.5,           # font scale (smaller)
+                    0.2,           # font scale (smaller)
                     (0, 255, 0),   # color (B, G, R)
                     1,             # thickness (you can also reduce this)
                     cv2.LINE_AA

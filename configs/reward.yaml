@@ -21,10 +21,10 @@ human: false
 # MLP
 epochs: 6000
 batch_size: 256
-activation: tanh
+activation: sigmoid
 lr: 1e-3
 hidden_sizes: 128
-dropout: 0.5
+dropout: 0.4
 n_layers: 1
 ensemble_num: 3 # not using active querying for now
 ensemble_method: mean
@@ -32,8 +32,9 @@ use_distributional_model: false # Use distributional reward model
 
 # Reward model
 use_gt_prefs: false # GT
+use_dtw: false # DTW X-augs
 eef_rm: false # 3D EEF RM
-use_dtw_augmentations: false # DTW augs
+
 dtw_k_augment: 1
 
 # Data
