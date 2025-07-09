@@ -3,9 +3,9 @@
 data_path="/scr/shared/datasets/robot_pref/stack_mixed/stack_mixed.hdf5"
 
 use_wandb=True
-seeds=(51)
-record_video=True
-trivial_reward=(0)
+seeds=(40 41 42 43 44 45)
+record_video=False
+trivial_reward=(1)
 
 # iql_tau=0.3
 # beta=0.5

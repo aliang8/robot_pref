@@ -181,64 +181,6 @@ def set_seed(
     torch.use_deterministic_algorithms(deterministic_torch)
 
 
-
-
-
-def return_reward_range(dataset, max_episode_steps):
-    returns, lengths = [], []
-    ep_ret, ep_len = 0.0, 0
-    for r, d in zip(dataset["rewards"], dataset["terminals"]):
-        ep_ret += float(r)
-        ep_len += 1
-        if d or ep_len == max_episode_steps:
-            returns.append(ep_ret)
-            lengths.append(ep_len)
-            ep_ret, ep_len = 0.0, 0
-    lengths.append(ep_len)  # but still keep track of number of steps
-    assert sum(lengths) == len(dataset["rewards"])
-    return min(returns), max(returns)
-
-
-def modify_reward(
-    dataset,
-    max_episode_steps=1000,
-    trivial_reward=0,
-):
-    # if any(s in env_name for s in ("halfcheetah", "hopper", "walker2d")):
-    #     min_ret, max_ret = return_reward_range(dataset, max_episode_steps)
-    #     dataset["rewards"] /= max_ret - min_ret
-    #     dataset["rewards"] *= max_episode_steps
-    # elif "antmaze" in env_name:
-    #     dataset["rewards"] -= 1.0
-    min_ret, max_ret = return_reward_range(dataset, max_episode_steps)
-    # GT reward
-    if trivial_reward == 0:
-        # dataset["rewards"] = (dataset["rewards"] - min(dataset["rewards"])) / (
-        #     max(dataset["rewards"]) - min(dataset["rewards"])
-        # ) # TODO: no normalization for now
-        return
-    # zero reward
-    elif trivial_reward == 1:
-        dataset["rewards"] *= 0.0
-
-    else: 
-        return
-    # # random reward
-    # elif trivial_reward == 2:
-    #     dataset["rewards"] = (dataset["rewards"] - min(dataset["rewards"])) / (
-    #         max(dataset["rewards"]) - min(dataset["rewards"])
-    #     )
-    #     min_reward, max_reward = min(dataset["rewards"]), max(dataset["rewards"])
-    #     dataset["rewards"] = np.random.uniform(
-    #         min_reward, max_reward, size=dataset["rewards"].shape
-    #     )
-    # # negative reward
-    # elif trivial_reward == 3:
-    #     dataset["rewards"] = 1 - (dataset["rewards"] - min(dataset["rewards"])) / (
-    #         max(dataset["rewards"]) - min(dataset["rewards"])
-    #     )
-
-
 def asymmetric_l2_loss(u: torch.Tensor, tau: float) -> torch.Tensor:
     return torch.mean(torch.abs(tau - (u < 0).float()) * u**2)
 
@@ -709,6 +651,7 @@ def train(config):
         dataset["rewards"] *= 0.0
     # iql gt rewards
     else:
+        # dataset["rewards"][:11011] = 0 # zero out first half
         print("Using ground truth rewards (no reward model)")
 
     # if config.normalize_reward:
@@ -793,7 +736,6 @@ def train(config):
     for t in trange(int(config.max_timesteps)):
         batch = replay_buffer.sample(config.batch_size)
         log_dict = trainer.train(batch)
-
         # Log training/validation metrics
         wandb.log(log_dict, step=trainer.total_it) if wandb.run is not None else None
         # Evaluate episode
@@ -802,48 +744,51 @@ def train(config):
 
             eval_mean_rewards, eval_success, eval_frames = eval_actor(
                 env,
-                # env_fn,
                 actor,
                 config.n_episodes,
                 config.seed,
-                record_video=config.record_video,
+                record_video=config.record_video
             )
-            eval_mean_rewards = eval_mean_rewards.mean()  # For DMControl
-            eval_success = eval_success.mean() * 100  # For MetaWorld
+            eval_mean_reward = eval_mean_rewards.mean()
+            eval_mean_success = eval_success.mean()
             print("---------------------------------------")
             print(
                 f"Evaluation over {config.n_episodes} episodes: "
-                f"{eval_mean_rewards:.3f} , success: {eval_success:.3f}"
+                f"{eval_mean_reward:.3f} , success: {eval_mean_success * 100:.3f}"
             )
             print("---------------------------------------")
             
-            # Log metrics to wandb
-            wandb.log(
-                {
-                    "eval/eval_mean_rewards": eval_mean_rewards,
-                    "eval/eval_success": eval_success,
-                },
-                step=trainer.total_it,
-            ) if wandb.run is not None else None
-            
-            # Log videos to wandb if recording
-            if config.record_video:
-                for i, frames in enumerate(eval_frames):
-                    if frames is not None:
-                        episode_num = i + 1
-                        # Convert frames list to numpy array and transpose to (T, C, H, W)
+            # Log to wandb
+            if config.use_wandb:
+                # Metrics
+                wandb.log(
+                    {
+                        "eval/mean_rewards": eval_mean_reward,
+                        "eval/success": eval_mean_success,
+                    },
+                    step=trainer.total_it,
+                )
+
+                # Rollout vids
+                if config.record_video: 
+                    for i, frames in enumerate(eval_frames):
                         frames_array = np.stack(frames)  # (T, H, W, C)
                         frames_array = np.transpose(frames_array, (0, 3, 1, 2))  # (T, C, H, W)
+                        mean_reward = eval_mean_rewards[i]
+                        success = eval_success[i]
                         wandb.log(
                             {
-                                f"eval_vids/video_episode_{episode_num}": wandb.Video(
+                                f"eval_vids/ep_{i+1}": wandb.Video(
                                     frames_array,
                                     fps=30,
                                     format="mp4",
+                                    caption=f"Mean Reward: {mean_reward:.2f}, Success: {success:.2f}",
                                 )
                             },
                             step=trainer.total_it,
-                        ) if wandb.run is not None else None
+                        )
+
+                
             
             if (config.checkpoints_path is not None) and (t + 1) % (
                 20 * config.eval_freq

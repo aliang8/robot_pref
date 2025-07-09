@@ -96,13 +96,13 @@ def fetch_wandb_runs(
 
         history = None
         try:
-            history = run.history(keys=["eval/eval_success"])
+            history = run.history(keys=["eval/success"])
         except CommError:
             print(f"Run {run.name}")
             history = None
 
-        if not history.empty and "eval/eval_success" in history.columns:
-            success_rates = [rate/100 for rate in history["eval/eval_success"].dropna().tolist()]
+        if not history.empty and "eval/success" in history.columns:
+            success_rates = [rate for rate in history["eval/success"].dropna().tolist()]
             run_dict["history"] = {
                 "eval_success_rates": success_rates,
             }

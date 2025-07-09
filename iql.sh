@@ -4,17 +4,18 @@ feedback_num=1000
 
 # Data
 data_path="/scr/shared/datasets/robot_pref/stack_mixed/stack_mixed.hdf5"
-target_data_path=""
+target_data_path="" # x-emb
 
 # RM Methods
-eef_rm=false # 3D EEF RM
-use_dtw=false
-dtw_k_augment=1
 use_gt_prefs=true
-human=false # Use human feedback or gt rewards
+eef_rm=false
+use_dtw=false
+
+# Human or gt prefs
+human=true
 
 use_wandb=True
-seeds=(521 523 524 525 526)
+seeds=(40 41 42)
 
 for seed in "${seeds[@]}"; do
     (

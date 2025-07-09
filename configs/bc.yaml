@@ -15,7 +15,7 @@ normalize: true
 seed: 0
 
 data_path: null
-record_video: true
+record_video: false
 
 # wandb
 use_wandb: false

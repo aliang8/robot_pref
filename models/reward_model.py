@@ -397,7 +397,7 @@ class RewardModel:
             ax_plot.set_ylabel("reward", fontsize=9)
             ax_plot.grid(True, alpha=0.3)
             ax_plot.set_xlim(0, len(gt_rewards) - 1)
-            ax_plot.set_ylim(min_rew - 0.1, max_rew + 0.1)
+            ax_plot.set_ylim(-1, 1)
 
             # Plot lines
             pred_line, = ax_plot.plot([], [], label="Predicted", color="blue")
@@ -559,7 +559,7 @@ class RewardModel:
             
             max_len = max(len(r1), len(r2))
             ax1.set_xlim(0, max_len-1)
-            ax1.set_ylim(0, 1)
+            ax1.set_ylim(-1, 1)
 
             def init():
                 line1.set_data([], [])
@@ -678,8 +678,8 @@ class RewardModel:
             if epoch % 20 == 0 and wandb.run is not None:
                 wandb.log({"train/loss": train_loss}, step=epoch)
 
-            # Create training visualization every 1000 epochs
-            if epoch % 1000 == 0 and wandb.run is not None:
+            # Create training visualization every 2000 epochs
+            if epoch % 2000 == 0 and wandb.run is not None:
                 train_vis_data = []
                 
                 # Sample a few training examples for visualization
@@ -747,8 +747,8 @@ class RewardModel:
                     self.test_binary_labels,
                     "eval",
                     epoch,
-                    images1=self.test_images1 if hasattr(self, 'test_images1') and epoch % 1000 == 0 else None,
-                    images2=self.test_images2 if hasattr(self, 'test_images2') and epoch % 1000 == 0 else None,
+                    images1=self.test_images1 if hasattr(self, 'test_images1') and epoch % 2000 == 0 else None,
+                    images2=self.test_images2 if hasattr(self, 'test_images2') and epoch % 2000 == 0 else None,
                 )
 
 
@@ -1371,7 +1371,7 @@ class DistributionalRewardModel:
                 }, step=epoch)
 
             # Create training visualization every 1000 epochs
-            if epoch % 1000 == 0 and wandb.run is not None:
+            if epoch % 2000 == 0 and wandb.run is not None:
                 train_vis_data = []
                 
                 # Sample a few training examples for visualization
@@ -1418,7 +1418,7 @@ class DistributionalRewardModel:
                     self._create_visualization(train_vis_data, "train", epoch)
 
             # Create full trajectory visualization every 1000 epochs
-            if epoch % 1000 == 0 and wandb.run is not None and self.dataset is not None:
+            if epoch % 2000 == 0 and wandb.run is not None and self.dataset is not None:
                 self.create_full_trajectory_visualization(
                     self.dataset, 
                     name="train_full_trajectory", 
@@ -1441,8 +1441,8 @@ class DistributionalRewardModel:
                     self.test_binary_labels,
                     "eval",
                     epoch,
-                    images1=self.test_images1 if hasattr(self, 'test_images1') and epoch % 1000 == 0 else None,
-                    images2=self.test_images2 if hasattr(self, 'test_images2') and epoch % 1000 == 0 else None,
+                    images1=self.test_images1 if hasattr(self, 'test_images1') and epoch % 2000 == 0 else None,
+                    images2=self.test_images2 if hasattr(self, 'test_images2') and epoch % 2000 == 0 else None,
                 )
 
     def eval(self, obs_act_1, obs_act_2, labels, binary_labels, name, epoch, images1=None, images2=None):

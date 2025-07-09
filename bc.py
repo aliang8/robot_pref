@@ -203,51 +203,53 @@ def train(config):
         # Evaluate episode
         if (t + 1) % config.eval_freq == 0:
             print(f"Eval at step: {t + 1}")
-
             
             eval_mean_rewards, eval_success, eval_frames = eval_actor(
                 env,
-                # env_fn,
                 actor,
                 config.n_episodes,
                 config.seed,
                 record_video=config.record_video
             )
-            eval_mean_rewards = eval_mean_rewards.mean()  # For DMControl
-            eval_success = eval_success.mean() * 100  # For MetaWorld
+            eval_mean_reward = eval_mean_rewards.mean()
+            eval_mean_success = eval_success.mean()
             print("---------------------------------------")
             print(
                 f"Evaluation over {config.n_episodes} episodes: "
-                f"{eval_mean_rewards:.3f} , success: {eval_success:.3f}"
+                f"{eval_mean_reward:.3f} , success: {eval_mean_success * 100:.3f}"
             )
             print("---------------------------------------")
             
-            # Log metrics to wandb
-            wandb.log(
-                {
-                    "eval/eval_mean_rewards": eval_mean_rewards,
-                    "eval/eval_success": eval_success,
-                },
-                step=trainer.total_it,
-            ) if wandb.run is not None else None
-            
-            # Log videos to wandb if recording
-            if config.record_video:
-                for i, frames in enumerate(eval_frames):
-                    if frames is not None:
-                        # Convert frames list to numpy array and transpose to (T, C, H, W)
+            # Log to wandb
+            # Log to wandb
+            if config.use_wandb:
+                # Metrics
+                wandb.log(
+                    {
+                        "eval/mean_rewards": eval_mean_reward,
+                        "eval/success": eval_mean_success,
+                    },
+                    step=trainer.total_it,
+                )
+
+                # Rollout vids
+                if config.record_video: 
+                    for i, frames in enumerate(eval_frames):
                         frames_array = np.stack(frames)  # (T, H, W, C)
                         frames_array = np.transpose(frames_array, (0, 3, 1, 2))  # (T, C, H, W)
+                        mean_reward = eval_mean_rewards[i]
+                        success = eval_success[i]
                         wandb.log(
                             {
-                                f"eval_vids/video_episode_{i+1}": wandb.Video(
+                                f"eval_vids/ep_{i+1}": wandb.Video(
                                     frames_array,
                                     fps=30,
                                     format="mp4",
+                                    caption=f"Mean Reward: {mean_reward:.2f}, Success: {success:.2f}",
                                 )
                             },
                             step=trainer.total_it,
-                        ) if wandb.run is not None else None
+                        )
             
             if (config.checkpoints_path is not None) and (t + 1) % (
                 20 * config.eval_freq

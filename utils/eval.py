@@ -5,6 +5,7 @@ import time
 from pathlib import Path
 from typing import List, Tuple
 
+import cv2
 import gym
 import imageio
 import numpy as np
@@ -1011,7 +1012,7 @@ def eval_actor(
             env, 
             actor, 
             max_steps, 
-            seed + (i * 5),
+            seed + (i * 5), # so sequential seeds don't overlap
             record_video=record_video # and i < 5,  # Record up to 5 episodes
         )
         episode_mean_rewards.append(mean_reward)
@@ -1024,34 +1025,32 @@ def eval_actor(
 
 
 def _eval_episode(env, actor, max_steps, seed, record_video=False, device="cuda"):
-    """Helper function to evaluate a single episode."""
     env.seed(seed)
-    state, info = env.reset()
+    state, _ = env.reset()
 
-    # Setup video recording if requested
-    frames = [env.render(mode="rgb_array")] if record_video else None
-    
-    episode_reward = 0.0
-    episode_success = False
-    steps = 0
+    frames = [env.render(mode="rgb_array")] if record_video else []
+    total_reward, success = 0.0, False
 
-    while steps < max_steps:
-        action = actor.sample(torch.from_numpy(state).unsqueeze(0).to(device)).squeeze().cpu().numpy()
-        state, reward, terminated, truncated, info = env.step(action)
-        if frames:
+    for _ in range(max_steps):
+        action = actor.sample(torch.from_numpy(state).unsqueeze(0).to(device)).cpu().numpy()[0]
+        state, reward, _, _, info = env.step(action)
+        if record_video:
             frame = env.render(mode="rgb_array")
-            frames.append(frame)
-        steps += 1        
-        episode_reward += reward
-    
-        # Check for success
-        if "success" in info:
-            episode_success = episode_success or info["success"]
-
-        if episode_success:
+            gripper_action = action[-1]  # Assuming last action is gripper action
+            frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+            text = f"Gripper: {gripper_action:.3f}"
+            cv2.putText(frame_bgr, text, (5, 15),
+                        fontFace=cv2.FONT_HERSHEY_SIMPLEX, fontScale=0.2,
+                        color=(0, 255, 0), thickness=1, lineType=cv2.LINE_AA)
+            frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+            frames.append(frame_rgb)
+        total_reward += reward
+        if info.get("success", False):
+            success = True
             break
-    
-    return episode_reward / steps, int(episode_success), frames
+
+    mean_reward = total_reward / (len(frames) or max_steps)
+    return mean_reward, int(success), frames if record_video else None
 
 
 # def _eval_episode(env, actor, max_steps, seed, seq_len=None, record_video=False):
