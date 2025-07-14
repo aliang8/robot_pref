@@ -88,6 +88,8 @@ def load_preferences_from_directory(pref_dir):
     
     # Sort preferences by timestamp and get unique latest preference for each pair
     all_preferences.sort(key=lambda x: x['timestamp'])
+    all_preferences = all_preferences[500:] # TODO: remove this, just hack to use the second collected prefs
+
     unique_preferences = {}
     for pref in all_preferences:
         unique_preferences[pref['pair_index']] = pref

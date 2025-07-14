@@ -1,9 +1,13 @@
 import os
 import pickle as pkl
 
+import cv2
+import h5py
+
 # import dmc2gym
 # import metaworld.envs.mujoco.env_dict as _env_dict
 import numpy as np
+from tqdm import tqdm
 from gym.wrappers.time_limit import TimeLimit
 
 from rlkit.envs.wrappers import NormalizedBoxEnv
@@ -183,9 +187,7 @@ def Robomimic_dataset(data_path, return_images=False, clip_last=False):
     Load Robomimic dataset and build:
     If clip_last, we don't use the last transition for IQL
     """
-    import cv2
-    import h5py
-    import numpy as np
+    
 
     print(f"Loading data from: {data_path}")
 
@@ -198,10 +200,12 @@ def Robomimic_dataset(data_path, return_images=False, clip_last=False):
         all_rewards = []
         all_images = []
         all_terminals = []
+
+        all_goal_points = []
         
         print(f"Found {len(data.keys())} trajectories in dataset")
 
-        for demo in sorted(data.keys(), key=lambda x: int(x.split('_')[1])):
+        for demo in tqdm(sorted(data.keys(), key=lambda x: int(x.split('_')[1])), desc="Processing demos"):
             demo_data = data[demo]
             
             # Concatenate observation components
@@ -219,6 +223,8 @@ def Robomimic_dataset(data_path, return_images=False, clip_last=False):
                 acts = demo_data["actions"][:-1]
                 rewards = demo_data["rewards"][:-1]
                 images = demo_data["obs"]["agentview_image"][:-1]
+
+                goal_points = demo_data["goal_points"][:-1]
             else:
                 next_obs = obs
 
@@ -226,10 +232,14 @@ def Robomimic_dataset(data_path, return_images=False, clip_last=False):
                 rewards = demo_data["rewards"]
                 images = demo_data["obs"]["agentview_image"]
 
+                goal_points = demo_data["goal_points"]
+
             all_observations.append(obs)
             all_next_observations.append(next_obs)
             all_actions.append(acts)
             all_rewards.append(rewards)
+
+            all_goal_points.append(goal_points)
 
             if images.shape[1] != 84:
                 # Assuming images are in format (batch, height, width, channels)
@@ -250,21 +260,22 @@ def Robomimic_dataset(data_path, return_images=False, clip_last=False):
         rewards = np.concatenate(all_rewards, axis=0)
         images = np.concatenate(all_images, axis=0)
         terminals = np.concatenate(all_terminals, axis=0)
+        goal_points = np.concatenate(all_goal_points, axis=0)
 
     print(f"Total number of transitions: {len(observations)}")
+
     dataset = {
         'observations': observations,
         'next_observations': next_observations,
         'actions': actions,
         'rewards': rewards,
         'terminals': terminals,
+        'goal_points': goal_points,
     }
     if return_images:
         dataset['images'] = images
 
     return dataset
-
-
 
 
 def MetaWorld_dataset(config):

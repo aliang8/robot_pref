@@ -167,7 +167,6 @@ class ReplayBuffer:
         # I left it unimplemented since now we do not do fine-tuning.
         raise NotImplementedError
 
-
 def set_seed(
     seed: int, env: Optional[gym.Env] = None, deterministic_torch: bool = False
 ):
@@ -227,110 +226,6 @@ class MLP(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.net(x)
-
-
-class GaussianPolicy(nn.Module):
-    def __init__(
-        self,
-        state_dim: int,
-        act_dim: int,
-        max_action: float,
-        hidden_dim: int = 256,
-        n_hidden: int = 2,
-        dropout: Optional[float] = None,
-    ):
-        super().__init__()
-        # Main action network (excluding gripper)
-        self.net = nn.Sequential(
-            nn.Linear(state_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, act_dim - 1),  # Exclude gripper dimension
-            nn.Tanh(),
-        )
-    
-        # Separate gripper network - outputs a single value for binary classification
-        self.gripper_net = nn.Sequential(
-            nn.Linear(state_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, 1),
-            nn.Sigmoid(),  # Use sigmoid for binary classification
-        )
-        
-        self.log_std = nn.Parameter(torch.zeros(act_dim - 1, dtype=torch.float32))
-        self.max_action = max_action
-        self.min_std = 1e-6  # Minimum standard deviation for numerical stability
-
-    def forward(self, obs: torch.Tensor) -> Normal:
-        # Get main actions with Gaussian policy
-        main_actions = self.net(obs)
-        main_std = torch.exp(self.log_std.clamp(LOG_STD_MIN, LOG_STD_MAX))
-        main_std = main_std.unsqueeze(0).expand(obs.shape[0], -1)  # [batch_size, act_dim-1]
-        
-        # Get gripper action with binary classification
-        gripper_logits = self.gripper_net(obs)
-        gripper_action = 2 * gripper_logits - 1  # Convert to [-1, 1]
-        
-        # Combine actions
-        mean = torch.cat([main_actions, gripper_action], dim=-1)
-        # Use small positive std for gripper instead of zero
-        gripper_std = torch.full_like(gripper_action, self.min_std)
-        std = torch.cat([main_std, gripper_std], dim=-1)
-        
-        return Normal(mean, std)
-
-    @torch.no_grad()
-    def act(self, state: np.ndarray, device: str = "cpu"):
-        state = torch.tensor(state.reshape(1, -1), device=device, dtype=torch.float32)
-        dist = self(state)
-        action = dist.mean if not self.training else dist.sample()
-        
-        # Ensure gripper action is exactly -1 or 1
-        main_actions = action[:, :-1]
-        gripper_action = torch.sign(action[:, -1:])
-        action = torch.cat([main_actions, gripper_action], dim=-1)
-        
-        action = torch.clamp(
-            self.max_action * action, -self.max_action, self.max_action
-        )
-        return action.cpu().data.numpy().flatten()
-
-
-class DeterministicPolicy(nn.Module):
-    def __init__(
-        self,
-        state_dim: int,
-        act_dim: int,
-        max_action: float,
-        hidden_dim: int = 256,
-        n_hidden: int = 2,
-        dropout: Optional[float] = None,
-    ):
-        super().__init__()
-        self.net = MLP(
-            [state_dim, *([hidden_dim] * n_hidden), act_dim],
-            output_activation_fn=nn.Tanh,
-            dropout=dropout,
-        )
-        self.max_action = max_action
-
-    def forward(self, obs: torch.Tensor) -> torch.Tensor:
-        return self.net(obs)
-
-    @torch.no_grad()
-    def act(self, state: np.ndarray, device: str = "cpu"):
-        state = torch.tensor(state.reshape(1, -1), device=device, dtype=torch.float32)
-        return (
-            torch.clamp(
-                self(state) * self.max_action, -self.max_action, self.max_action
-            )
-            .cpu()
-            .data.numpy()
-            .flatten()
-        )
 
 
 class TwinQ(nn.Module):
@@ -614,13 +509,24 @@ def train(config):
     action_dim = env.action_space.shape[0]
 
     if config.normalize:
-        state_mean, state_std = compute_mean_std(dataset["observations"], eps=1e-5)
-        dataset["observations"] = normalize_states(
-            dataset["observations"], state_mean, state_std
-        )
-        dataset["next_observations"] = normalize_states(
-            dataset["next_observations"], state_mean, state_std
-        )
+        state_mean = dataset["observations"].mean(axis=0)
+        state_std = dataset["observations"].std(axis=0) + 1e-8
+
+        # Bound the std to prevent large values
+        min_std = 1e-2
+        state_std = np.maximum(state_std, min_std)
+
+        dataset["observations"] = (dataset["observations"] - state_mean) / state_std
+        dataset["next_observations"] = (dataset["next_observations"] - state_mean) / state_std
+
+        # max_action = np.abs(dataset["actions"]).max()
+        # dataset["actions"] = dataset["actions"] / max_action
+    else:
+        state_mean = 0
+        state_std = 1
+        # max_action = 1.0
+
+    max_action = float(env.action_space.high[0])
 
     # label with trained rm rewards
     if config.use_reward_model:
@@ -632,11 +538,7 @@ def train(config):
             dimension = dataset["observations"].shape[1] + dataset["actions"].shape[1] #TODO
         print(f"Using reward model with dimension {dimension}")
         
-        if config.use_distributional_model:
-            print("Using distributional model")
-            model = reward_model.DistributionalRewardModel(config, None, None, None, dimension)
-        else:
-            model = reward_model.RewardModel(config, None, None, None, None, dimension)
+        model = reward_model.RewardModel(config, None, None, None, None, dimension)
         
         # Use the helper function to build checkpoint path
         path = build_rm_checkpoint_path(config)
@@ -651,15 +553,13 @@ def train(config):
         dataset["rewards"] *= 0.0
     # iql gt rewards
     else:
-        # dataset["rewards"][:11011] = 0 # zero out first half
         print("Using ground truth rewards (no reward model)")
 
-    # if config.normalize_reward:
-    #     reward_mean = np.mean(dataset["rewards"])
-    #     reward_std = np.std(dataset["rewards"])
-    #     normalized_reward = (dataset["rewards"] - reward_mean) / reward_std
-
-    #     dataset["rewards"] = normalized_reward
+    if config.normalize_reward:
+        print("Normalizing rewards")
+        reward_mean = dataset["rewards"].mean(axis=0)
+        reward_std = dataset["rewards"].std(axis=0) + 1e-8
+        dataset["rewards"] = (dataset["rewards"] - reward_mean) / reward_std
 
     print_dataset_statistics(dataset)
 
@@ -692,7 +592,7 @@ def train(config):
         global_cond_dim=state_dim
     ).to(config.device)
 
-    actor = FlowPolicy(action_dim=action_dim, noise_pred_net=noise_pred_net)
+    actor = FlowPolicy(action_dim=action_dim, noise_pred_net=noise_pred_net, max_action=max_action).to(config.device)
 
     # Print model architecture after model initialization
     print("\n" + "=" * 50)
@@ -714,7 +614,7 @@ def train(config):
     actor_optimizer = torch.optim.Adam(actor.parameters(), lr=config.actor_lr)
 
     kwargs = {
-        "max_action": float(env.action_space.high[0]),
+        "max_action": max_action,
         "actor": actor,
         "actor_optimizer": actor_optimizer,
         "q_network": q_network,

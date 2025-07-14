@@ -125,15 +125,22 @@ def train(config):
         state_dim = env.observation_space.shape[0]
     action_dim = env.action_space.shape[0]
 
-
     if config.normalize:
-        state_mean, state_std = compute_mean_std(dataset["observations"], eps=1e-5)
-        dataset["observations"] = normalize_states(
-            dataset["observations"], state_mean, state_std
-        )
-        dataset["next_observations"] = normalize_states(
-            dataset["next_observations"], state_mean, state_std
-        )
+        state_mean = dataset["observations"].mean(axis=0)
+        state_std = dataset["observations"].std(axis=0) + 1e-8
+
+        # Bound the std to prevent large values
+        min_std = 1e-2
+        state_std = np.maximum(state_std, min_std)
+
+        dataset["observations"] = (dataset["observations"] - state_mean) / state_std
+        dataset["next_observations"] = (dataset["next_observations"] - state_mean) / state_std
+
+        # max_action = np.abs(dataset["actions"]).max()
+        # dataset["actions"] = dataset["actions"] / max_action
+    else:
+        state_mean = 0
+        state_std = 1
 
     print_dataset_statistics(dataset)
     
@@ -163,7 +170,7 @@ def train(config):
         global_cond_dim=state_dim
     ).to(config.device)
 
-    actor = FlowPolicy(action_dim=action_dim, noise_pred_net=noise_pred_net)
+    actor = FlowPolicy(action_dim=action_dim, noise_pred_net=noise_pred_net, max_action=max_action).to(config.device)
 
     # Print model architecture after model initialization
     print("\n" + "=" * 50)

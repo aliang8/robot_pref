@@ -246,7 +246,6 @@ def get_feedbacks(data_path, num_prefs, human=False):
 
     return labels, idx_st_1, idx_st_2, val_labels, val_idx_st_1, val_idx_st_2
 
-
 def collect_simple_pairwise_feedback(dataset, traj_total, config):
     """
     Simplified version of collect_feedback for independent pairwise feedback only.
@@ -2583,8 +2582,10 @@ def plot_individual_test_example_deltas(
         "n_total_examples": len(gt_deltas_normalized)
     }
 
+from utils import dtw
 
-def compute_dtw_matrix_cross(main_dataset, seg_indices, augmentation_dataset, target_seg_indices, config, use_relative_eef=False, use_goal_pos=False):
+
+def compute_dtw_matrix_cross(dataset, seg_indices, cross_dataset, cross_seg_indices, config):
     """
     Compute DTW distance matrix between main dataset segments and target dataset segments.
     
@@ -2604,56 +2605,77 @@ def compute_dtw_matrix_cross(main_dataset, seg_indices, augmentation_dataset, ta
     """
     print("\nComputing cross-dataset DTW matrix...")
     
-    # Import DTW module
-    from utils import dtw
-
     seg_indices = seg_indices[:, 0]  # Use only start indices for segments
-    target_seg_indices = target_seg_indices[:, 0]
+    cross_seg_indices = cross_seg_indices[:, 0]
 
     # Initialize distance matrix
-    n_main = len(seg_indices)
-    n_target = len(target_seg_indices)
-    distance_matrix = np.zeros((n_main, n_target))
+    n = len(seg_indices)
+    n_cross = len(cross_seg_indices)
+    distance_matrix = np.full((n, n_cross), np.inf) # default value is inf
     
     # Compute statistics for progress tracking
     min_dist = float("inf")
+    min_goal_dist = float("inf")
     max_dist = float("-inf")
+    max_goal_dist = float("-inf")
     sum_dist = 0
+    sum_goal_dist = 0
     count = 0
-    
-    total_comparisons = n_main * n_target
+
+    total_comparisons = n * n_cross
     with tqdm(total=total_comparisons, desc="Computing cross-dataset DTW distances") as pbar:
-        for i, main_idx in enumerate(seg_indices):
-            for j, target_idx in enumerate(target_seg_indices):
+        for i, idx in enumerate(seg_indices):
+            for j, cross_idx in enumerate(cross_seg_indices):
+
                 # Extract EE positions (assuming first 3 dimensions are EE positions)
-                main_query = main_dataset["observations"][main_idx:main_idx + config.segment_size, :3]
-                target_ref = augmentation_dataset["observations"][target_idx:target_idx + config.segment_size, :3]
-                
-                if use_goal_pos:
-                    main_query = np.concatenate((main_query, main_dataset["observations"][main_idx:main_idx + config.segment_size, 36:]), axis=1)
-                    target_ref = np.concatenate((target_ref, augmentation_dataset["observations"][target_idx:target_idx + config.segment_size, 36:]), axis=1)
-                
-                if use_relative_eef:
+                main_query = dataset["observations"][idx:idx + config.segment_size, :3]
+                target_ref = cross_dataset["observations"][cross_idx:cross_idx + config.segment_size, :3]
+
+                if config.use_goal_pos:
+                    goal_main_query = np.concatenate((main_query, dataset["goal_points"][idx:idx + config.segment_size, :]), axis=1)
+                    goal_target_ref = np.concatenate((target_ref, cross_dataset["goal_points"][cross_idx:cross_idx + config.segment_size, :]), axis=1)
+
+                if config.use_relative_eef:
                     main_query = main_query[1:] - main_query[:-1]
                     target_ref = target_ref[1:] - target_ref[:-1]
                 
                 try:
                     cost, _ = dtw.get_single_match(main_query, target_ref)
+                    goal_cost, _ = dtw.get_single_match(goal_main_query, goal_target_ref) if config.use_goal_pos else (cost, None)
                 except:
-                    assert False, "DTW failed"
-                
-                distance_matrix[i, j] = cost
-                
+                    print(f"Error computing DTW for segments {idx} and {cross_idx}. Something is wrong.")
+                    import ipdb; ipdb.set_trace()
+
+                # TODO: manually set values for now based on 
+                # Cross-dataset DTW distance statistics - Min: 4.41, Max: 267.66, Avg: 68.63
+                # Cross-dataset DTW goal distance statistics - Min: 10.90, Max: 275.71, Avg: 93.83
+                traj_norm = (cost - 4.41) / (267.66 - 4.41)
+                goal_norm = (goal_cost - 10.90) / (275.71 - 10.90)
+
+                final_cost = traj_norm + goal_norm
+
+                distance_matrix[i, j] = final_cost
+
                 # Update statistics
                 min_dist = min(min_dist, cost)
                 max_dist = max(max_dist, cost)
                 sum_dist += cost
+                if config.use_goal_pos:
+                    min_goal_dist = min(min_goal_dist, goal_cost)
+                    max_goal_dist = max(max_goal_dist, goal_cost)
+                    sum_goal_dist += goal_cost
+
+                
+
                 count += 1
 
                 pbar.update(1)
     
     avg_dist = sum_dist / count
+    avg_goal_dist = sum_goal_dist / count if count > 0 else 0
     print(f"Cross-dataset DTW distance statistics - Min: {min_dist:.2f}, Max: {max_dist:.2f}, Avg: {avg_dist:.2f}")
+    print(f"Cross-dataset DTW goal distance statistics - Min: {min_goal_dist:.2f}, Max: {max_goal_dist:.2f}, Avg: {avg_goal_dist:.2f}")
+    import ipdb; ipdb.set_trace()
 
     return distance_matrix
 

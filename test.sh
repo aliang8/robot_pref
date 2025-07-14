@@ -18,7 +18,7 @@ noise=0.0           # probability of preference labels (0.0 is noiseless label a
 human=False         # [True, False]: use human feedback or not
 
 # augmentation settings
-use_dtw=True
+use_cross=True
 dtw_subsample_size=20000
 dtw_augmentation_size=2000
 dtw_k_augment=1 # How many augmentations to generate for each source human
@@ -30,8 +30,8 @@ use_goal_pos=False
 use_relative_eef=False
 
 data_path="/scr/shared/datasets/robot_pref/lift_panda/lift_panda.hdf5"
-target_data_path="/scr/shared/datasets/robot_pref/lift_sawyer/lift_sawyer.hdf5"
-use_gt_prefs=True
+cross_data_path="/scr/shared/datasets/robot_pref/lift_sawyer/lift_sawyer.hdf5"
+single_emb=True
 
 seeds=(42 43 44)
 
@@ -41,17 +41,17 @@ for seed in "${seeds[@]}"; do
     --data_quality=$data_quality --feedback_num=$feedback_num --q_budget=$q_budget --feedback_type=$feedback_type --model_type=$model_type \
     --threshold=$threshold --activation=$activation --epochs=$epochs --noise=$noise --seed=$seed \
     --segment_size=$segment_size --data_aug=$data_aug  --ensemble_num=$ensemble_num --ensemble_method=$ensemble_method --batch_size=$batch_size \
-    --use_dtw=$use_dtw --dtw_subsample_size=$dtw_subsample_size --dtw_augmentation_size=$dtw_augmentation_size \
+    --use_cross=$use_cross --dtw_subsample_size=$dtw_subsample_size --dtw_augmentation_size=$dtw_augmentation_size \
     --dtw_k_augment=$dtw_k_augment --acquisition_threshold_low=$acquisition_threshold_low --acquisition_threshold_high=$acquisition_threshold_high \
-    --dtw_augment_before_training=$dtw_augment_before_training --use_goal_pos=$use_goal_pos --use_relative_eef=$use_relative_eef --use_gt_prefs=$use_gt_prefs \
-    --data_path=$data_path --target_data_path=$data_path
+    --dtw_augment_before_training=$dtw_augment_before_training --use_goal_pos=$use_goal_pos --use_relative_eef=$use_relative_eef --single_emb=$single_emb \
+    --data_path=$data_path --cross_data_path=$data_path
 
     echo "Running IQL with reward model for seed $seed"
     python3 iql.py --use_reward_model=True --config=configs/iql.yaml --env=$env \
     --data_quality=$data_quality --feedback_num=$feedback_num --q_budget=$q_budget --feedback_type=$feedback_type --model_type=$model_type \
     --threshold=$threshold --activation=$activation --epochs=$epochs --noise=$noise --seed=$seed \
     --segment_size=$segment_size --data_aug=$data_aug --ensemble_num=$ensemble_num --ensemble_method=$ensemble_method \
-    --use_dtw=$use_dtw --dtw_subsample_size=$dtw_subsample_size --dtw_augmentation_size=$dtw_augmentation_size \
+    --use_cross=$use_cross --dtw_subsample_size=$dtw_subsample_size --dtw_augmentation_size=$dtw_augmentation_size \
     --dtw_k_augment=$dtw_k_augment --acquisition_threshold_low=$acquisition_threshold_low --acquisition_threshold_high=$acquisition_threshold_high \
-    --dtw_augment_before_training=$dtw_augment_before_training --data_path=$data_path --use_gt_prefs=$use_gt_prefs
+    --dtw_augment_before_training=$dtw_augment_before_training --data_path=$data_path --single_emb=$single_emb
 done

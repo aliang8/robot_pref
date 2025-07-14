@@ -93,6 +93,7 @@ def get_single_match(query: np.ndarray, reference: np.ndarray):
             path (np.ndarray): Optimal warping path as array of (n, m) index pairs
     """
     distance_matrix = get_distance_matrix(query, reference)
+    
     accumulated_cost_matrix = compute_accumulated_cost_matrix_dtw(distance_matrix)
     path = compute_optimal_warping_path_dtw(accumulated_cost_matrix)
     cost = float(accumulated_cost_matrix[-1, -1])

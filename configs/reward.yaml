@@ -8,6 +8,7 @@ load_model: null
 feedback_num: 500 # Number of human preferences from the source dataset to use for augmentation
 test_feedback_num: 100 # Number of human preferences from the target dataset to use for testing
 
+# general
 data_quality: 5.0
 segment_size: 32
 normalize: true
@@ -18,11 +19,10 @@ feedback_type: RLT
 model_type: BT
 noise: 0.0
 human: false
-# MLP
 epochs: 6000
 batch_size: 256
-activation: sigmoid
-lr: 1e-3
+activation: none
+lr: 1e-4
 hidden_sizes: 128
 dropout: 0.3
 n_layers: 1
@@ -30,16 +30,19 @@ ensemble_num: 3 # not using active querying for now
 ensemble_method: mean
 use_distributional_model: false # Use distributional reward model
 
-# Reward model
-use_gt_prefs: false # GT
-use_dtw: false # DTW X-augs
+# methods
+single_emb: false # GT
+use_cross: false # DTW X-augs
 eef_rm: false # 3D EEF RM
 
+# cross preferences
+use_goal_pos: false # add goal position to the dtw segments
+use_relative_eef: false
 dtw_k_augment: 1
 
-# Data
+# data
 data_path: ""
-target_data_path: ""
+cross_data_path: ""
 
 # wandb
 use_wandb: false

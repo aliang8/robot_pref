@@ -267,7 +267,7 @@ def segment_episodes_random(data, segment_length, num_segments=None, val_split=0
             val_episodes.append((episode_idx, episode_len))
         episode_start_indices[episode_idx] = current_idx
         current_idx += episode_len
-    import ipdb; ipdb.set_trace()  # Debugging line to inspect train and val episodes
+    
     print(f"Using {len(train_episodes)} train episodes and {len(val_episodes)} val episodes")
     
     # Sample segments

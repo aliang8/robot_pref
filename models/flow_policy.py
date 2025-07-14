@@ -48,6 +48,7 @@ class FlowPolicy(nn.Module):
         self,
         action_dim,
         noise_pred_net,
+        max_action=1.0,
         num_train_steps=100,
         num_inference_steps=10,
         timeshift=1.0,
@@ -56,6 +57,8 @@ class FlowPolicy(nn.Module):
         self.action_dim = action_dim
         assert isinstance(noise_pred_net, NoisePredictionNet)
         self.noise_pred_net = noise_pred_net
+
+        self.max_action = max_action
 
         self.num_train_steps = num_train_steps
         self.num_inference_steps = num_inference_steps
@@ -81,6 +84,7 @@ class FlowPolicy(nn.Module):
             action = action + (tcont_next - tcont) * noise_pred
 
         return action
+        # return torch.clamp(action * self.max_action, -self.max_action, self.max_action)
 
     def forward(self, obs, action):
         """

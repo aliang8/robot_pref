@@ -3,13 +3,17 @@
 import itertools
 import os
 import pickle
+import shutil
 from pathlib import Path
 from typing import Dict, List
 
+import h5py
 import hydra
 import numpy as np
 import torch
+import torch.nn.functional as F
 from omegaconf import DictConfig, OmegaConf
+from tensordict import TensorDict
 from tqdm import tqdm
 
 import utils.dtw as dtw
@@ -17,8 +21,6 @@ from models.image_embedder import ImageEmbedder
 from utils.data import load_tensordict, segment_episodes_random
 from utils.seed import set_seed
 
-from pathlib import Path
-import shutil
 
 def copy_to_parent(output_dir: Path):
     for item in output_dir.iterdir():
@@ -140,6 +142,54 @@ def compute_image_embeddings(
     return embeddings
 
 
+def save_to_pt(data_path: str):
+    """
+    Save to tensordict format
+    """
+    with h5py.File(data_path, 'r') as f:
+        data = f["data"]
+        
+        total_len = 0
+        actions = []
+        episodes = []
+        images = []
+        obs = []
+        
+        for demo in sorted(data.keys(), key=lambda x: int(x.split('_')[1])):
+                
+            demo_data = data[demo]
+            demo_len = len(demo_data["actions"])
+            
+            actions.append(demo_data["actions"][:])
+            episodes.append(torch.full((demo_len,), int(demo.split('_')[1])))
+            images.append(demo_data["obs"]["agentview_image"][:])
+
+            # observation = ["robot0_eef_pos", "robot0_eef_quat", "robot0_gripper_qpos", "object"]
+            obs.append(np.concatenate([
+                demo_data["obs"]["robot0_eef_pos"][:],
+                demo_data["obs"]["robot0_eef_quat"][:], 
+                demo_data["obs"]["robot0_gripper_qpos"][:],
+                demo_data["obs"]["object"][:] # obs varies by task
+            ], axis=1))
+            
+            total_len += demo_len
+        
+        # Convert numpy arrays to tensors and concatenate all data
+        tensordict = TensorDict({
+            "action": torch.cat([torch.from_numpy(a).float() for a in actions]),
+            "episode": torch.cat(episodes),
+            "image": torch.cat([torch.from_numpy(img) for img in images]), 
+            "obs": torch.cat([torch.from_numpy(o).float() for o in obs]),
+        }, batch_size=torch.Size([]))
+        
+        print(tensordict)
+
+        # Save to data path but as a .pt instead of .hdf5
+        save_path = str(data_path).replace('.hdf5', '.pt')
+        print(f"saving to {save_path}")
+        torch.save(tensordict, save_path)
+
+
 @hydra.main(config_path="config_old", config_name="preprocess", version_base=None)
 def main(cfg: DictConfig):
     print("\n" + "=" * 50)
@@ -152,7 +202,11 @@ def main(cfg: DictConfig):
 
     # Set random seed
     set_seed(cfg.seed)
-    
+
+    # Convert data to tensordict format if necessary
+    if cfg.data.data_path.endswith('.hdf5'):
+        data = save_to_pt(cfg.data.data_path)
+
     # Set up input and output paths
     data_path = Path(cfg.data.data_path)
     output_dir = data_path.parent / f"seg_{cfg.data.segment_length}"

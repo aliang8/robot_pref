@@ -194,7 +194,7 @@ def plot_data_path_comparisons(df, output_dir="data_path_plots"):
     print(f"Found {len(data_paths)} unique data paths: {data_paths}")
 
     # Helper function to get config value with fallback to _content prefixed path
-    def get_config_value(row, config_key, default=None):
+    def get_config_value(row, config_key):
         """Get config value, trying direct path first, then _content prefixed path."""
         # Try direct path first
         if config_key in row:
@@ -204,9 +204,9 @@ def plot_data_path_comparisons(df, output_dir="data_path_plots"):
         content_key = f"_content.{config_key}"
         if content_key in row:
             return row[content_key]
-        
-        return default
 
+        return None
+        
     # Create a plot for each data path
     for data_path in data_paths:
         # Filter data for this data path, considering both "data_path" and "_content.data_path"
@@ -220,36 +220,33 @@ def plot_data_path_comparisons(df, output_dir="data_path_plots"):
         # Create separate groups for reward types
         def get_reward_type(row):
             # If BC in name, always "BC"
-            run_name = get_config_value(row, "run_name", "")
+            run_name = get_config_value(row, "run_name")
             if "bc" in run_name.lower():
                 return "BC"
             
-            # Helper to add Distributional tag
-            def add_tag(base, is_dist, feedback_num=None):
-                if is_dist:
-                    if feedback_num is not None:
-                        return f"{base} + Dist RM (NF={feedback_num})"
-                    return f"{base} + Dist RM"
-                else:
-                    if feedback_num is not None:
-                        return f"{base} (NF={feedback_num})"
-                    return base
+            feedback_num = get_config_value(row, "feedback_num")
 
-            is_dist = get_config_value(row, "use_distributional_model", False) is True
-            feedback_num = get_config_value(row, "feedback_num", False)
+            if get_config_value(row, "trivial_reward") == 1:
+                return "iql (0)"
+            elif get_config_value(row, "use_reward_model") is False:
+                return "gt rewards"
+            elif get_config_value(row, "human") is True:
+                return f"iql human prefs ({int(feedback_num)})"
+            elif get_config_value(row, "single_emb") is True:
+                return f"gt prefs ({int(feedback_num)})"
 
-            if get_config_value(row, "eef_rm", False) is True:
-                return add_tag("EEF RM", is_dist, feedback_num)
-            elif get_config_value(row, "use_gt_prefs", False) is True or get_config_value(row, "use_gt_aug_prefs", False) is True:
-                return add_tag("GT Prefs", is_dist, feedback_num)
-            elif get_config_value(row, "trivial_reward", None) == 1:
-                return add_tag("Zero Rewards", is_dist)
-            elif get_config_value(row, "trivial_reward", None) == 0:
-                return add_tag("GT Rewards", is_dist)
-            elif get_config_value(row, "trivial_reward", None) == 0:
-                return add_tag("Aug Prefs", is_dist, feedback_num)
-            else:
-                return "IQL_Zero"
+            # if get_config_value(row, "eef_rm", False) is True:
+            #     return add_tag("EEF RM", is_dist, feedback_num)
+            # elif get_config_value(row, "single_emb", False) is True or get_config_value(row, "use_gt_aug_prefs", False) is True:
+            #     return add_tag("GT Prefs", is_dist, feedback_num)
+            # elif get_config_value(row, "trivial_reward", None) == 1:
+            #     return add_tag("Zero Rewards", is_dist)
+            # elif get_config_value(row, "trivial_reward", None) == 0:
+            #     return add_tag("GT Rewards", is_dist)
+            # elif get_config_value(row, "trivial_reward", None) == 0:
+            #     return add_tag("Aug Prefs", is_dist, feedback_num)
+            # else:
+            #     return "IQL_Zero"
 
         path_df["reward_type"] = path_df.apply(get_reward_type, axis=1)
         
