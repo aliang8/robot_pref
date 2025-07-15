@@ -18,7 +18,7 @@ q_budget: 1
 feedback_type: RLT
 model_type: BT
 noise: 0.0
-human: false
+human: true
 epochs: 6000
 batch_size: 256
 activation: none

@@ -23,22 +23,24 @@ def wandb_init(config: dict) -> None:
     )
     wandb.run.save()
 
+
 def log_video_to_wandb(images, name, fps=8):
     """Log a sequence of images as a video to wandb."""
     if images is None or len(images) == 0:
         return
-    
+
     # Convert to (N, C, H, W) format if needed
     if len(images.shape) == 4:
         if images.shape[-1] == 3:
             images = images.transpose(0, 3, 1, 2)
-        
-        # Log the video
-        wandb.log({
-            name: wandb.Video(images, fps=fps, format="mp4")
-        })
 
-def log_query_videos_to_wandb(dataset, idx_st_1, idx_st_2, labels, config, prefix="queries"):
+        # Log the video
+        wandb.log({name: wandb.Video(images, fps=fps, format="mp4")})
+
+
+def log_query_videos_to_wandb(
+    dataset, idx_st_1, idx_st_2, labels, config, prefix="queries"
+):
     """Log video sequences for query pairs to wandb."""
 
     def combine_segments_side_by_side(images1, images2, preference, rewards1, rewards2):
@@ -51,8 +53,8 @@ def log_query_videos_to_wandb(dataset, idx_st_1, idx_st_2, labels, config, prefi
 
             # Copy the images
             combined[:, :h1, :w1] = images1
-            combined[:, :h2, w1:w1+w2] = images2
-            
+            combined[:, :h2, w1 : w1 + w2] = images2
+
             # Add border around preferred trajectory if preference is provided
             border_width = h1 // 20
             border_color = np.array([0, 255, 0], dtype=np.uint8)  # Green border
@@ -62,12 +64,12 @@ def log_query_videos_to_wandb(dataset, idx_st_1, idx_st_2, labels, config, prefi
                 combined[:, :border_width, :w1] = border_color  # Top border
                 combined[:, -border_width:, :w1] = border_color  # Bottom border
                 combined[:, :, :border_width] = border_color  # Left border
-                combined[:, :, w1-border_width:w1] = border_color  # Right border
+                combined[:, :, w1 - border_width : w1] = border_color  # Right border
             elif np.allclose(preference, [0, 1]):  # Second segment is preferred
                 # Add border to second segment
                 combined[:, :border_width, w1:] = border_color  # Top border
                 combined[:, -border_width:, w1:] = border_color  # Bottom border
-                combined[:, :, w1:w1+border_width] = border_color  # Left border
+                combined[:, :, w1 : w1 + border_width] = border_color  # Left border
                 combined[:, :, -border_width:] = border_color  # Right border
 
             # Overlay reward labels on each frame
@@ -75,21 +77,24 @@ def log_query_videos_to_wandb(dataset, idx_st_1, idx_st_2, labels, config, prefi
             font_scale = 0.2
             font_color = (255, 255, 255)
             thickness = 1
-            
+
             for i in range(num_frames):
                 # Add text to first segment
                 text1 = f"r1: {rewards1[i]:.2f}"
                 cv2.putText(
                     combined[i],
                     text1,
-                    (5, 15),  # Position (x, y) relative to top-left corner of first segment
+                    (
+                        5,
+                        15,
+                    ),  # Position (x, y) relative to top-left corner of first segment
                     font,
                     font_scale,
                     font_color,
                     thickness,
-                    cv2.LINE_AA
+                    cv2.LINE_AA,
                 )
-                
+
                 # Add text to second segment
                 text2 = f"r2: {rewards2[i]:.2f}"
                 text_x = w1 + 5  # x-coordinate offset by width of first segment
@@ -101,9 +106,9 @@ def log_query_videos_to_wandb(dataset, idx_st_1, idx_st_2, labels, config, prefi
                     font_scale,
                     font_color,
                     thickness,
-                    cv2.LINE_AA
+                    cv2.LINE_AA,
                 )
-            
+
             return combined
         return None
 
@@ -113,19 +118,22 @@ def log_query_videos_to_wandb(dataset, idx_st_1, idx_st_2, labels, config, prefi
 
     for i, (idx1, idx2) in enumerate(zip(idx_st_1, idx_st_2)):
         # Get image sequences for both segments
-        images1 = dataset["images"][idx1:idx1 + config.segment_size]
-        images2 = dataset["images"][idx2:idx2 + config.segment_size]
-        rewards1 = dataset["rewards"][idx1:idx1 + config.segment_size]
-        rewards2 = dataset["rewards"][idx2:idx2 + config.segment_size]
+        images1 = dataset["images"][idx1 : idx1 + config.segment_size]
+        images2 = dataset["images"][idx2 : idx2 + config.segment_size]
+        rewards1 = dataset["rewards"][idx1 : idx1 + config.segment_size]
+        rewards2 = dataset["rewards"][idx2 : idx2 + config.segment_size]
         # Get preference for this pair
         preference = labels[i]
 
         # Combine segments side by side with preference border
-        combined_segments = combine_segments_side_by_side(images1, images2, preference, rewards1, rewards2)
+        combined_segments = combine_segments_side_by_side(
+            images1, images2, preference, rewards1, rewards2
+        )
         if combined_segments is not None and wandb.run:
             log_video_to_wandb(combined_segments, f"{prefix}/query_{i}")
         if i >= 9:
             break
+
 
 def log_to_wandb(metrics, prefix="", epoch=None):
     """Simplified function to log metrics to wandb with prefix support.
@@ -162,6 +170,7 @@ def log_to_wandb(metrics, prefix="", epoch=None):
     if log_dict:
         wandb.run.log(log_dict)
 
+
 __all__ = ["WanDBAdapter", "WanDBAdapterFactory"]
 
 
@@ -181,7 +190,7 @@ class WanDBAdapter(LoggerAdapter):
         algo: AlgProtocol,
         experiment_name: str,
         n_steps_per_epoch: int,
-        wandb_cfg: dict
+        wandb_cfg: dict,
     ):
         try:
             import wandb
@@ -209,9 +218,7 @@ class WanDBAdapter(LoggerAdapter):
     def before_write_metric(self, epoch: int, step: int) -> None:
         """Callback executed before writing metric."""
 
-    def write_metric(
-        self, epoch: int, step: int, name: str, value: float
-    ) -> None:
+    def write_metric(self, epoch: int, step: int, name: str, value: float) -> None:
         """Writes metric to WandB."""
         self.run.log({name: value, "epoch": epoch}, step=step)
 

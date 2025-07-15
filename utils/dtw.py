@@ -93,12 +93,11 @@ def get_single_match(query: np.ndarray, reference: np.ndarray):
             path (np.ndarray): Optimal warping path as array of (n, m) index pairs
     """
     distance_matrix = get_distance_matrix(query, reference)
-    
+
     accumulated_cost_matrix = compute_accumulated_cost_matrix_dtw(distance_matrix)
     path = compute_optimal_warping_path_dtw(accumulated_cost_matrix)
     cost = float(accumulated_cost_matrix[-1, -1])
     return cost, path
-
 
 
 @nb.jit(nopython=True)
@@ -134,6 +133,7 @@ def compute_optimal_warping_path_subsequence_dtw_21(D: np.ndarray, m=-1):
     P = np.array(P)
     return P
 
+
 @nb.jit(nopython=True)
 def compute_accumulated_cost_matrix_subsequence_dtw_21(C: np.ndarray):
     """
@@ -158,6 +158,7 @@ def compute_accumulated_cost_matrix_subsequence_dtw_21(C: np.ndarray):
             )  # D[n-2+1, m-1+2],
     D = D[1:, 2:]
     return D
+
 
 def get_single_match_subsequence(query: np.ndarray, play: np.ndarray):
     """Get single match using S-DTW."""

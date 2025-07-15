@@ -30,7 +30,10 @@ def copy_to_parent(output_dir: Path):
         else:
             shutil.copy2(item, dest)
 
-def compute_dtw_distance_matrix(segments: List[Dict], use_relative_eef: bool, dtw_type: str = "dtw") -> np.ndarray:
+
+def compute_dtw_distance_matrix(
+    segments: List[Dict], use_relative_eef: bool, dtw_type: str = "dtw"
+) -> np.ndarray:
     """Compute DTW distance matrix between segments.
 
     Args:
@@ -52,7 +55,9 @@ def compute_dtw_distance_matrix(segments: List[Dict], use_relative_eef: bool, dt
     non_finite_count = 0
 
     total_comparisons = n_segments * (n_segments - 1) // 2
-    with tqdm(total=total_comparisons, desc=f"Computing {dtw_type.upper()} distances") as pbar:
+    with tqdm(
+        total=total_comparisons, desc=f"Computing {dtw_type.upper()} distances"
+    ) as pbar:
         for i in range(n_segments):
             for j in range(i + 1, n_segments):
                 # EE positions
@@ -96,10 +101,7 @@ def compute_dtw_distance_matrix(segments: List[Dict], use_relative_eef: bool, dt
 
 
 def compute_image_embeddings(
-    images: torch.Tensor,
-    embedder: ImageEmbedder,
-    batch_size: int,
-    device: str
+    images: torch.Tensor, embedder: ImageEmbedder, batch_size: int, device: str
 ) -> torch.Tensor:
     """Compute image embeddings in batches.
 
@@ -113,30 +115,38 @@ def compute_image_embeddings(
         embeddings: Tensor of image embeddings
     """
     embedder.eval()
-    
+
     # Check and convert image format
     if images.shape[-1] == 3:  # If last dimension is 3, it's in HWC format
         print("Converting images from HWC to CHW format")
         images = images.permute(0, 3, 1, 2)
-    
+
     # Normalize images to [0, 1] if needed
     if images.max() > 1.0:
         print("Normalizing images from [0, 255] to [0, 1] range")
         images = images.float() / 255.0
-    
-    print(f"Image shape after preprocessing: {images.shape}, Range: [{images.min():.3f}, {images.max():.3f}]")
-    
+
+    print(
+        f"Image shape after preprocessing: {images.shape}, Range: [{images.min():.3f}, {images.max():.3f}]"
+    )
+
     embeddings = []
     with torch.no_grad():
-        for i in tqdm(range(0, len(images), batch_size), desc="Computing image embeddings"):
-            batch = images[i:i + batch_size].to(device)
+        for i in tqdm(
+            range(0, len(images), batch_size), desc="Computing image embeddings"
+        ):
+            batch = images[i : i + batch_size].to(device)
             embedding = embedder(batch)
             if isinstance(embedding, dict):
                 embedding = embedding["feature_map"]
             if embedding.ndim > 2:  # If features are spatial, take mean
-                embedding = embedding.mean(dim=[-2, -1]) if embedding.ndim == 4 else embedding.mean(dim=1)
+                embedding = (
+                    embedding.mean(dim=[-2, -1])
+                    if embedding.ndim == 4
+                    else embedding.mean(dim=1)
+                )
             embeddings.append(embedding.cpu())
-    
+
     embeddings = torch.cat(embeddings, dim=0)
     print(f"Final embedding shape: {embeddings.shape}")
     return embeddings
@@ -146,51 +156,58 @@ def save_to_pt(data_path: str):
     """
     Save to tensordict format
     """
-    with h5py.File(data_path, 'r') as f:
+    with h5py.File(data_path, "r") as f:
         data = f["data"]
-        
+
         total_len = 0
         actions = []
         episodes = []
         images = []
         obs = []
-        
-        for demo in sorted(data.keys(), key=lambda x: int(x.split('_')[1])):
-                
+
+        for demo in sorted(data.keys(), key=lambda x: int(x.split("_")[1])):
             demo_data = data[demo]
             demo_len = len(demo_data["actions"])
-            
+
             actions.append(demo_data["actions"][:])
-            episodes.append(torch.full((demo_len,), int(demo.split('_')[1])))
+            episodes.append(torch.full((demo_len,), int(demo.split("_")[1])))
             images.append(demo_data["obs"]["agentview_image"][:])
 
             # observation = ["robot0_eef_pos", "robot0_eef_quat", "robot0_gripper_qpos", "object"]
-            obs.append(np.concatenate([
-                demo_data["obs"]["robot0_eef_pos"][:],
-                demo_data["obs"]["robot0_eef_quat"][:], 
-                demo_data["obs"]["robot0_gripper_qpos"][:],
-                demo_data["obs"]["object"][:] # obs varies by task
-            ], axis=1))
-            
+            obs.append(
+                np.concatenate(
+                    [
+                        demo_data["obs"]["robot0_eef_pos"][:],
+                        demo_data["obs"]["robot0_eef_quat"][:],
+                        demo_data["obs"]["robot0_gripper_qpos"][:],
+                        demo_data["obs"]["object"][:],  # obs varies by task
+                    ],
+                    axis=1,
+                )
+            )
+
             total_len += demo_len
-        
+
         # Convert numpy arrays to tensors and concatenate all data
-        tensordict = TensorDict({
-            "action": torch.cat([torch.from_numpy(a).float() for a in actions]),
-            "episode": torch.cat(episodes),
-            "image": torch.cat([torch.from_numpy(img) for img in images]), 
-            "obs": torch.cat([torch.from_numpy(o).float() for o in obs]),
-        }, batch_size=torch.Size([]))
-        
+        tensordict = TensorDict(
+            {
+                "action": torch.cat([torch.from_numpy(a).float() for a in actions]),
+                "episode": torch.cat(episodes),
+                "image": torch.cat([torch.from_numpy(img) for img in images]),
+                "obs": torch.cat([torch.from_numpy(o).float() for o in obs]),
+            },
+            batch_size=torch.Size([]),
+        )
+
         print(tensordict)
 
         # Save to data path but as a .pt instead of .hdf5
-        save_path = str(data_path).replace('.hdf5', '.pt')
+        save_path = str(data_path).replace(".hdf5", ".pt")
         print(f"saving to {save_path}")
         torch.save(tensordict, save_path)
 
 
-@hydra.main(config_path="config_old", config_name="preprocess", version_base=None)
+@hydra.main(config_path="configs", config_name="preprocess", version_base=None)
 def main(cfg: DictConfig):
     print("\n" + "=" * 50)
     print("Preprocessing trajectory data")
@@ -204,7 +221,7 @@ def main(cfg: DictConfig):
     set_seed(cfg.seed)
 
     # Convert data to tensordict format if necessary
-    if cfg.data.data_path.endswith('.hdf5'):
+    if cfg.data.data_path.endswith(".hdf5"):
         data = save_to_pt(cfg.data.data_path)
 
     # Set up input and output paths
@@ -220,7 +237,14 @@ def main(cfg: DictConfig):
 
     # Segment episodes
     print(f"\nSegmenting episodes with length {cfg.data.segment_length}")
-    segments, segment_indices, val_segments, val_segment_indices, val_samples = segment_episodes_random(data, cfg.data.segment_length, num_segments=cfg.data.num_segments, val_split=cfg.data.val_split)
+    segments, segment_indices, val_segments, val_segment_indices, val_samples = (
+        segment_episodes_random(
+            data,
+            cfg.data.segment_length,
+            num_segments=cfg.data.num_segments,
+            val_split=cfg.data.val_split,
+        )
+    )
 
     # Create segment pairs
     segment_indices_array = np.array(segment_indices)
@@ -232,12 +256,12 @@ def main(cfg: DictConfig):
     val_segment_pairs = np.array(val_segment_pairs)
 
     # Save segment indices and pairs
-    np.save(output_dir / 'segment_start_end_indices.npy', segment_indices_array)
-    np.save(output_dir / 'segment_pairs.npy', segment_pairs)
-    np.save(output_dir / 'val_segment_start_end_indices.npy', val_segment_indices_array)
-    np.save(output_dir / 'val_segment_pairs.npy', val_segment_pairs)
-    np.save(output_dir / 'val_episodes.npy', val_samples)
-    
+    np.save(output_dir / "segment_start_end_indices.npy", segment_indices_array)
+    np.save(output_dir / "segment_pairs.npy", segment_pairs)
+    np.save(output_dir / "val_segment_start_end_indices.npy", val_segment_indices_array)
+    np.save(output_dir / "val_segment_pairs.npy", val_segment_pairs)
+    np.save(output_dir / "val_episodes.npy", val_samples)
+
     print(f"Saved segment indices and pairs to {output_dir}")
 
     # Compute DTW matrices if enabled
@@ -248,21 +272,25 @@ def main(cfg: DictConfig):
             print(f"DTW matrix file already exists: {dtw_matrix_file}")
         else:
             print("\nComputing DTW distance matrix...")
-            dtw_matrix = compute_dtw_distance_matrix(segments, cfg.dtw.use_relative_eef, "dtw")
-            
+            dtw_matrix = compute_dtw_distance_matrix(
+                segments, cfg.dtw.use_relative_eef, "dtw"
+            )
+
             print(f"Saving DTW matrix to: {dtw_matrix_file}")
             with open(dtw_matrix_file, "wb") as f:
                 pickle.dump((dtw_matrix, segment_indices), f)
 
         # Compute S-DTW matrix
         sdtw_matrix_file = output_dir / f"sdtw_matrix_{cfg.data.segment_length}.pkl"
-        
+
         if os.path.exists(sdtw_matrix_file) and not cfg.data.overwrite:
             print(f"S-DTW matrix file already exists: {sdtw_matrix_file}")
         else:
             print("\nComputing S-DTW distance matrix...")
-            sdtw_matrix = compute_dtw_distance_matrix(segments, cfg.dtw.use_relative_eef, "sdtw")
-            
+            sdtw_matrix = compute_dtw_distance_matrix(
+                segments, cfg.dtw.use_relative_eef, "sdtw"
+            )
+
             print(f"Saving S-DTW matrix to: {sdtw_matrix_file}")
             with open(sdtw_matrix_file, "wb") as f:
                 pickle.dump((sdtw_matrix, segment_indices), f)
@@ -271,30 +299,27 @@ def main(cfg: DictConfig):
     if cfg.image_embedding.enabled and "image" in data:
         print("\nComputing image embeddings...")
         print(f"Original image shape: {data['image'].shape}")
-        
+
         # Initialize image embedder
         embedder = ImageEmbedder(
             model_name=cfg.image_embedding.model_name,
             device=cfg.image_embedding.device,
             feature_fmt=cfg.image_embedding.feature_fmt,
-            use_spatial_features=cfg.image_embedding.use_spatial_features
+            use_spatial_features=cfg.image_embedding.use_spatial_features,
         )
         embedder = embedder.to(cfg.image_embedding.device)
 
         # Compute embeddings
         images = data["image"]
         image_embeddings = compute_image_embeddings(
-            images,
-            embedder,
-            cfg.image_embedding.batch_size,
-            cfg.image_embedding.device
+            images, embedder, cfg.image_embedding.batch_size, cfg.image_embedding.device
         )
-        
+
         # Create new dataset with embeddings
         embedded_data = {k: v for k, v in data.items()}
         embedded_data["image_embedding"] = image_embeddings
         del embedded_data["image"]  # Remove original images to save space
-        
+
         # Save embedded dataset
         dataset_name = data_path.stem
         output_path = output_dir / f"{dataset_name}_embedded.pt"
@@ -304,5 +329,6 @@ def main(cfg: DictConfig):
     copy_to_parent(output_dir)
     print("\nPreprocessing complete!")
 
+
 if __name__ == "__main__":
-    main() 
+    main()

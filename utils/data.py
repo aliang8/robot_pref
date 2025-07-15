@@ -123,8 +123,10 @@ def get_gt_preferences(data, segment_indices, pairs):
         list: List of preference labels (1 if first segment preferred, 0 if second segment preferred, 0.5 if equal).
     """
     if "reward" not in data:
-        raise ValueError("Dataset does not contain 'reward' key. Can't compute ground truth preferences! ")
-    
+        raise ValueError(
+            "Dataset does not contain 'reward' key. Can't compute ground truth preferences! "
+        )
+
     preference_labels = []
 
     for idx1, idx2 in tqdm(pairs):
@@ -162,7 +164,7 @@ def segment_episodes(data, segment_length):
     # assert len(set(episode_lens)) == 1, "All episodes should be the same length"
     unique_episode_lens = np.unique(episode_lens)
     print(f"Unique episode lengths: {unique_episode_lens}")
-    
+
     # only keep segments that are the same length
     episode_len_gt = episode_lens[10]
     print(f"Episode length use: {episode_len_gt}")
@@ -244,58 +246,63 @@ def segment_episodes_random(data, segment_length, num_segments=None, val_split=0
     val_samples = np.random.choice(unique_episodes, size=num_val_samples, replace=False)
 
     episode_lens = {
-        int(ep): len(np.where(data["episode"] == ep)[0]) 
-        for ep in unique_episodes
+        int(ep): len(np.where(data["episode"] == ep)[0]) for ep in unique_episodes
     }
-    
+
     print(f"Found {len(unique_episodes)} episodes")
-    print(f"Episode lengths range: min={min(episode_lens.values())}, max={max(episode_lens.values())}")
-    
+    print(
+        f"Episode lengths range: min={min(episode_lens.values())}, max={max(episode_lens.values())}"
+    )
+
     # Create list of train episodes and val episodes
     train_episodes = []
     val_episodes = []
     episode_start_indices = {}  # Track start index of each episode
     current_idx = 0
-    
+
     for episode_idx in unique_episodes:
         episode_len = episode_lens[int(episode_idx)]
         if episode_len <= segment_length:
-            raise ValueError(f"Episode {episode_idx} is too short, use a shorter segment_length")
+            raise ValueError(
+                f"Episode {episode_idx} is too short, use a shorter segment_length"
+            )
         if episode_idx not in val_samples:
             train_episodes.append((episode_idx, episode_len))
         else:
             val_episodes.append((episode_idx, episode_len))
         episode_start_indices[episode_idx] = current_idx
         current_idx += episode_len
-    
-    print(f"Using {len(train_episodes)} train episodes and {len(val_episodes)} val episodes")
-    
+
+    print(
+        f"Using {len(train_episodes)} train episodes and {len(val_episodes)} val episodes"
+    )
+
     # Sample segments
     segments = []
     segment_indices = []
-    
+
     # Sample num_segments segments
     total_segments = 0
     while total_segments < num_segments:
         # Randomly select an episode
         episode_idx, episode_len = random.choice(train_episodes)
         episode_abs_start = episode_start_indices[episode_idx]
-        
+
         # Sample a random valid segment
-        max_start = episode_len - segment_length - 1 # we don't want to sample next obs
+        max_start = episode_len - segment_length - 1  # we don't want to sample next obs
         start_idx = random.randint(0, max_start)
         end_idx = start_idx + segment_length
-        
+
         # Compute absolute indices in the full dataset
         abs_start_idx = episode_abs_start + start_idx
         abs_end_idx = episode_abs_start + end_idx
-        
+
         # Create segment dictionary
         segment = {}
         for key in data.keys():
             segment_data = data[key][abs_start_idx:abs_end_idx]
             segment[key] = segment_data
-            
+
         segment_indices.append((abs_start_idx, abs_end_idx))
         segments.append(segment)
         total_segments += 1
@@ -313,22 +320,22 @@ def segment_episodes_random(data, segment_length, num_segments=None, val_split=0
         # Randomly select an episode
         episode_idx, episode_len = random.choice(val_episodes)
         episode_abs_start = episode_start_indices[episode_idx]
-        
+
         # Sample a random valid segment
         max_start = episode_len - segment_length
         start_idx = random.randint(0, max_start)
         end_idx = start_idx + segment_length
-        
+
         # Compute absolute indices in the full dataset
         abs_start_idx = episode_abs_start + start_idx
         abs_end_idx = episode_abs_start + end_idx
-        
+
         # Create segment dictionary
         segment = {}
         for key in data.keys():
             segment_data = data[key][abs_start_idx:abs_end_idx]
             segment[key] = segment_data
-            
+
         val_segment_indices.append((abs_start_idx, abs_end_idx))
         val_segments.append(segment)
         total_segments += 1
@@ -455,7 +462,6 @@ def load_dataset(
             f"Reward stats after zeroing - Mean: {np.mean(rewards_np):.4f}, Min: {np.min(rewards_np):.4f}, Max: {np.max(rewards_np):.4f}"
         )
 
-
     # Create terminals array (True at the end of each episode)
     episode_ends = torch.cat(
         [
@@ -468,7 +474,7 @@ def load_dataset(
     # Convert to numpy for d3rlpy
     observations_np = valid_obs.numpy()
     actions_np = valid_actions.numpy()
-    
+
     # Create MDPDataset with the rewards
     dataset = MDPDataset(
         observations=observations_np,

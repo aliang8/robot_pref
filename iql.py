@@ -18,14 +18,14 @@ from torch.distributions import Normal
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from tqdm import trange
 
-# sys.path.append("./Reward_learning")
 import models.reward_model as reward_model
-import utils_env
+import utils.env as utils_env
 import wandb
 from learn_reward import build_rm_checkpoint_path
 from models.flow_policy import FlowNoisePredictionNet, FlowPolicy
 from utils.eval import eval_actor
 from utils.wandb import wandb_init
+from utils.seed import set_seed
 
 TensorBatch = List[torch.Tensor]
 
@@ -35,75 +35,10 @@ LOG_STD_MAX = 2.0
 
 
 
-def build_iql_checkpoint_path(config: DictConfig) -> str:
-    """Build IQL checkpoint path based on config parameters.
-    
-    This function handles checkpoint path building for the main IQL training,
-    separate from reward model checkpoints.
-    """
-    if getattr(config, 'use_reward_model', False):
-        # For reward model cases, use a different naming scheme
-        checkpoint_name = f"{getattr(config, 'name', 'IQL')}/{config.env}/quality_{getattr(config, 'data_quality', 5.0)}_trivial_{getattr(config, 'trivial_reward', 0)}/seed_{config.seed}_{str(uuid.uuid4())[:8]}"
-    else:
-        # For non-reward model cases
-        checkpoint_name = f"{getattr(config, 'name', 'IQL')}/{config.env}/quality_{getattr(config, 'data_quality', 5.0)}_trivial_{getattr(config, 'trivial_reward', 0)}/seed_{config.seed}_{str(uuid.uuid4())[:8]}"
-    
-    print(f"Checkpoint name: {checkpoint_name}")
-    
-    return checkpoint_name
-
-
 def soft_update(target: nn.Module, source: nn.Module, tau: float):
     for target_param, source_param in zip(target.parameters(), source.parameters()):
         target_param.data.copy_((1 - tau) * target_param.data + tau * source_param.data)
 
-
-def compute_mean_std(states: np.ndarray, eps: float) -> Tuple[np.ndarray, np.ndarray]:
-    mean = states.mean(0)
-    std = states.std(0) + eps
-    return mean, std
-
-
-def normalize_states(states: np.ndarray, mean: np.ndarray, std: np.ndarray):
-    return (states - mean) / std
-
-
-def wrap_env(
-    env: gym.Env,
-    state_mean: Union[np.ndarray, float] = 0.0,
-    state_std: Union[np.ndarray, float] = 1.0,
-    reward_scale: float = 1.0,
-) -> gym.Env:
-    def normalize_state(state):
-        # Handle different state formats
-        if isinstance(state, (list, tuple)):
-            # If state is wrapped in a container, extract the observation
-            if len(state) == 2:
-                state = state[0]
-            else:
-                # For other cases, convert to numpy array
-                state = np.array(state)
-        
-        # Ensure state is a numpy array
-        if not isinstance(state, np.ndarray):
-            state = np.array(state)
-        
-        # Apply normalization
-        normalized = (state - state_mean) / state_std
-        
-        # Ensure output format matches input format
-        return normalized.astype(np.float32)
-
-    def scale_reward(reward):
-        return reward_scale * reward
-
-    # Apply transformations
-    env = gym.wrappers.TransformObservation(env, normalize_state)
-    
-    if reward_scale != 1.0:
-        env = gym.wrappers.TransformReward(env, scale_reward)
-    
-    return env
 
 class ReplayBuffer:
     def __init__(
@@ -124,7 +59,9 @@ class ReplayBuffer:
         action_shape = (buffer_size, action_dim)
         self._actions = torch.zeros(action_shape, dtype=torch.float32, device=device)
 
-        self._rewards = torch.zeros((buffer_size, 1), dtype=torch.float32, device=device)
+        self._rewards = torch.zeros(
+            (buffer_size, 1), dtype=torch.float32, device=device
+        )
         self._next_states = torch.zeros(
             (buffer_size, state_dim), dtype=torch.float32, device=device
         )
@@ -167,17 +104,6 @@ class ReplayBuffer:
         # I left it unimplemented since now we do not do fine-tuning.
         raise NotImplementedError
 
-def set_seed(
-    seed: int, env: Optional[gym.Env] = None, deterministic_torch: bool = False
-):
-    if env is not None:
-        env.seed(seed)
-        env.action_space.seed(seed)
-    os.environ["PYTHONHASHSEED"] = str(seed)
-    np.random.seed(seed)
-    random.seed(seed)
-    torch.manual_seed(seed)
-    torch.use_deterministic_algorithms(deterministic_torch)
 
 
 def asymmetric_l2_loss(u: torch.Tensor, tau: float) -> torch.Tensor:
@@ -230,7 +156,11 @@ class MLP(nn.Module):
 
 class TwinQ(nn.Module):
     def __init__(
-        self, state_dim: int, action_dim: int, hidden_dim: int = 256, n_hidden: int = 2,
+        self,
+        state_dim: int,
+        action_dim: int,
+        hidden_dim: int = 256,
+        n_hidden: int = 2,
     ):
         super().__init__()
         dims = [state_dim + action_dim, *([hidden_dim] * n_hidden), 1]
@@ -291,7 +221,6 @@ class ImplicitQLearning:
         self.total_it = 0
         self.device = device
 
-
     def _update_v(self, observations, actions, log_dict) -> torch.Tensor:
         # Update value function
         with torch.no_grad():
@@ -307,7 +236,7 @@ class ImplicitQLearning:
         self.v_optimizer.zero_grad()
         v_loss.backward()
         self.v_optimizer.step()
-        
+
         return adv
 
     def _update_q(
@@ -415,54 +344,59 @@ class ImplicitQLearning:
 
 def print_dataset_statistics(dataset: Dict[str, np.ndarray]) -> None:
     """Print statistics for each key in the dataset in a legible format."""
-    print("\n" + "="*60)
+    print("\n" + "=" * 60)
     print("DATASET STATISTICS")
-    print("="*60)
-    
+    print("=" * 60)
+
     total_samples = None
     for key, data in dataset.items():
         if isinstance(data, np.ndarray):
             if total_samples is None:
                 total_samples = data.shape[0]
-            
+
             print(f"\n{key.upper()}:")
             print(f"  Shape: {data.shape}")
-            
-            
+
             # Calculate statistics
             mean_val = np.mean(data)
             min_val = np.min(data)
             max_val = np.max(data)
             std_val = np.std(data)
-            
+
             # Print statistics in a formatted way
             print(f"  Mean:  {mean_val:>12.6f}")
             print(f"  Min:   {min_val:>12.6f}")
             print(f"  Max:   {max_val:>12.6f}")
             print(f"  Std:   {std_val:>12.6f}")
-            
+
             # If it's a 2D array, also show per-dimension statistics
-            if data.ndim == 2 and data.shape[1] <= 10:  # Only for reasonable number of dimensions
+            if (
+                data.ndim == 2 and data.shape[1] <= 10
+            ):  # Only for reasonable number of dimensions
                 print("  Per-dimension statistics:")
                 for i in range(data.shape[1]):
                     dim_mean = np.mean(data[:, i])
                     dim_std = np.std(data[:, i])
                     dim_min = np.min(data[:, i])
                     dim_max = np.max(data[:, i])
-                    print(f"    Dim {i:2d}: mean={dim_mean:8.4f}, std={dim_std:8.4f}, min={dim_min:8.4f}, max={dim_max:8.4f}")
+                    print(
+                        f"    Dim {i:2d}: mean={dim_mean:8.4f}, std={dim_std:8.4f}, min={dim_min:8.4f}, max={dim_max:8.4f}"
+                    )
             elif data.ndim == 2 and data.shape[1] > 10:
-                print(f"  (Skipping per-dimension stats for {data.shape[1]} dimensions)")
+                print(
+                    f"  (Skipping per-dimension stats for {data.shape[1]} dimensions)"
+                )
         else:
             print(f"\n{key.upper()}:")
             print(f"  Type: {type(data)}")
-            if hasattr(data, '__len__'):
+            if hasattr(data, "__len__"):
                 print(f"  Length: {len(data)}")
-    
+
     # Print summary information
     if total_samples is not None:
         print("\nSUMMARY:")
         print(f"  Total samples: {total_samples:,}")
-        
+
         # Try to estimate number of episodes if terminals are available
         if "terminals" in dataset:
             terminals = dataset["terminals"]
@@ -471,20 +405,16 @@ def print_dataset_statistics(dataset: Dict[str, np.ndarray]) -> None:
                 avg_episode_length = total_samples / num_episodes
                 print(f"  Estimated episodes: {num_episodes:,}")
                 print(f"  Average episode length: {avg_episode_length:.1f} steps")
-        
+
         # Calculate total memory usage
-        total_memory = sum(data.nbytes for data in dataset.values() if isinstance(data, np.ndarray))
+        total_memory = sum(
+            data.nbytes for data in dataset.values() if isinstance(data, np.ndarray)
+        )
         total_memory_mb = total_memory / (1024 * 1024)
         print(f"  Total memory usage: {total_memory_mb:.2f} MB")
-    
-    print("\n" + "="*60)
 
-class EnvFactory:
-    def __init__(self, data_path):
-        self.data_path = data_path
+    print("\n" + "=" * 60)
 
-    def __call__(self, seed):
-        return utils_env.get_robomimic_env(self.data_path, seed=seed)
 
 @hydra.main(config_path="configs", config_name="iql", version_base=None)
 def train(config):
@@ -495,16 +425,12 @@ def train(config):
     if "metaworld" in config.env:
         env = utils_env.make_metaworld_env(config.env, config.seed)
         dataset = utils_env.MetaWorld_dataset(config)
-    elif "dmc" in config.env:
-        env = utils_env.make_dmc_env(config.env, config.seed)
-        dataset = utils_env.DMC_dataset(config)
     elif "robomimic" in config.env:
         env = utils_env.get_robomimic_env(config.data_path, seed=config.seed)
-        # env_fn = EnvFactory(config.data_path)
         dataset = utils_env.Robomimic_dataset(config.data_path, clip_last=True)
     else:
         env = gym.make(config.env)
-    
+
     state_dim = env.observation_space["state"].shape[0]
     action_dim = env.action_space.shape[0]
 
@@ -517,7 +443,9 @@ def train(config):
         state_std = np.maximum(state_std, min_std)
 
         dataset["observations"] = (dataset["observations"] - state_mean) / state_std
-        dataset["next_observations"] = (dataset["next_observations"] - state_mean) / state_std
+        dataset["next_observations"] = (
+            dataset["next_observations"] - state_mean
+        ) / state_std
 
         # max_action = np.abs(dataset["actions"]).max()
         # dataset["actions"] = dataset["actions"] / max_action
@@ -535,11 +463,13 @@ def train(config):
         if config.eef_rm:
             dimension = 3 + dataset["actions"].shape[1]
         else:
-            dimension = dataset["observations"].shape[1] + dataset["actions"].shape[1] #TODO
+            dimension = (
+                dataset["observations"].shape[1] + dataset["actions"].shape[1]
+            )  # TODO
         print(f"Using reward model with dimension {dimension}")
-        
+
         model = reward_model.RewardModel(config, None, None, None, None, dimension)
-        
+
         # Use the helper function to build checkpoint path
         path = build_rm_checkpoint_path(config)
         path = os.path.join(config.checkpoints_path, path)
@@ -563,7 +493,7 @@ def train(config):
 
     print_dataset_statistics(dataset)
 
-    env = wrap_env(env, state_mean=state_mean, state_std=state_std)
+    env = utils_env.wrap_env(env, state_mean=state_mean, state_std=state_std)
 
     replay_buffer = ReplayBuffer(
         state_dim,
@@ -573,13 +503,15 @@ def train(config):
     )
     replay_buffer.load_dataset(dataset)
 
-    if config.checkpoints_path is not None:
-        print(f"Checkpoints path: {config.checkpoints_path}")
-        checkpoint_name = build_iql_checkpoint_path(config)
-        config.checkpoints_path = os.path.join(config.checkpoints_path, checkpoint_name)
-        
-        os.makedirs(config.checkpoints_path, exist_ok=True)
-        OmegaConf.save(config=config, f=os.path.join(config.checkpoints_path, "config.yaml"))
+    # if config.checkpoints_path is not None:
+    #     print(f"Checkpoints path: {config.checkpoints_path}")
+    #     checkpoint_name = build_iql_checkpoint_path(config)
+    #     config.checkpoints_path = os.path.join(config.checkpoints_path, checkpoint_name)
+
+    #     os.makedirs(config.checkpoints_path, exist_ok=True)
+    #     OmegaConf.save(
+    #         config=config, f=os.path.join(config.checkpoints_path, "config.yaml")
+    #     )
 
     # Set seed
     set_seed(config.seed, env)
@@ -588,11 +520,12 @@ def train(config):
     v_network = ValueFunction(state_dim).to(config.device)
 
     noise_pred_net = FlowNoisePredictionNet(
-        action_dim=action_dim,
-        global_cond_dim=state_dim
+        action_dim=action_dim, global_cond_dim=state_dim
     ).to(config.device)
 
-    actor = FlowPolicy(action_dim=action_dim, noise_pred_net=noise_pred_net, max_action=max_action).to(config.device)
+    actor = FlowPolicy(
+        action_dim=action_dim, noise_pred_net=noise_pred_net, max_action=max_action
+    ).to(config.device)
 
     # Print model architecture after model initialization
     print("\n" + "=" * 50)
@@ -603,7 +536,9 @@ def train(config):
     print(f"Q-Network parameters: {sum(p.numel() for p in q_network.parameters()):,}")
     print("\nValue Network:")
     print(v_network)
-    print(f"Value Network parameters: {sum(p.numel() for p in v_network.parameters()):,}")
+    print(
+        f"Value Network parameters: {sum(p.numel() for p in v_network.parameters()):,}"
+    )
     print("\nActor Network:")
     print(actor)
     print(f"Actor parameters: {sum(p.numel() for p in actor.parameters()):,}")
@@ -632,7 +567,7 @@ def train(config):
 
     # Initialize actor
     trainer = ImplicitQLearning(**kwargs)
-    
+
     for t in trange(int(config.max_timesteps)):
         batch = replay_buffer.sample(config.batch_size)
         log_dict = trainer.train(batch)
@@ -647,7 +582,7 @@ def train(config):
                 actor,
                 config.n_episodes,
                 config.seed,
-                record_video=config.record_video
+                record_video=config.record_video,
             )
             eval_mean_reward = eval_mean_rewards.mean()
             eval_mean_success = eval_success.mean()
@@ -657,7 +592,7 @@ def train(config):
                 f"{eval_mean_reward:.3f} , success: {eval_mean_success * 100:.3f}"
             )
             print("---------------------------------------")
-            
+
             # Log to wandb
             if config.use_wandb:
                 # Metrics
@@ -670,15 +605,17 @@ def train(config):
                 )
 
                 # Rollout vids
-                if config.record_video: 
+                if config.record_video:
                     for i, frames in enumerate(eval_frames):
                         frames_array = np.stack(frames)  # (T, H, W, C)
-                        frames_array = np.transpose(frames_array, (0, 3, 1, 2))  # (T, C, H, W)
+                        frames_array = np.transpose(
+                            frames_array, (0, 3, 1, 2)
+                        )  # (T, C, H, W)
                         mean_reward = eval_mean_rewards[i]
                         success = eval_success[i]
                         wandb.log(
                             {
-                                f"eval_vids/ep_{i+1}": wandb.Video(
+                                f"eval_vids/ep_{i + 1}": wandb.Video(
                                     frames_array,
                                     fps=30,
                                     format="mp4",
@@ -688,8 +625,6 @@ def train(config):
                             step=trainer.total_it,
                         )
 
-                
-            
             if (config.checkpoints_path is not None) and (t + 1) % (
                 20 * config.eval_freq
             ) == 0:

@@ -1,8 +1,9 @@
 #!/bin/bash
-data_path="/scr/shared/datasets/robot_pref/stack_mixed/stack_mixed.hdf5"
+# data_path="/scr/shared/datasets/robot_pref/stack_mixed/stack_mixed.hdf5"
+data_path="/scr/shared/datasets/robot_pref/stack_mixed_sawyer/stack_mixed_sawyer.hdf5"
 
 use_wandb=True
-seeds=(40 41 42 43 44 45)
+seeds=(1 2 3)
 record_video=False
 trivial_reward=(0)
 

@@ -12,8 +12,9 @@ import torch.nn as nn
 from omegaconf import OmegaConf
 from tqdm import trange
 
-import utils_env
+import utils.env as utils_env
 import wandb
+from utils.seed import set_seed
 from iql import ReplayBuffer, eval_actor, print_dataset_statistics, wrap_env
 from models.flow_policy import FlowNoisePredictionNet, FlowPolicy
 from reward_utils import normalize_states
@@ -21,26 +22,6 @@ from utils.wandb import wandb_init
 
 TensorBatch = List[torch.Tensor]
 
-def compute_mean_std(states: np.ndarray, eps: float) -> Tuple[np.ndarray, np.ndarray]:
-    mean = states.mean(0)
-    std = states.std(0) + eps
-    return mean, std
-
-
-
-
-
-def set_seed(
-    seed: int, env: Optional[gym.Env] = None, deterministic_torch: bool = False
-):
-    if env is not None:
-        env.seed(seed)
-        env.action_space.seed(seed)
-    os.environ["PYTHONHASHSEED"] = str(seed)
-    np.random.seed(seed)
-    random.seed(seed)
-    torch.manual_seed(seed)
-    torch.use_deterministic_algorithms(deterministic_torch)
 
 
 
@@ -90,6 +71,7 @@ class BC:
         self.actor_optimizer.load_state_dict(state_dict["actor_optimizer"])
         self.total_it = state_dict["total_it"]
 
+
 class EnvFactory:
     def __init__(self, data_path):
         self.data_path = data_path
@@ -97,9 +79,11 @@ class EnvFactory:
     def __call__(self, seed):
         return utils_env.get_robomimic_env(self.data_path, seed=seed)
 
+
 @hydra.main(config_path="configs", config_name="bc", version_base=None)
 def train(config):
     import multiprocessing as mp
+
     mp.set_start_method("spawn", force=True)
 
     wandb_init(config) if config.use_wandb else None
@@ -134,7 +118,9 @@ def train(config):
         state_std = np.maximum(state_std, min_std)
 
         dataset["observations"] = (dataset["observations"] - state_mean) / state_std
-        dataset["next_observations"] = (dataset["next_observations"] - state_mean) / state_std
+        dataset["next_observations"] = (
+            dataset["next_observations"] - state_mean
+        ) / state_std
 
         # max_action = np.abs(dataset["actions"]).max()
         # dataset["actions"] = dataset["actions"] / max_action
@@ -143,7 +129,7 @@ def train(config):
         state_std = 1
 
     print_dataset_statistics(dataset)
-    
+
     env = wrap_env(env, state_mean=state_mean, state_std=state_std)
     replay_buffer = ReplayBuffer(
         state_dim,
@@ -157,20 +143,23 @@ def train(config):
         print(f"Checkpoints path: {config.checkpoints_path}")
         os.makedirs(config.checkpoints_path, exist_ok=True)
         # Save config using Hydra's utilities
-        OmegaConf.save(config=config, f=os.path.join(config.checkpoints_path, "config.yaml"))
+        OmegaConf.save(
+            config=config, f=os.path.join(config.checkpoints_path, "config.yaml")
+        )
 
     max_action = float(env.action_space.high[0])
 
     # Set seeds
     seed = config.seed
     set_seed(seed, env)
-    
+
     noise_pred_net = FlowNoisePredictionNet(
-        action_dim=action_dim,
-        global_cond_dim=state_dim
+        action_dim=action_dim, global_cond_dim=state_dim
     ).to(config.device)
 
-    actor = FlowPolicy(action_dim=action_dim, noise_pred_net=noise_pred_net, max_action=max_action).to(config.device)
+    actor = FlowPolicy(
+        action_dim=action_dim, noise_pred_net=noise_pred_net, max_action=max_action
+    ).to(config.device)
 
     # Print model architecture after model initialization
     print("\n" + "=" * 50)
@@ -210,13 +199,13 @@ def train(config):
         # Evaluate episode
         if (t + 1) % config.eval_freq == 0:
             print(f"Eval at step: {t + 1}")
-            
+
             eval_mean_rewards, eval_success, eval_frames = eval_actor(
                 env,
                 actor,
                 config.n_episodes,
                 config.seed,
-                record_video=config.record_video
+                record_video=config.record_video,
             )
             eval_mean_reward = eval_mean_rewards.mean()
             eval_mean_success = eval_success.mean()
@@ -226,7 +215,7 @@ def train(config):
                 f"{eval_mean_reward:.3f} , success: {eval_mean_success * 100:.3f}"
             )
             print("---------------------------------------")
-            
+
             # Log to wandb
             # Log to wandb
             if config.use_wandb:
@@ -240,15 +229,17 @@ def train(config):
                 )
 
                 # Rollout vids
-                if config.record_video: 
+                if config.record_video:
                     for i, frames in enumerate(eval_frames):
                         frames_array = np.stack(frames)  # (T, H, W, C)
-                        frames_array = np.transpose(frames_array, (0, 3, 1, 2))  # (T, C, H, W)
+                        frames_array = np.transpose(
+                            frames_array, (0, 3, 1, 2)
+                        )  # (T, C, H, W)
                         mean_reward = eval_mean_rewards[i]
                         success = eval_success[i]
                         wandb.log(
                             {
-                                f"eval_vids/ep_{i+1}": wandb.Video(
+                                f"eval_vids/ep_{i + 1}": wandb.Video(
                                     frames_array,
                                     fps=30,
                                     format="mp4",
@@ -257,7 +248,7 @@ def train(config):
                             },
                             step=trainer.total_it,
                         )
-            
+
             if (config.checkpoints_path is not None) and (t + 1) % (
                 20 * config.eval_freq
             ) == 0:
@@ -265,6 +256,7 @@ def train(config):
                     trainer.state_dict(),
                     os.path.join(config.checkpoints_path, f"checkpoint_{t}.pt"),
                 )
+
 
 if __name__ == "__main__":
     train()

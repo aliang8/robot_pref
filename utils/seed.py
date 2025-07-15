@@ -20,16 +20,10 @@ def set_seed(seed=42, deterministic_cudnn=True):
         seed = int(torch.randint(0, 2**32 - 1, (1,)).item())
         print(f"No seed provided, using randomly generated seed: {seed}")
 
-    # Set Python's random seed
     random.seed(seed)
-
-    # Set NumPy's random seed
     np.random.seed(seed)
-
-    # Set PyTorch's random seed
     torch.manual_seed(seed)
 
-    # Set CuDNN to deterministic mode if requested and CUDA is available
     if torch.cuda.is_available():
         torch.cuda.manual_seed(seed)
         torch.cuda.manual_seed_all(seed)  # For multi-GPU setups
@@ -42,7 +36,6 @@ def set_seed(seed=42, deterministic_cudnn=True):
             torch.backends.cudnn.benchmark = True
             print("CUDA is available: Using CuDNN benchmark for better performance")
 
-    # Set environment variable for potential subprocesses
     os.environ["PYTHONHASHSEED"] = str(seed)
 
     print(f"Random seed set to {seed}")

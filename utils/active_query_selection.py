@@ -67,24 +67,24 @@ def compute_uncertainty_scores(
             score = logits.var().item()
         else:
             raise ValueError(f"Invalid method: {method}")
-        
+
         uncertainty_scores.append(score)
 
     return uncertainty_scores
 
 
 def select_active_pref_query(
-    reward_model, 
-    segment_start_end, 
-    data, 
-    uncertainty_method="disagreement", 
+    reward_model,
+    segment_start_end,
+    data,
+    uncertainty_method="disagreement",
     selection_pairs=1,
     candidate_pairs=None,
     dtw_matrix=None,
-    uncertainty_subsample=50  # Number of top uncertain pairs to consider for DTW diversity
+    uncertainty_subsample=50,  # Number of top uncertain pairs to consider for DTW diversity
 ):
     """Select pairs with highest uncertainty for active learning.
-    
+
     Args:
         reward_model: Trained ensemble reward model
         segment_start_end: List of segment start/end indices
@@ -94,19 +94,21 @@ def select_active_pref_query(
         candidate_pairs: List of candidate segment pairs to consider (optional)
         dtw_matrix: Pre-computed DTW distance matrix (optional)
         uncertainty_subsample: Number of top uncertain pairs to consider for DTW-based diversity selection
-        
+
     Returns:
         List of selected segment pairs
     """
 
     print(f"Computing uncertainty scores for {len(candidate_pairs)} candidate pairs...")
-    uncertainty_scores = np.array(compute_uncertainty_scores(
-        reward_model,
-        candidate_pairs,
-        segment_start_end,
-        data,
-        method=uncertainty_method,
-    ))
+    uncertainty_scores = np.array(
+        compute_uncertainty_scores(
+            reward_model,
+            candidate_pairs,
+            segment_start_end,
+            data,
+            method=uncertainty_method,
+        )
+    )
 
     # Sort pairs by uncertainty scores
     sorted_indices = np.argsort(uncertainty_scores)[::-1]
@@ -120,20 +122,20 @@ def select_active_pref_query(
     # # If DTW matrix is provided, use it to prioritize diverse pairs among the uncertain ones
     # if dtw_matrix is not None and len(top_uncertain_pairs) > max_pairs:
     #     print(f"Using DTW distance to select diverse pairs from top {len(top_uncertain_pairs)} uncertain pairs")
-        
+
     #     # Calculate DTW distances for each pair
     #     dtw_distances = []
     #     for pair_idx, (i, j) in enumerate(top_uncertain_pairs):
     #         dtw_dist = dtw_matrix[i, j]
     #         dtw_distances.append((pair_idx, dtw_dist))
-        
+
     #     # Sort by DTW distance (higher = more dissimilar = better)
     #     dtw_distances.sort(key=lambda x: x[1], reverse=True)
-        
+
     #     # Select the pairs with highest DTW distances
     #     top_diverse_indices = [dtw_distances[i][0] for i in range(min(max_pairs, len(dtw_distances)))]
     #     selected_pairs = [top_uncertain_pairs[i] for i in top_diverse_indices]
-        
+
     #     # Print the selected pair information
     #     for idx, pair in enumerate(selected_pairs):
     #         i, j = pair
@@ -141,7 +143,7 @@ def select_active_pref_query(
     #         uncertainty_score = uncertainty_scores[sorted_indices[top_uncertain_indices[top_diverse_indices[idx]]]]
     #         print(f"  Uncertainty: {uncertainty_score:.4f}")
     #         print(f"  DTW distance: {dtw_matrix[i, j]:.4f}")
-            
+
     #     return selected_pairs, uncertainty_score
     # else:
 
@@ -149,7 +151,11 @@ def select_active_pref_query(
     selected_pairs = [candidate_pairs[i] for i in sorted_indices[:selection_pairs]]
     selected_scores = uncertainty_scores[sorted_indices[:selection_pairs]]
 
-    print(f"Selected index: {sorted_indices[:selection_pairs]}, Selected pair: {selected_pairs}, score: {selected_scores}")
-    print(f"Selected {selection_pairs} pairs based on uncertainty method '{uncertainty_method}'")
-    
+    print(
+        f"Selected index: {sorted_indices[:selection_pairs]}, Selected pair: {selected_pairs}, score: {selected_scores}"
+    )
+    print(
+        f"Selected {selection_pairs} pairs based on uncertainty method '{uncertainty_method}'"
+    )
+
     return selected_pairs, selected_scores

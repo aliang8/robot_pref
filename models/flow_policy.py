@@ -6,11 +6,10 @@ import torch.nn.functional as F
 
 
 class NoisePredictionNet(nn.Module, ABC):
-
     @abstractmethod
     def forward(self, sample, timestep, global_cond):
         raise NotImplementedError
-    
+
 
 class FlowNoisePredictionNet(NoisePredictionNet):
     def __init__(self, action_dim, global_cond_dim, hidden_dim=256):
@@ -26,7 +25,7 @@ class FlowNoisePredictionNet(NoisePredictionNet):
             nn.Mish(),
             nn.Linear(hidden_dim, hidden_dim),
             nn.Mish(),
-            nn.Linear(hidden_dim, action_dim)  # predict noise for action
+            nn.Linear(hidden_dim, action_dim),  # predict noise for action
         )
 
     def forward(self, sample, timestep, global_cond):
@@ -104,5 +103,5 @@ class FlowPolicy(nn.Module):
         noise_pred = self.noise_pred_net(noisy_action, t, global_cond=obs)
 
         # Flow matching loss
-        loss = F.mse_loss(noise_pred, direction, reduction='none').mean(dim=1)
+        loss = F.mse_loss(noise_pred, direction, reduction="none").mean(dim=1)
         return loss

@@ -14,7 +14,6 @@ wandb:
 output:
   output_dir: "analysis"
   plot: True        # Generate comparison plots
-  plot_dir: "data_path_plots"
 
 # Other global settings
 seed: 42 
