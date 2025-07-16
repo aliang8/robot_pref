@@ -22,9 +22,13 @@ class FlowNoisePredictionNet(NoisePredictionNet):
 
         self.noise_pred_net = nn.Sequential(
             nn.Linear(input_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
             nn.Mish(),
+            nn.Dropout(0.2),
             nn.Linear(hidden_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
             nn.Mish(),
+            nn.Dropout(0.2),
             nn.Linear(hidden_dim, action_dim),  # predict noise for action
         )
 

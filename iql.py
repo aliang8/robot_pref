@@ -17,14 +17,14 @@ from torch.optim.lr_scheduler import CosineAnnealingLR
 from tqdm import trange
 
 import models.reward_model as reward_model
-import utils.env as utils_env
+from utils.env import get_robomimic_env, wrap_env
 import wandb
 from learn_reward import build_rm_checkpoint_path
 from models.flow_policy import FlowNoisePredictionNet, FlowPolicy
 from utils.eval import eval_actor
 from utils.wandb import wandb_init
 from utils.seed import set_seed
-from utils.data import normalize_datasets
+from utils.data import normalize_datasets, Robomimic_dataset
 
 # Type aliases
 TensorBatch = List[torch.Tensor]
@@ -406,11 +406,11 @@ def print_dataset_statistics(dataset: Dict[str, np.ndarray]) -> None:
 def setup_environment_and_dataset(config):
     """Setup environment and dataset based on configuration."""
     if "metaworld" in config.env:
-        env = utils_env.make_metaworld_env(config.env, config.seed)
-        dataset = utils_env.MetaWorld_dataset(config)
+        env = make_metaworld_env(config.env, config.seed)
+        dataset = MetaWorld_dataset(config)
     elif "robomimic" in config.env:
-        env = utils_env.get_robomimic_env(config.data_path, seed=config.seed)
-        dataset = utils_env.Robomimic_dataset(config.data_path, clip_last=True)
+        env = get_robomimic_env(config.data_path, seed=config.seed)
+        dataset = Robomimic_dataset(config.data_path, clip_last=True)
     else:
         env = gym.make(config.env)
         # Add dataset loading for standard gym environments if needed
@@ -553,7 +553,7 @@ def train(config):
     print_dataset_statistics(dataset)
     
     # Wrap environment
-    env = utils_env.wrap_env(env, state_mean=state_mean, state_std=state_std)
+    env = wrap_env(env, state_mean=state_mean, state_std=state_std)
     
     # Setup replay buffer
     replay_buffer = ReplayBuffer(state_dim, action_dim, config.buffer_size, device=config.device)
@@ -567,10 +567,10 @@ def train(config):
     print_model_info(q_network, v_network, actor)
     
     # Setup optimizers
-    v_optimizer = torch.optim.Adam(v_network.parameters(), lr=config.vf_lr)
-    q_optimizer = torch.optim.Adam(q_network.parameters(), lr=config.qf_lr)
-    actor_optimizer = torch.optim.Adam(actor.parameters(), lr=config.actor_lr)
-    
+    v_optimizer = torch.optim.Adam(v_network.parameters(), lr=config.vf_lr, weight_decay=1e-4)
+    q_optimizer = torch.optim.Adam(q_network.parameters(), lr=config.qf_lr, weight_decay=1e-4)
+    actor_optimizer = torch.optim.Adam(actor.parameters(), lr=config.actor_lr, weight_decay=1e-4)
+
     # Initialize trainer
     trainer = ImplicitQLearning(
         max_action=max_action,

@@ -417,9 +417,10 @@ def normalize_datasets(dataset):
         data["next_observations"] = (data["next_observations"] - state_mean) / state_std
 
         # Normalize goal points
-        goal_points_mean = data["goal_points"].mean(axis=0)
-        goal_points_std = data["goal_points"].std(axis=0) + 1e-8
-        data["goal_points"] = (data["goal_points"] - goal_points_mean) / goal_points_std
+        if "goal_points" in data:
+            goal_points_mean = data["goal_points"].mean(axis=0)
+            goal_points_std = data["goal_points"].std(axis=0) + 1e-8
+            data["goal_points"] = (data["goal_points"] - goal_points_mean) / goal_points_std
 
         return state_mean, state_std
 
@@ -508,7 +509,7 @@ def Robomimic_dataset(data_path, return_images=False, clip_last=False):
                 rewards = demo_data["rewards"][:-1]
                 images = demo_data["obs"]["agentview_image"][:-1]
 
-                goal_points = demo_data["goal_points"][:-1]
+                # goal_points = demo_data["goal_points"][:-1]
             else:
                 next_obs = obs
 
