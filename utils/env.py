@@ -27,8 +27,6 @@ from tqdm import trange
 import models.reward_model as reward_model
 import utils.env as utils_env
 import wandb
-from learn_reward import build_rm_checkpoint_path
-from models.flow_policy import FlowNoisePredictionNet, FlowPolicy
 from utils.eval import eval_actor
 from utils.wandb import wandb_init
 
@@ -296,119 +294,6 @@ def DMC_dataset(config):
         "terminals": np.array(done_),
     }
 
-
-def Robomimic_dataset(data_path, return_images=False, clip_last=False, goal_state=True):
-    """
-    Load Robomimic dataset and build:
-    If clip_last, we don't use the last transition for IQL
-    """
-
-    print(f"Loading data from: {data_path}")
-
-    with h5py.File(data_path, "r") as f:
-        data = f["data"]
-
-        all_observations = []
-        all_next_observations = []
-        all_actions = []
-        all_rewards = []
-        all_images = []
-        all_terminals = []
-
-        all_goal_points = []
-
-        print(f"Found {len(data.keys())} trajectories in dataset")
-
-        for demo in tqdm(
-            sorted(data.keys(), key=lambda x: int(x.split("_")[1])),
-            desc="Processing demos",
-        ):
-            demo_data = data[demo]
-            import ipdb
-
-            ipdb.set_trace()
-            if goal_state:
-                # Concatenate observation components
-                obs = np.concatenate(
-                    [
-                        demo_data["obs"]["robot0_eef_pos"][:],
-                        demo_data["obs"]["robot0_eef_quat"][:],
-                        demo_data["obs"]["robot0_gripper_qpos"][:],
-                        demo_data["obs"]["object"][:],
-                    ],
-                    axis=1,
-                )
-            else:
-                obs = np.concatenate(
-                    [
-                        demo_data["obs"]["robot0_eef_pos"][:],
-                        demo_data["obs"]["robot0_eef_quat"][:],
-                        demo_data["obs"]["robot0_gripper_qpos"][:],
-                    ],
-                    axis=1,
-                )
-
-            if clip_last:
-                next_obs = obs[1:]
-                obs = obs[:-1]
-
-                acts = demo_data["actions"][:-1]
-                rewards = demo_data["rewards"][:-1]
-                images = demo_data["obs"]["agentview_image"][:-1]
-
-                goal_points = demo_data["goal_points"][:-1]
-            else:
-                next_obs = obs
-
-                acts = demo_data["actions"]
-                rewards = demo_data["rewards"]
-                images = demo_data["obs"]["agentview_image"]
-
-                goal_points = demo_data["goal_points"]
-
-            all_observations.append(obs)
-            all_next_observations.append(next_obs)
-            all_actions.append(acts)
-            all_rewards.append(rewards)
-
-            all_goal_points.append(goal_points)
-
-            if images.shape[1] != 84:
-                # Assuming images are in format (batch, height, width, channels)
-                resized_images = np.array([cv2.resize(img, (84, 84)) for img in images])
-                all_images.append(resized_images)
-            else:
-                all_images.append(images)
-            # Create terminals array - True only for the last step of each episode
-            episode_length = len(acts)
-            terminals = np.zeros(episode_length, dtype=bool)
-            terminals[-1] = True  # Mark the last step as terminal
-            all_terminals.append(terminals)
-
-        # Convert to numpy arrays
-        observations = np.concatenate(all_observations, axis=0)
-        next_observations = np.concatenate(all_next_observations, axis=0)
-        actions = np.concatenate(all_actions, axis=0)
-        rewards = np.concatenate(all_rewards, axis=0)
-        images = np.concatenate(all_images, axis=0)
-        terminals = np.concatenate(all_terminals, axis=0)
-        goal_points = np.concatenate(all_goal_points, axis=0)
-
-    print(f"Total number of transitions: {len(observations)}")
-
-    dataset = {
-        "observations": observations,
-        "next_observations": next_observations,
-        "actions": actions,
-        "rewards": rewards,
-        "terminals": terminals,
-        "goal_points": goal_points,
-    }
-    if return_images:
-        dataset["images"] = images
-
-    return dataset
-    
 
 def get_robomimic_env(
     data_path,

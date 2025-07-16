@@ -128,7 +128,8 @@ def create_dataframe(run_data):
 
         # Calculate top 3 average success rate
         success_rates = run["eval_success_rates"]
-        top_rates = success_rates[-5:]  # Last 5 rates
+        # top_rates = success_rates[-5:]  # Last 5 rates
+        top_rates = sorted(success_rates, reverse=True)[:3]
         row["top3_avg_eval_success_rate"] = sum(top_rates) / len(top_rates)
 
         rows.append(row)
@@ -177,6 +178,11 @@ def classify_reward_type(row):
         if get_config_value(row, "use_goal_pos") is True:
             return "dtw prefs (2d goal + 3d eef)"
         return "dtw prefs (3d eef)"
+    
+    if get_config_value(row, "eef_rm") is True:
+        if get_config_value(row, "eef_rm_2d") is True:
+            return "eef + 2d goal rm"
+        return "eef rm"
 
     if get_config_value(row, "single_emb") is True:
         return None

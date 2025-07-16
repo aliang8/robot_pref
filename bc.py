@@ -15,15 +15,12 @@ from tqdm import trange
 import utils.env as utils_env
 import wandb
 from utils.seed import set_seed
-from iql import ReplayBuffer, eval_actor, print_dataset_statistics, wrap_env
+from iql import ReplayBuffer, eval_actor, print_dataset_statistics
 from models.flow_policy import FlowNoisePredictionNet, FlowPolicy
-from reward_utils import normalize_states
 from utils.wandb import wandb_init
+from utils.data import Robomimic_dataset
 
 TensorBatch = List[torch.Tensor]
-
-
-
 
 class BC:
     def __init__(
@@ -98,7 +95,7 @@ def train(config):
     elif "robomimic" in config.env:
         env = utils_env.get_robomimic_env(config.data_path, seed=config.seed)
         # env_fn = EnvFactory(config.data_path)
-        dataset = utils_env.Robomimic_dataset(config.data_path)
+        dataset = Robomimic_dataset(config.data_path)
     else:
         env = gym.make(config.env)
 
@@ -130,7 +127,7 @@ def train(config):
 
     print_dataset_statistics(dataset)
 
-    env = wrap_env(env, state_mean=state_mean, state_std=state_std)
+    env = utils_env.wrap_env(env, state_mean=state_mean, state_std=state_std)
     replay_buffer = ReplayBuffer(
         state_dim,
         action_dim,

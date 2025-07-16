@@ -83,7 +83,6 @@ class FlowPolicy(nn.Module):
             action = action + (tcont_next - tcont) * noise_pred
 
         return action
-        # return torch.clamp(action * self.max_action, -self.max_action, self.max_action)
 
     def forward(self, obs, action):
         """

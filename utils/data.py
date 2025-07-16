@@ -2,9 +2,46 @@ import random
 
 import numpy as np
 import torch
+import inspect
+import random
+import time
+from pathlib import Path
 
-# from d3rlpy.datasets import MDPDataset
+from env.robomimic_lowdim import RobomimicLowdimWrapper
+import os
+import pickle as pkl
+import copy
+import os
+import random
+import uuid
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+
+import gym
+import hydra
+import numpy as np
+import rich
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from omegaconf import DictConfig, OmegaConf
+from torch.distributions import Normal
+from torch.optim.lr_scheduler import CosineAnnealingLR
+
+import models.reward_model as reward_model
+import utils.env as utils_env
+import wandb
+from utils.eval import eval_actor
+from utils.wandb import wandb_init
+
+import cv2
+import h5py
+import numpy as np
 from tqdm import tqdm
+from gym.wrappers.time_limit import TimeLimit
+
+from tqdm import tqdm
+import utils.env as utils_env
+import cv2
 
 
 # Define a simple AttrDict class that provides dot access to dictionaries
@@ -345,156 +382,181 @@ def segment_episodes_random(data, segment_length, num_segments=None, val_split=0
     return segments, segment_indices, val_segments, val_segment_indices, val_samples
 
 
-def load_dataset(
-    data,
-    reward_model=None,
-    device=None,
-    use_ground_truth=False,
-    max_segments=None,
-    reward_batch_size=32,
-    use_zero_rewards=False,
-):
-    """Load and process dataset for either IQL or BC training.
+def load_datasets(config):
+    """Load main dataset and cross dataset if needed."""
+    # Load main dataset
+    if "metaworld" in config.env:
+        dataset = utils_env.MetaWorld_dataset(config)
+    elif "dmc" in config.env:
+        dataset = utils_env.DMC_dataset(config)
+        config.threshold *= 0.1  # Different reward scaling
+    elif "robomimic" in config.env:
+        dataset = utils_env.Robomimic_dataset(config.data_path, return_images=True)
+    else:
+        raise ValueError(f"Unsupported environment type: {config.env}")
 
-    Args:
-        data: TensorDict with observations, actions, rewards, and episode IDs
-        reward_model: Trained reward model (required for IQL, None for BC)
-        device: Device to run the reward model on (required for IQL)
-        use_ground_truth: If True, use ground truth rewards for IQL instead of reward model predictions
-        max_segments: Maximum number of segments to process (optional)
-        reward_batch_size: Batch size for reward computation (for IQL)
-        scale_rewards: If True, scales rewards to specified min/max range
-        use_zero_rewards: If True, replace all rewards with zeros (sanity check)
+    # Load cross dataset if needed
+    cross_dataset = None
+    if config.get("cross_data_path"):
+        cross_dataset = utils_env.Robomimic_dataset(
+            config.cross_data_path, return_images=True
+        )
 
-    Returns:
-        d3rlpy MDPDataset with observations, actions, rewards, and terminals
+    return dataset, cross_dataset
+
+
+def normalize_datasets(dataset):
+    """Normalize observations and goal points for both datasets."""
+
+    def normalize_dataset(data):
+        # Normalize observations
+        state_mean = data["observations"].mean(axis=0)
+        state_std = np.maximum(data["observations"].std(axis=0) + 1e-8, 1e-2)
+
+        data["observations"] = (data["observations"] - state_mean) / state_std
+        data["next_observations"] = (data["next_observations"] - state_mean) / state_std
+
+        # Normalize goal points
+        goal_points_mean = data["goal_points"].mean(axis=0)
+        goal_points_std = data["goal_points"].std(axis=0) + 1e-8
+        data["goal_points"] = (data["goal_points"] - goal_points_mean) / goal_points_std
+
+        return state_mean, state_std
+
+    return normalize_dataset(dataset)
+
+
+def convert_labels_to_array(label_list):
+    """Convert preference labels to array format."""
+    label_map = {1: [1, 0], 0: [0, 1]}
+    return np.array([label_map.get(label, [0.5, 0.5]) for label in label_list])
+
+
+def create_segment_indices(idx_st_list, segment_size):
+    """Create segment indices from start indices."""
+    return [[j for j in range(i, i + segment_size)] for i in idx_st_list]
+
+
+def get_obs_act_data(dataset, idx_list):
+    """Get concatenated observations and actions for segments."""
+    return np.concatenate(
+        (dataset["observations"][idx_list], dataset["actions"][idx_list]), axis=-1
+    )
+
+
+def get_images_data(dataset, idx_list):
+    """Get images for segments if available."""
+    return dataset["images"][idx_list] if "images" in dataset else None
+
+
+def get_eef_data(dataset, idx_list, with_goal=False):
+    """Get end-effector positions for segments."""
+    if with_goal:
+        return np.concatenate(
+            (
+                dataset["observations"][:, :3][idx_list],
+                dataset["goal_points"][idx_list],
+            ),
+            axis=-1,
+        )
+    return dataset["observations"][:, :3][idx_list]
+
+
+def Robomimic_dataset(data_path, return_images=False, clip_last=False):
+    """
+    Load Robomimic dataset and build:
+    If clip_last, we don't use the last transition for IQL
     """
 
-    # Extract necessary data
-    observations = data["obs"] if "obs" in data else data["state"]
-    actions = data["action"]
-    episode_ids = data["episode"]
+    print(f"Loading data from: {data_path}")
 
-    # For BC or ground truth rewards, extract original rewards
-    if reward_model is None or use_ground_truth:
-        if "reward" not in data:
-            raise ValueError(
-                "Ground truth rewards requested but 'reward' not found in data."
-            )
-        rewards = data["reward"].cpu()
+    with h5py.File(data_path, "r") as f:
+        data = f["data"]
 
-    # Make sure data is on CPU for preprocessing
-    observations = observations.cpu()
-    actions = actions.cpu()
-    episode_ids = episode_ids.cpu()
-
-    # Filter out observations with NaN values
-    valid_mask = ~torch.isnan(observations).any(dim=1) & ~torch.isnan(actions).any(
-        dim=1
-    )
-    if reward_model is None or use_ground_truth:
-        valid_mask = valid_mask & ~torch.isnan(rewards)
-
-    if not valid_mask.any():
-        raise ValueError("No valid observations found in the dataset.")
-
-    # Extract valid data
-    valid_obs = observations[valid_mask]
-    valid_actions = actions[valid_mask]
-    valid_episodes = episode_ids[valid_mask]
-
-    if reward_model is None or use_ground_truth:
-        valid_rewards = rewards[valid_mask].numpy()
-
-    print(
-        f"Using {valid_obs.shape[0]} valid observations out of {observations.shape[0]} total"
-    )
-
-    # Process rewards based on algorithm and options
-    if reward_model is not None and not use_ground_truth:
-        # IQL with reward model - Process in manageable batches
-        process_batch_size = reward_batch_size or 1024
+        all_observations = []
+        all_next_observations = []
+        all_actions = []
         all_rewards = []
+        all_images = []
+        all_terminals = []
 
-        # Compute rewards using the trained reward model
-        reward_model.eval()  # Ensure model is in evaluation mode
+        all_goal_points = []
 
-        with torch.no_grad():
-            for start_idx in tqdm(
-                range(0, len(valid_obs), process_batch_size), desc="Computing rewards"
-            ):
-                end_idx = min(start_idx + process_batch_size, len(valid_obs))
+        print(f"Found {len(data.keys())} trajectories in dataset")
 
-                # Move batch to device
-                batch_obs = valid_obs[start_idx:end_idx].to(device)
-                batch_actions = valid_actions[start_idx:end_idx].to(device)
+        for demo in tqdm(
+            sorted(data.keys(), key=lambda x: int(x.split("_")[1])),
+            desc="Processing demos",
+        ):
+            demo_data = data[demo]
+            # Concatenate observation components
+            obs = np.concatenate(
+                [
+                    demo_data["obs"]["robot0_eef_pos"][:],
+                    demo_data["obs"]["robot0_eef_quat"][:],
+                    demo_data["obs"]["robot0_gripper_qpos"][:],
+                    demo_data["obs"]["object"][:],
+                ],
+                axis=1,
+            )
 
-                # Compute rewards, need the per step reward not the summed reward
-                batch_rewards = reward_model(batch_obs, batch_actions).cpu().numpy()
-                all_rewards.append(batch_rewards)
-        # Combine all rewards
-        if len(all_rewards) == 1:
-            rewards_np = all_rewards[0]
-        else:
-            rewards_np = np.concatenate(all_rewards)
-    else:
-        # BC or IQL with ground truth - use the extracted rewards
-        rewards_np = valid_rewards
+            if clip_last:
+                next_obs = obs[1:]
+                obs = obs[:-1]
 
-    print(
-        f"Rewards max: {np.max(rewards_np)}, min: {np.min(rewards_np)}, mean: {np.mean(rewards_np)}"
-    )
+                acts = demo_data["actions"][:-1]
+                rewards = demo_data["rewards"][:-1]
+                images = demo_data["obs"]["agentview_image"][:-1]
 
-    # Apply zero rewards if requested (sanity check)
-    if use_zero_rewards:
-        print("\n" + "=" * 60)
-        print("⚠️ SANITY CHECK MODE: USING ZERO REWARDS FOR ALL TRANSITIONS ⚠️")
-        print(
-            "This mode replaces all rewards with zeros to test if policy learning depends on rewards."
-        )
-        print("=" * 60 + "\n")
-        original_rewards = rewards_np.copy()
-        rewards_np = np.zeros_like(rewards_np)
-        print(
-            f"Reward stats before zeroing - Mean: {np.mean(original_rewards):.4f}, Min: {np.min(original_rewards):.4f}, Max: {np.max(original_rewards):.4f}"
-        )
-        print(
-            f"Reward stats after zeroing - Mean: {np.mean(rewards_np):.4f}, Min: {np.min(rewards_np):.4f}, Max: {np.max(rewards_np):.4f}"
-        )
+                goal_points = demo_data["goal_points"][:-1]
+            else:
+                next_obs = obs
 
-    # Create terminals array (True at the end of each episode)
-    episode_ends = torch.cat(
-        [
-            valid_episodes[1:] != valid_episodes[:-1],
-            torch.tensor([True]),  # Last observation is always an episode end
-        ]
-    )
-    terminals_np = episode_ends.numpy()
+                acts = demo_data["actions"]
+                rewards = demo_data["rewards"]
+                images = demo_data["obs"]["agentview_image"]
 
-    # Convert to numpy for d3rlpy
-    observations_np = valid_obs.numpy()
-    actions_np = valid_actions.numpy()
+                # goal_points = demo_data["goal_points"]
 
-    # Create MDPDataset with the rewards
-    dataset = MDPDataset(
-        observations=observations_np,
-        actions=actions_np,
-        rewards=rewards_np,
-        terminals=terminals_np,
-    )
+            all_observations.append(obs)
+            all_next_observations.append(next_obs)
+            all_actions.append(acts)
+            all_rewards.append(rewards)
 
-    # Print final dataset statistics
-    print(
-        f"Final dataset size: {dataset.size()} transitions with {dataset.size() - np.sum(terminals_np)} non-terminal transitions"
-    )
-    reward_stats = {
-        "mean": np.mean(rewards_np),
-        "std": np.std(rewards_np),
-        "min": np.min(rewards_np),
-        "max": np.max(rewards_np),
+            # all_goal_points.append(goal_points)
+
+            if images.shape[1] != 84:
+                # Assuming images are in format (batch, height, width, channels)
+                resized_images = np.array([cv2.resize(img, (84, 84)) for img in images])
+                all_images.append(resized_images)
+            else:
+                all_images.append(images)
+            # Create terminals array - True only for the last step of each episode
+            episode_length = len(acts)
+            terminals = np.zeros(episode_length, dtype=bool)
+            terminals[-1] = True  # Mark the last step as terminal
+            all_terminals.append(terminals)
+
+        # Convert to numpy arrays
+        observations = np.concatenate(all_observations, axis=0)
+        next_observations = np.concatenate(all_next_observations, axis=0)
+        actions = np.concatenate(all_actions, axis=0)
+        rewards = np.concatenate(all_rewards, axis=0)
+        images = np.concatenate(all_images, axis=0)
+        terminals = np.concatenate(all_terminals, axis=0)
+        # goal_points = np.concatenate(all_goal_points, axis=0)
+
+    print(f"Total number of transitions: {len(observations)}")
+
+    dataset = {
+        "observations": observations,
+        "next_observations": next_observations,
+        "actions": actions,
+        "rewards": rewards,
+        "terminals": terminals,
+        # "goal_points": goal_points,
     }
-    print(
-        f"Reward statistics: mean={reward_stats['mean']:.4f}, std={reward_stats['std']:.4f}, min={reward_stats['min']:.4f}, max={reward_stats['max']:.4f}"
-    )
+    if return_images:
+        dataset["images"] = images
 
     return dataset

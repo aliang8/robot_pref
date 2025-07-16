@@ -15,7 +15,6 @@ max_timesteps: 150_000
 n_episodes: 30
 name: IQL
 normalize: true
-normalize_reward: false
 qf_lr: 3e-4
 record_video: true
 seed: 0

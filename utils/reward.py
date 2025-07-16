@@ -106,6 +106,7 @@ def load_preferences_from_directory(pref_dir):
 
     return unique_pref_list, stats
 
+
 def get_feedbacks(data_path, num_prefs, human=False):
     # TODO: implement validation set for human preferences (use the human prefs or gt?)
     """Get ground truth or human feedbacks from the dataset.
@@ -435,6 +436,7 @@ def get_reward_model_predictions(
             return [pred_ret_1], [pred_ret_2]
         else:
             return pred_ret_1, pred_ret_2
+
 
 def compute_dtw_matrix_cross(
     dataset, seg_indices, cross_dataset, cross_seg_indices, config
