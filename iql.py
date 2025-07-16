@@ -119,7 +119,7 @@ class MLP(nn.Module):
     def __init__(
         self,
         dims: List[int],
-        activation_fn: Callable[[], nn.Module] = nn.ReLU,
+        activation_fn: Callable[[], nn.Module] = nn.Mish,
         output_activation_fn: Optional[Callable[[], nn.Module]] = None,
         squeeze_output: bool = False,
         dropout: Optional[float] = None,
@@ -232,21 +232,23 @@ class ImplicitQLearning:
 
         v = self.vf(observations)
         adv = target_q - v
+
+        v_loss = asymmetric_l2_loss(adv, self.iql_tau)
         
+        self.v_optimizer.zero_grad()
+        v_loss.backward()
+        self.v_optimizer.step()
+
         # Log metrics
         log_dict.update({
             "target_q_mean": target_q.mean().item(),
             "v_mean": v.mean().item(),
             "adv_mean": adv.mean().item(),
-        })
-        
-        v_loss = asymmetric_l2_loss(adv, self.iql_tau)
-        log_dict["value_loss"] = v_loss.item()
-        
-        self.v_optimizer.zero_grad()
-        v_loss.backward()
-        self.v_optimizer.step()
-        
+            "v_loss": v_loss.item(),})
+
+        # Log adv histogram
+        wandb.log({"adv_hist": wandb.Histogram(adv.detach().cpu().numpy())})
+            
         return adv
 
     def _update_q(
@@ -259,11 +261,15 @@ class ImplicitQLearning:
         log_dict: Dict,
     ) -> None:
         """Update Q-function."""
+
+        if rewards.shape[-1] == 1:
+            rewards = rewards.squeeze(-1)
+        if terminals.shape[-1] == 1:
+            terminals = terminals.squeeze(-1)
+
         targets = rewards + (1.0 - terminals.float()) * self.discount * next_v.detach()
         qs = self.qf.both(observations, actions)
         q_loss = sum(F.mse_loss(q, targets) for q in qs) / len(qs)
-        
-        log_dict["q_loss"] = q_loss.item()
         
         self.q_optimizer.zero_grad()
         q_loss.backward()
@@ -271,6 +277,8 @@ class ImplicitQLearning:
         
         # Update target Q network
         soft_update(self.q_target, self.qf, self.tau)
+
+        log_dict["q_loss"] = q_loss.item()
 
     def _update_policy(
         self,
@@ -283,16 +291,19 @@ class ImplicitQLearning:
         exp_adv = torch.exp(self.beta * adv.detach()).clamp(max=EXP_ADV_MAX)
         loss = self.actor(observations, actions)
         
-        log_dict["bc_loss"] = loss.mean().item()
-        
         # Advantage-weighted regression
         policy_loss = torch.mean(exp_adv * loss)
-        log_dict["policy_loss"] = policy_loss.item()
-        
+
         self.actor_optimizer.zero_grad()
         policy_loss.backward()
         self.actor_optimizer.step()
         self.actor_lr_schedule.step()
+
+        log_dict.update({
+            "bc_loss": loss.mean().item(),
+            "policy_loss": policy_loss.item(),
+            "lr": self.actor_optimizer.param_groups[0]["lr"],
+        })
 
     def train(self, batch: TensorBatch) -> Dict[str, float]:
         """Train the model on a batch of data."""
@@ -303,10 +314,10 @@ class ImplicitQLearning:
         # Compute next value
         with torch.no_grad():
             next_v = self.vf(next_observations)
-        
+
         # Update networks
         adv = self._update_v(observations, actions, log_dict)
-        self._update_q(next_v, observations, actions, rewards.squeeze(-1), dones.squeeze(-1), log_dict)
+        self._update_q(next_v, observations, actions, rewards, dones, log_dict)
         self._update_policy(adv, observations, actions, log_dict)
         
         return log_dict
@@ -410,7 +421,7 @@ def setup_environment_and_dataset(config):
         dataset = MetaWorld_dataset(config)
     elif "robomimic" in config.env:
         env = get_robomimic_env(config.data_path, seed=config.seed)
-        dataset = Robomimic_dataset(config.data_path, clip_last=True)
+        dataset = Robomimic_dataset(config.data_path, clip_last=True, filter_data=config.filter_data)
     else:
         env = gym.make(config.env)
         # Add dataset loading for standard gym environments if needed
@@ -567,8 +578,8 @@ def train(config):
     print_model_info(q_network, v_network, actor)
     
     # Setup optimizers
-    v_optimizer = torch.optim.Adam(v_network.parameters(), lr=config.vf_lr, weight_decay=1e-4)
-    q_optimizer = torch.optim.Adam(q_network.parameters(), lr=config.qf_lr, weight_decay=1e-4)
+    v_optimizer = torch.optim.Adam(v_network.parameters(), lr=config.vf_lr)
+    q_optimizer = torch.optim.Adam(q_network.parameters(), lr=config.qf_lr)
     actor_optimizer = torch.optim.Adam(actor.parameters(), lr=config.actor_lr, weight_decay=1e-4)
 
     # Initialize trainer

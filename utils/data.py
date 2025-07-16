@@ -2,42 +2,19 @@ import random
 
 import numpy as np
 import torch
-import inspect
 import random
-import time
-from pathlib import Path
 
-from env.robomimic_lowdim import RobomimicLowdimWrapper
-import os
-import pickle as pkl
-import copy
-import os
 import random
-import uuid
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
-import gym
-import hydra
 import numpy as np
-import rich
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
-from omegaconf import DictConfig, OmegaConf
-from torch.distributions import Normal
-from torch.optim.lr_scheduler import CosineAnnealingLR
 
-import models.reward_model as reward_model
 import utils.env as utils_env
-import wandb
-from utils.eval import eval_actor
-from utils.wandb import wandb_init
 
 import cv2
 import h5py
 import numpy as np
 from tqdm import tqdm
-from gym.wrappers.time_limit import TimeLimit
 
 from tqdm import tqdm
 import utils.env as utils_env
@@ -391,16 +368,14 @@ def load_datasets(config):
         dataset = utils_env.DMC_dataset(config)
         config.threshold *= 0.1  # Different reward scaling
     elif "robomimic" in config.env:
-        dataset = utils_env.Robomimic_dataset(config.data_path, return_images=True)
+        dataset = Robomimic_dataset(config.data_path, return_images=True)
     else:
         raise ValueError(f"Unsupported environment type: {config.env}")
 
     # Load cross dataset if needed
     cross_dataset = None
     if config.get("cross_data_path"):
-        cross_dataset = utils_env.Robomimic_dataset(
-            config.cross_data_path, return_images=True
-        )
+        cross_dataset = Robomimic_dataset(config.cross_data_path, return_images=True)
 
     return dataset, cross_dataset
 
@@ -420,7 +395,9 @@ def normalize_datasets(dataset):
         if "goal_points" in data:
             goal_points_mean = data["goal_points"].mean(axis=0)
             goal_points_std = data["goal_points"].std(axis=0) + 1e-8
-            data["goal_points"] = (data["goal_points"] - goal_points_mean) / goal_points_std
+            data["goal_points"] = (
+                data["goal_points"] - goal_points_mean
+            ) / goal_points_std
 
         return state_mean, state_std
 
@@ -463,7 +440,9 @@ def get_eef_data(dataset, idx_list, with_goal=False):
     return dataset["observations"][:, :3][idx_list]
 
 
-def Robomimic_dataset(data_path, return_images=False, clip_last=False):
+def Robomimic_dataset(
+    data_path, return_images=False, clip_last=False, filter_data=False
+):
     """
     Load Robomimic dataset and build:
     If clip_last, we don't use the last transition for IQL
@@ -509,7 +488,7 @@ def Robomimic_dataset(data_path, return_images=False, clip_last=False):
                 rewards = demo_data["rewards"][:-1]
                 images = demo_data["obs"]["agentview_image"][:-1]
 
-                # goal_points = demo_data["goal_points"][:-1]
+                goal_points = demo_data["goal_points"][:-1]
             else:
                 next_obs = obs
 
@@ -517,14 +496,14 @@ def Robomimic_dataset(data_path, return_images=False, clip_last=False):
                 rewards = demo_data["rewards"]
                 images = demo_data["obs"]["agentview_image"]
 
-                # goal_points = demo_data["goal_points"]
+                goal_points = demo_data["goal_points"]
 
             all_observations.append(obs)
             all_next_observations.append(next_obs)
             all_actions.append(acts)
             all_rewards.append(rewards)
 
-            # all_goal_points.append(goal_points)
+            all_goal_points.append(goal_points)
 
             if images.shape[1] != 84:
                 # Assuming images are in format (batch, height, width, channels)
@@ -538,6 +517,37 @@ def Robomimic_dataset(data_path, return_images=False, clip_last=False):
             terminals[-1] = True  # Mark the last step as terminal
             all_terminals.append(terminals)
 
+        if filter_data:
+            # Filter out trajectories that fall one standard deviation below the mean
+            rewards_sum = np.array([rewards.mean() for rewards in all_rewards])
+            mu, std = rewards_sum.mean(), rewards_sum.std()
+
+            keep_mask = rewards_sum >= (mu - std)
+
+            all_observations = [
+                all_observations[i] for i in range(len(keep_mask)) if keep_mask[i]
+            ]
+            all_next_observations = [
+                all_next_observations[i] for i in range(len(keep_mask)) if keep_mask[i]
+            ]
+            all_actions = [
+                all_actions[i] for i in range(len(keep_mask)) if keep_mask[i]
+            ]
+            all_rewards = [
+                all_rewards[i] for i in range(len(keep_mask)) if keep_mask[i]
+            ]
+            all_images = [all_images[i] for i in range(len(keep_mask)) if keep_mask[i]]
+            all_terminals = [
+                all_terminals[i] for i in range(len(keep_mask)) if keep_mask[i]
+            ]
+            all_goal_points = [
+                all_goal_points[i] for i in range(len(keep_mask)) if keep_mask[i]
+            ]
+
+            print(
+                f"Filtered out {len(rewards_sum) - sum(keep_mask)} trajectories based on rewards"
+            )
+
         # Convert to numpy arrays
         observations = np.concatenate(all_observations, axis=0)
         next_observations = np.concatenate(all_next_observations, axis=0)
@@ -545,7 +555,7 @@ def Robomimic_dataset(data_path, return_images=False, clip_last=False):
         rewards = np.concatenate(all_rewards, axis=0)
         images = np.concatenate(all_images, axis=0)
         terminals = np.concatenate(all_terminals, axis=0)
-        # goal_points = np.concatenate(all_goal_points, axis=0)
+        goal_points = np.concatenate(all_goal_points, axis=0)
 
     print(f"Total number of transitions: {len(observations)}")
 
@@ -555,7 +565,7 @@ def Robomimic_dataset(data_path, return_images=False, clip_last=False):
         "actions": actions,
         "rewards": rewards,
         "terminals": terminals,
-        # "goal_points": goal_points,
+        "goal_points": goal_points,
     }
     if return_images:
         dataset["images"] = images

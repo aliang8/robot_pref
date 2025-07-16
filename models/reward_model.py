@@ -174,7 +174,7 @@ class RewardModel:
         for i in range(n_layers - 1):  # -1 because we already added the first layer
             net.append(nn.Linear(H, H))
             net.append(nn.LayerNorm(H))
-            net.append(nn.LeakyReLU())
+            net.append(nn.Mish())
             net.append(nn.Dropout(self.dropout)) if self.dropout > 0 else None
 
         # Output layer (no activation in the middle, we'll add it at the end)

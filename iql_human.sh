@@ -20,13 +20,13 @@ for seed in "${seeds[@]}"; do
     (
     echo "Running reward model learning for seed $seed"
     python3 learn_reward.py seed=$seed feedback_num=$feedback_num \
-    eef_rm=$eef_rm use_cross=$use_cross dtw_k_augment=$dtw_k_augment single_emb=$single_emb \
+    eef_rm=$eef_rm use_cross=$use_cross single_emb=$single_emb \
     use_wandb=$use_wandb data_path=$data_path cross_data_path=$cross_data_path human=$human
 
     echo "Running IQL with reward model for seed $seed"
     python3 iql.py use_reward_model=True seed=$seed feedback_num=$feedback_num \
-    eef_rm=$eef_rm use_cross=$use_cross dtw_k_augment=$dtw_k_augment single_emb=$single_emb \
-    use_wandb=$use_wandb data_path=$cross_data_path human=$human
+    eef_rm=$eef_rm use_cross=$use_cross single_emb=$single_emb \
+    use_wandb=$use_wandb data_path=$data_path human=$human
     ) &
 done
 

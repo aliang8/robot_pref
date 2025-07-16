@@ -2,8 +2,9 @@
 
 # data_path="/scr/shared/datasets/robot_pref/stack_mixed/stack_mixed.hdf5"
 # data_path="/tmp/mimicgen_stack_100/stack/demo_src_stack_task_D0_r_Panda/demo.hdf5"
-data_path="/tmp/square_500/square/demo_src_square_task_D0_r_Panda/demo_success.hdf5"
+# data_path="/tmp/square_500/square/demo_src_square_task_D0_r_Panda/demo_success.hdf5"
 # data_path="/tmp/square_500/square/demo_src_square_task_D0_r_Panda/demo.hdf5"
+data_path="/tmp/mimicgen_stack_1000/stack/demo_src_stack_task_D0_r_Sawyer/demo.hdf5"
 
 
 use_wandb=True

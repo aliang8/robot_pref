@@ -5,8 +5,6 @@ import gym
 import numpy as np
 import torch
 import torch.nn as nn
-from utils.viz import create_video_grid
-from utils.wandb import log_to_wandb
 
 
 os.environ["MUJOCO_GL"] = "egl"
