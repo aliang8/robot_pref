@@ -1,7 +1,6 @@
 import os
-import random
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List
 
 import gym
 import hydra
@@ -43,7 +42,7 @@ class BC:
         log_dict = {}
         self.total_it += 1
 
-        state, action, _, _, _ = batch
+        state, action, _, _, _, _, _ = batch
 
         # Compute actor loss using the actor's compute_loss method
         loss = self.actor(state, action).mean()

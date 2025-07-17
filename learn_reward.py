@@ -1,9 +1,8 @@
-import os
 from pathlib import Path
 import hydra
 import numpy as np
 import rich
-from omegaconf import DictConfig, OmegaConf
+from omegaconf import DictConfig
 
 from utils.data import (
     load_datasets,
@@ -339,33 +338,6 @@ def maybe_compute_dtw_matrix(
         np.save(dtw_matrix_path, cross_dtw_matrix)
         print(f"Saved DTW matrix to {dtw_matrix_path}")
         return cross_dtw_matrix
-
-
-def setup_checkpoint_paths(config):
-    """Setup checkpoint directories and save config."""
-    if getattr(config, "checkpoints_path", None) is not None:
-        print(f"Checkpoints path: {config.checkpoints_path}")
-
-        checkpoint_name = build_rm_checkpoint_path(config)
-        config.checkpoints_path = os.path.join(config.checkpoints_path, checkpoint_name)
-
-        os.makedirs(config.checkpoints_path, exist_ok=True)
-        OmegaConf.save(
-            config=config, f=os.path.join(config.checkpoints_path, "config.yaml")
-        )
-
-
-def build_rm_checkpoint_path(config: DictConfig) -> str:
-    """Build reward learning checkpoint path based on config parameters."""
-    components = [
-        f"{config.env}",
-        f"fn_{config.feedback_num}",
-        f"gt_{int(config.single_emb)}",
-        f"eef_{int(config.eef_rm)}",
-        f"dtw_{int(config.use_cross)}",
-        f"s_{config.seed}",
-    ]
-    return "/".join(components)
 
 
 if __name__ == "__main__":

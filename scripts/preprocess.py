@@ -11,7 +11,6 @@ import h5py
 import hydra
 import numpy as np
 import torch
-import torch.nn.functional as F
 from omegaconf import DictConfig, OmegaConf
 from tensordict import TensorDict
 from tqdm import tqdm
