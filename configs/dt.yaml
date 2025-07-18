@@ -1,44 +1,25 @@
 name: DT
 group: dt-$env-multiseed-v0
-env: robomimic_stack
-record_video: true
 
 # DT
-hidden_size: 128
+hidden_size: 64
+nhead: 2
+nlayer: 1
 K: 20 # from the paper
+target_return: 50.0
 
-normalize: true
-batch_size: 256
-buffer_size: 10000000
-device: "cuda"
 discount: 0.99
-lr: 1e-4
-max_timesteps: 250_000
+lr: 3e-4
 
-eval_freq: 10000
-n_episodes: 30
-checkpoints_path: logs/
-load_model: ''
-
-# Reward
+# reward
 use_reward_model: false
 trivial_reward: 0 # 1 for zero reward IQL
-filter_data: False # Filter trajectories with rewards that fall one std below the mean
-
 single_emb: false # GT
 eef_rm: false # 3D EEF RM
 use_cross: false # DTW augs
 dtw_k_augment: 1
-
-seed: 0
-data_path: "/scr/shared/datasets/robot_pref/stack_mixed/stack_mixed.hdf5"
-
-# wandb
-use_wandb: false
 wandb:
-  project: "robot_pref"
-  entity: "clvr"
   name: "dt-${env}-${seed}"
 
 defaults:
-- reward
+- base

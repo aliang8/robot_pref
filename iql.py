@@ -21,7 +21,7 @@ from utils.common import MLP
 from utils.wandb import wandb_init
 from utils.seed import set_seed
 from utils.data import normalize_datasets, ReplayBuffer, setup_environment_and_dataset, setup_reward_model, print_dataset_statistics
-
+from utils. log import print_model_info
 
 # Type aliases
 TensorBatch = List[torch.Tensor]
@@ -259,25 +259,6 @@ def setup_networks(config, state_dim, action_dim, max_action):
     return q_network, v_network, actor
 
 
-def print_model_info(q_network, v_network, actor):
-    """Print model architecture information."""
-    print("\n" + "=" * 50)
-    print("MODEL ARCHITECTURES")
-    print("=" * 50)
-    
-    models = [
-        ("Q-Network (TwinQ)", q_network),
-        ("Value Network", v_network),
-        ("Actor Network", actor)
-    ]
-    
-    for name, model in models:
-        print(f"\n{name}:")
-        print(model)
-        param_count = sum(p.numel() for p in model.parameters())
-        print(f"{name} parameters: {param_count:,}")
-    
-    print("=" * 50)
 
 
 @hydra.main(config_path="configs", config_name="iql", version_base=None)
@@ -324,8 +305,8 @@ def train(config):
     
     # Setup networks
     q_network, v_network, actor = setup_networks(config, state_dim, action_dim, max_action)
-    print_model_info(q_network, v_network, actor)
-    
+    print_model_info({"Q-Network": q_network, "Value Network": v_network, "Actor Network": actor})
+
     # Setup optimizers
     v_optimizer = torch.optim.Adam(v_network.parameters(), lr=config.vf_lr)
     q_optimizer = torch.optim.Adam(q_network.parameters(), lr=config.qf_lr)

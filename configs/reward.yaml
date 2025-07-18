@@ -1,8 +1,3 @@
-device: cuda
-env: robomimic_stack
-seed: 0
-checkpoints_path: logs/
-load_model: null
 
 # preference
 feedback_num: 500 # Number of human preferences from the source dataset to use for augmentation
@@ -20,7 +15,6 @@ model_type: BT
 noise: 0.0
 human: true
 epochs: 6000
-batch_size: 256
 activation: none
 lr: 1e-4
 hidden_sizes: 128
@@ -45,9 +39,8 @@ dtw_k_augment: 1
 data_path: ""
 cross_data_path: ""
 
-# wandb
-use_wandb: false
 wandb:
-  project: "Reward Learning"
-  entity: "clvr"
   name: "RM-${env}-${seed}"
+
+defaults:
+- base

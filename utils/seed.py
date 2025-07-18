@@ -4,7 +4,7 @@ import random
 import os
 
 
-def set_seed(seed=42, deterministic_cudnn=True):
+def set_seed(seed=42, deterministic_cudnn=False):
     """Set random seed for reproducibility across multiple libraries.
 
     Args:

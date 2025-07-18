@@ -18,10 +18,10 @@ class DecisionTransformer(nn.Module):
             act_dim,
             hidden_size,
             max_length,
+            nhead=4,
+            nlayer=3,
             max_ep_len=512,
-            action_tanh=True,
-            nhead=8,
-            nlayer=6,
+            action_tanh=False,
             **kwargs
     ):
         super().__init__()
@@ -31,20 +31,11 @@ class DecisionTransformer(nn.Module):
         self.max_length = max_length
 
         self.hidden_size = hidden_size
-        # config = transformers.GPT2Config(
-        #     vocab_size=1,  # doesn't matter -- we don't use the vocab
-        #     n_embd=hidden_size,
-        #     **kwargs
-        # )
-        # note: the only difference between this GPT2Model and the default Huggingface version
-        # is that the positional embeddings are removed (since we'll add those ourselves)
-        # self.transformer = GPT2Model(config)
 
         decoder_layer = nn.TransformerDecoderLayer(
             d_model=hidden_size,
             nhead=nhead,
-            dim_feedforward=hidden_size * 4,
-            dropout=0.2,
+            dropout=0.1,
             batch_first=True
         )
         self.transformer = nn.TransformerDecoder(decoder_layer, num_layers=nlayer)
@@ -57,17 +48,22 @@ class DecisionTransformer(nn.Module):
         self.embed_ln = nn.LayerNorm(hidden_size)
 
         # note: we don't predict states or returns for the paper
-        self.predict_state = torch.nn.Linear(hidden_size, self.state_dim)
-        self.predict_action = nn.Sequential(
+        # self.predict_state = torch.nn.Linear(hidden_size, self.state_dim)
+        self.action_head = nn.Sequential(
             *([nn.Linear(hidden_size, self.act_dim)] + ([nn.Tanh()] if action_tanh else []))
         )
-        self.predict_return = torch.nn.Linear(hidden_size, 1)
+        # self.predict_return = torch.nn.Linear(hidden_size, 1)
 
+    # def _generate_causal_mask(self, seq_len):
+    #     mask = torch.tril(torch.ones(seq_len, seq_len), diagonal=1).bool()
+    #     return mask
+    
     def _generate_causal_mask(self, seq_len):
-        mask = torch.triu(torch.ones(seq_len, seq_len), diagonal=1).bool()  # bool mask
+        mask = torch.triu(torch.ones(seq_len, seq_len), diagonal=1)
+        mask = mask.masked_fill(mask == 1, float('-inf')).masked_fill(mask == 0, float(0.0))
         return mask
 
-    def forward(self, batch, attention_mask=None):
+    def forward(self, batch):
         """
         Decision Transformer forward pass.
         Args:
@@ -76,21 +72,19 @@ class DecisionTransformer(nn.Module):
                 actions: (B, T, act_dim)
                 rewards: (B, T, 1)
                 rtgs: (B, T, 1)
-                next_observations: (B, T, state_dim)
                 dones: (B, T, 1)
                 timesteps: (B, T)
-            attention_mask: (B, T) or None
+                attention_mask: (B, T) or None
         Returns:
             state_preds: (B, T, state_dim)
             action_preds: (B, T, act_dim)
             return_preds: (B, T, 1)
         """
-        states, actions, _, rtgs, _, _, timesteps = batch
+        states, actions, _, rtgs, _, timesteps, attention_mask = batch
 
         batch_size, seq_length, device = states.shape[0], states.shape[1], states.device
 
         if attention_mask is None:
-            # attention mask: 1 if can be attended to, 0 if not
             attention_mask = torch.ones((batch_size, seq_length), dtype=torch.long)
 
         # embed each modality with a different head
@@ -108,39 +102,31 @@ class DecisionTransformer(nn.Module):
         stacked_inputs = torch.stack(
             (returns_embeddings, state_embeddings, action_embeddings), dim=1
         ).permute(0, 2, 1, 3).reshape(batch_size, 3*seq_length, self.hidden_size)
-        memory = self.embed_ln(stacked_inputs)
+        # memory = self.embed_ln(stacked_inputs)
+        memory = stacked_inputs
 
         # masks
         memory_attention_mask = torch.stack(
             (attention_mask, attention_mask, attention_mask), dim=1
         ).permute(0, 2, 1).reshape(batch_size, 3*seq_length)
         tgt_mask = self._generate_causal_mask(seq_length).to(device)
+        
         # padding masks
-        memory_key_padding_mask = (memory_attention_mask == 0)
-        tgt_key_padding_mask = (attention_mask == 0)
-
         # create dummy sequence embeddings to use as query for the transformer decoder
         tgt = torch.zeros(
             batch_size, seq_length, action_embeddings.shape[-1], device=device # [B, T, D]
         )
         tgt = tgt + time_embeddings
-        tgt = self.embed_ln(tgt)
 
         x = self.transformer(
             tgt=tgt,
             memory=memory,
             tgt_mask=tgt_mask,
-            # memory_mask=memory_attention_mask,
-            tgt_key_padding_mask=tgt_key_padding_mask,
-            memory_key_padding_mask=memory_key_padding_mask,
+            tgt_is_causal=True,
+            memory_key_padding_mask=(memory_attention_mask == 0),
         )
 
-        # get predictions
-        # return_preds = self.predict_return(x[:,2])  # predict next return given state and action
-        # state_preds = self.predict_state(x[:,2])    # predict next state given state and action
-        # action_preds = self.predict_action(x[:,1])  # predict next action given state
-
-        action_preds = self.predict_action(x)
+        action_preds = self.action_head(x)
 
         return action_preds
 
@@ -177,10 +163,10 @@ class DecisionTransformer(nn.Module):
             attention_mask = None
 
         batch = (
-            states, actions, rewards, returns_to_go, None, None, timesteps
+            states, actions, rewards, returns_to_go, None, timesteps, attention_mask
         )
 
         action_preds = self.forward(
-            batch, attention_mask=attention_mask, **kwargs)
+            batch, **kwargs)
 
         return action_preds[0,-1]

@@ -1,0 +1,25 @@
+# common
+seed: 0
+device: 'cuda'
+load_model: ''
+record_video: false
+render_hw: [224, 224]
+use_wandb: false
+discount: 0.99
+
+# data
+batch_size: 256
+buffer_size: 1_000_000
+data_path: "/scr/shared/datasets/robot_pref/stack_mixed/stack_mixed.hdf5"
+env: robomimic_stack
+normalize: true
+
+# train/eval
+max_timesteps: 250_000
+eval_freq: 1_0000
+n_episodes: 30
+checkpoints_path: logs/
+
+wandb:
+  project: "robot_pref"
+  entity: "clvr"

@@ -1,25 +1,12 @@
-batch_size: 256
-buffer_size: 1_000_000
-checkpoints_path: checkpoints
-device: "cuda"
-discount: 0.99
-env: robomimic_stack
-eval_freq: 10000
-frac: 1.0
-load_model: ''
-max_timesteps: 150_000
-max_traj_len: 1000
-n_episodes: 30
 name: BC
-normalize: true
-seed: 0
+group: bc-$env-multiseed-v0
 
-data_path: null
-record_video: true
+max_timesteps: 150_000
 
 # wandb
 use_wandb: false
 wandb:
-  project: "robot_pref"
-  entity: "clvr"
   name: "bc-${env}-${seed}"
+
+defaults:
+- base

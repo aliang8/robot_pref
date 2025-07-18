@@ -277,6 +277,7 @@ def get_robomimic_env(
     render_offscreen=True,
     use_image_obs=False,
     seed=42,
+    render_hw=(224, 224)
 ):
     """Create a Robomimic environment.
 
@@ -328,7 +329,7 @@ def get_robomimic_env(
 
     from env.robomimic_lowdim import RobomimicLowdimWrapper
 
-    env = RobomimicLowdimWrapper(env)
+    env = RobomimicLowdimWrapper(env, render_hw=render_hw)
     env.seed(seed)
 
     return env

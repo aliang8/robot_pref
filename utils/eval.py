@@ -6,6 +6,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import wandb
+import cv2
 
 os.environ["MUJOCO_GL"] = "egl"
 
@@ -19,6 +20,7 @@ def eval_actor(
     max_steps: int = 500,
     record_video: bool = True,
     has_seq: bool = False,
+    target_return: float = None,
 ) -> Tuple[np.ndarray, np.ndarray, List[np.ndarray]]:
     """Evaluate the actor on the environment."""
     # TODO: implement parallel
@@ -31,7 +33,7 @@ def eval_actor(
     for i in range(n_episodes):
         if has_seq:
             mean_reward, success, frames = _eval_episode_seq(
-                env, actor, max_steps, seed + (i * 5), record_video=record_video
+                env, actor, max_steps, seed + (i * 5), record_video=record_video, target_return=target_return
             )
         else:
             # Standard evaluation
@@ -80,7 +82,7 @@ def _eval_episode(env, actor, max_steps, seed, record_video=False, device="cuda"
     mean_reward = total_reward / (len(frames) or max_steps)
     return mean_reward, int(success), frames if record_video else None
 
-def _eval_episode_seq(env, actor, max_steps, seed, record_video=False, device="cuda", target_return=50.0, mode='normal', scale=1000.):
+def _eval_episode_seq(env, actor, max_steps, seed, record_video=False, device="cuda", target_return=30.0, mode='normal', scale=1000.):
     actor = actor.to(device)
 
     env.seed(seed)
@@ -100,12 +102,9 @@ def _eval_episode_seq(env, actor, max_steps, seed, record_video=False, device="c
     frames = [env.render(mode="rgb_array")] if record_video else []
 
     for t in range(max_steps):
-
-        # add padding
+        # latest action and reward is "padding"
         actions = torch.cat([actions, torch.zeros((1, act_dim), device=device)], dim=0)
         rewards = torch.cat([rewards, torch.zeros(1, device=device)])
-
-        # print(f"states: {states.shape}, actions: {actions.shape}, rewards: {rewards.shape}, target_return: {target_return.shape}, timesteps: {timesteps.shape}")
 
         action = actor.sample(
             states,
@@ -114,11 +113,12 @@ def _eval_episode_seq(env, actor, max_steps, seed, record_video=False, device="c
             target_return,
             timesteps,
         )
+        # update
         actions[-1] = action
+
+        # step
         action = action.detach().cpu().numpy()
-
         state, reward, _, _, info = env.step(action)
-
         cur_state = torch.from_numpy(state).to(device=device).reshape(1, state_dim)
         states = torch.cat([states, cur_state], dim=0)
         rewards[-1] = reward

@@ -18,6 +18,7 @@ from iql import ReplayBuffer, eval_actor, print_dataset_statistics
 from models.flow_policy import FlowNoisePredictionNet, FlowPolicy
 from utils.wandb import wandb_init
 from utils.data import Robomimic_dataset
+from utils.log import print_model_info
 
 TensorBatch = List[torch.Tensor]
 
@@ -27,13 +28,11 @@ class BC:
         max_action: np.ndarray,
         actor: nn.Module,
         actor_optimizer: torch.optim.Optimizer,
-        discount: float = 0.99,
         device: str = "cpu",
     ):
         self.actor = actor
         self.actor_optimizer = actor_optimizer
         self.max_action = max_action
-        self.discount = discount
 
         self.total_it = 0
         self.device = device
@@ -157,14 +156,7 @@ def train(config):
         action_dim=action_dim, noise_pred_net=noise_pred_net, max_action=max_action
     ).to(config.device)
 
-    # Print model architecture after model initialization
-    print("\n" + "=" * 50)
-    print("MODEL ARCHITECTURE:")
-    print("=" * 50)
-    print("Actor Network:")
-    print(actor)
-    print(f"Total parameters: {sum(p.numel() for p in actor.parameters()):,}")
-    print("=" * 50)
+    print_model_info({"Actor": actor})
 
     actor_optimizer = torch.optim.Adam(actor.parameters(), lr=1e-4)
 
@@ -172,7 +164,6 @@ def train(config):
         "max_action": max_action,
         "actor": actor,
         "actor_optimizer": actor_optimizer,
-        "discount": config.discount,
         "device": config.device,
     }
 

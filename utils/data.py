@@ -455,7 +455,6 @@ def Robomimic_dataset(
         all_next_observations = []
         all_actions = []
         all_rewards = []
-        all_rtgs = []
         all_images = []
         all_terminals = []
         all_timesteps = []
@@ -469,7 +468,6 @@ def Robomimic_dataset(
             desc="Processing demos",
         ):
             demo_data = data[demo]
-            # Concatenate observation components
             obs = np.concatenate(
                 [
                     demo_data["obs"]["robot0_eef_pos"][:],
@@ -486,7 +484,6 @@ def Robomimic_dataset(
 
                 acts = demo_data["actions"][:-1]
                 rewards = demo_data["rewards"][:-1]
-                rtgs = np.flip(np.cumsum(np.flip(rewards)))
                 images = demo_data["obs"]["agentview_image"][:-1]
 
                 goal_points = demo_data["goal_points"][:-1]
@@ -495,7 +492,6 @@ def Robomimic_dataset(
 
                 acts = demo_data["actions"]
                 rewards = demo_data["rewards"]
-                rtgs = np.flip(np.cumsum(np.flip(rewards)))
                 images = demo_data["obs"]["agentview_image"]
 
                 goal_points = demo_data["goal_points"]
@@ -504,7 +500,7 @@ def Robomimic_dataset(
             all_next_observations.append(next_obs)
             all_actions.append(acts)
             all_rewards.append(rewards)
-            all_rtgs.append(rtgs)
+            # all_rtgs.append(rtgs)
 
             all_goal_points.append(goal_points)
 
@@ -525,8 +521,7 @@ def Robomimic_dataset(
         observations = np.concatenate(all_observations, axis=0)
         next_observations = np.concatenate(all_next_observations, axis=0)
         actions = np.concatenate(all_actions, axis=0)
-        rewards = np.concatenate(all_rewards, axis=0).reshape(-1)
-        rtgs = np.concatenate(all_rtgs, axis=0).reshape(-1)
+        rewards = np.concatenate(all_rewards, axis=0).reshape(-1, 1)
         images = np.concatenate(all_images, axis=0)
         terminals = np.concatenate(all_terminals, axis=0).reshape(-1)
         timesteps = np.concatenate(all_timesteps, axis=0).reshape(-1)
@@ -539,7 +534,6 @@ def Robomimic_dataset(
         "next_observations": next_observations,
         "actions": actions,
         "rewards": rewards,
-        "rtgs": rtgs,
         "terminals": terminals,
         "timesteps": timesteps,
         "goal_points": goal_points,
@@ -615,6 +609,8 @@ class SequentialReplayBuffer:
     """Replay buffer for storing and sampling sequential experience transitions."""
 
     def __init__(self, state_dim: int, action_dim: int, buffer_size: int, K: int, device: str = "cpu"):
+        self.state_dim = state_dim
+        self.action_dim = action_dim
         self._buffer_size = buffer_size
         self._pointer = 0
         self._size = 0
@@ -624,8 +620,8 @@ class SequentialReplayBuffer:
         # Initialize buffers
         self._states = torch.zeros((buffer_size, state_dim), dtype=torch.float32, device=device)
         self._actions = torch.zeros((buffer_size, action_dim), dtype=torch.float32, device=device)
-        self._rewards = torch.zeros((buffer_size,), dtype=torch.float32, device=device)
-        self._rtgs = torch.zeros((buffer_size, 1), dtype=torch.float32, device=device)
+        self._rewards = torch.zeros((buffer_size, 1), dtype=torch.float32, device=device)
+        # self._rtgs = torch.zeros((buffer_size, 1), dtype=torch.float32, device=device)
         self._next_states = torch.zeros((buffer_size, state_dim), dtype=torch.float32, device=device)
         self._dones = torch.zeros((buffer_size,), dtype=torch.float32, device=device)
         self._timesteps = torch.zeros((buffer_size,), dtype=torch.long, device=device)
@@ -650,7 +646,6 @@ class SequentialReplayBuffer:
         self._states[:n_transitions] = self._to_tensor(data["observations"])
         self._actions[:n_transitions] = self._to_tensor(data["actions"])
         self._rewards[:n_transitions] = self._to_tensor(data["rewards"])
-        self._rtgs[:n_transitions] = self._to_tensor(data["rtgs"][..., None])
         self._next_states[:n_transitions] = self._to_tensor(data["next_observations"])
         self._dones[:n_transitions] = self._to_tensor(data["terminals"])
         self._timesteps[:n_transitions] = torch.tensor(data["timesteps"], dtype=torch.long, device=self._device)
@@ -686,55 +681,59 @@ class SequentialReplayBuffer:
             List of tensors: [states, actions, rewards, rtgs, next_states, dones, timesteps]
             Each tensor has shape (batch_size, K, ...)
         """
-        # Sample random starting indices from all transitions
-        indices = np.random.randint(0, self._size, size=batch_size)
+        # Sample batch_size indices
+        batch_inds = np.random.randint(0, self._size, size=batch_size)
         
-        sequences = []
-        attention_masks = []
+        s, a, r, d, rtg, timesteps, mask = [], [], [], [], [], [], []
         
-        for idx in indices:
-            # Find which episode this transition belongs to
-            episode_idx = self._find_episode_for_transition(idx)
-            ep_start = self._episode_starts[episode_idx]
-            ep_end = self._episode_ends[episode_idx]
-            # Calculate how many valid steps we can take from this starting position
-            remaining_in_episode = ep_end - idx + 1
-            valid_length = min(self._K, remaining_in_episode)
-            
-            # Create sequence indices
-            seq_indices = np.arange(idx, idx + valid_length)
+        for ep_idx in batch_inds:
+            # If episode is too close to the end, we left pad
+            ep_end = self._episode_ends[self._find_episode_for_transition(ep_idx)]
+            valid_len = ep_end + 1 - ep_idx
+            k_start = max(0, self._K - valid_len)
 
-            # Create attention mask
-            attention_mask = np.zeros(self._K, dtype=bool)
-            attention_mask[:valid_length] = True
-            
-            # Pad sequence indices if needed
-            if valid_length < self._K:
-                # Pad with the last valid index (will be masked out anyway)
-                pad_length = self._K - valid_length
-                last_idx = seq_indices[-1]
-                seq_indices = np.concatenate([seq_indices, np.full(pad_length, last_idx)])
-            
-            sequences.append(seq_indices)
-            attention_masks.append(attention_mask)
-        
-        # Convert to numpy arrays
-        sequences = np.array(sequences)  # Shape: (batch_size, self._K)
-        attention_masks = np.array(attention_masks)
-        
-        # Sample data
-        states = self._states[sequences]
-        actions = self._actions[sequences]
-        rewards = self._rewards[sequences]
-        rtgs = self._rtgs[sequences]
-        next_states = self._next_states[sequences]
-        dones = self._dones[sequences]
-        timesteps = self._timesteps[sequences]
-        
-        # Convert attention mask to tensor
-        attention_mask_tensor = torch.tensor(attention_masks, dtype=torch.bool, device=self._device)
-        
-        return [states, actions, rewards, rtgs, next_states, dones, timesteps], attention_mask_tensor
+            # Padding
+            zero_state = torch.zeros((1, self.state_dim), device=self._device)
+            zero_action = torch.zeros((1, self.action_dim), device=self._device)
+            state_pad = [zero_state] * k_start
+            action_pad = [zero_action] * k_start
+            reward_pad = [0.0] * k_start
+            rtg_pad = [0.0] * k_start
+            done_pad = [0.0] * k_start
+            timestep_pad = [0] * k_start
+            mask_pad = [0] * k_start
+
+            # Actual sequence
+            seq_slice = slice(ep_idx, min(ep_idx + self._K, ep_end + 1))
+            s_seq = self._states[seq_slice]
+            a_seq = self._actions[seq_slice]
+            r_seq = self._rewards[seq_slice]
+            rtg_seq = self._discount_cumsum(r_seq, gamma=1.0)
+            d_seq = self._dones[seq_slice]
+            t_seq = self._timesteps[seq_slice]
+
+            seq_len = s_seq.shape[0]
+            m_seq = [1] * seq_len
+
+            # Append padded + actual
+            s.append(torch.cat([*state_pad, s_seq]))
+            a.append(torch.cat([*action_pad, a_seq]))
+            r.append(torch.tensor(reward_pad + r_seq.view(-1).tolist(), device=self._device).view(-1, 1))
+            rtg.append(torch.tensor(rtg_pad + rtg_seq.view(-1).tolist(), device=self._device).view(-1, 1))
+            d.append(torch.tensor(done_pad + d_seq.view(-1).tolist(), device=self._device).view(-1, 1))
+            timesteps.append(torch.tensor(timestep_pad + t_seq.view(-1).tolist(), device=self._device))
+            mask.append(torch.tensor(mask_pad + m_seq, dtype=torch.long, device=self._device))
+
+        s = torch.stack(s, dim=0)
+        a = torch.stack(a, dim=0)
+        r = torch.stack(r, dim=0)
+        rtg = torch.stack(rtg, dim=0)
+        d = torch.stack(d, dim=0)
+        timesteps = torch.stack(timesteps, dim=0)
+        mask = torch.stack(mask, dim=0)
+
+        return [s, a, r, rtg, d, timesteps, mask]
+
 
     def _find_episode_for_transition(self, transition_idx: int) -> int:
         """Find which episode a given transition belongs to."""
@@ -743,6 +742,26 @@ class SequentialReplayBuffer:
                 return i
         raise ValueError(f"Transition index {transition_idx} not found in any episode")
 
+    def _discount_cumsum(self, rewards, gamma=1.0):
+        """
+        Compute discounted cumulative sums of rewards.
+
+        Args:
+            rewards (torch.Tensor): shape (T,) or (T, 1)
+            gamma (float): discount factor
+
+        Returns:
+            torch.Tensor: discounted cumulative sum of rewards, same shape as input
+        """
+        T = rewards.shape[0]
+        rtg = torch.zeros_like(rewards)
+        running_sum = 0.0
+
+        for t in reversed(range(T)):
+            running_sum = rewards[t] + gamma * running_sum
+            rtg[t] = running_sum
+
+        return rtg
 
 def setup_environment_and_dataset(config):
     """Setup environment and dataset based on configuration."""
@@ -750,7 +769,7 @@ def setup_environment_and_dataset(config):
         env = make_metaworld_env(config.env, config.seed)
         dataset = MetaWorld_dataset(config)
     elif "robomimic" in config.env:
-        env = get_robomimic_env(config.data_path, seed=config.seed)
+        env = get_robomimic_env(config.data_path, seed=config.seed, render_hw=config.render_hw)
         dataset = Robomimic_dataset(config.data_path, clip_last=True)
     else:
         env = gym.make(config.env)
