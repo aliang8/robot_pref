@@ -41,6 +41,7 @@ cross_data_path: ""
 
 wandb:
   name: "RM-${env}-${seed}"
+  project: "Reward Learning"
 
 defaults:
 - base

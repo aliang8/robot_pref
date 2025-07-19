@@ -6,6 +6,7 @@ record_video: false
 render_hw: [224, 224]
 use_wandb: false
 discount: 0.99
+seq_len: 5 # action chunk length
 
 # data
 batch_size: 256

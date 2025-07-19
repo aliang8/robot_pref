@@ -13,6 +13,7 @@ __pycache__
 *.ogg
 *.mp3
 *.log
+*.sh
 iql_model/*
 outputs/*
 wandb/*
@@ -26,6 +27,6 @@ old/*
 *.err
 *.log.*
 *.out.*
-*.err.*
+*.txt
 logs/*
 checkpoints/*

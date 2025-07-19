@@ -385,9 +385,7 @@ def normalize_datasets(dataset):
         # Normalize observations
         state_mean = data["observations"].mean(axis=0)
         state_std = np.maximum(data["observations"].std(axis=0) + 1e-8, 1e-2)
-
         data["observations"] = (data["observations"] - state_mean) / state_std
-        data["next_observations"] = (data["next_observations"] - state_mean) / state_std
 
         # Normalize goal points
         if "goal_points" in data:
@@ -439,11 +437,10 @@ def get_eef_data(dataset, idx_list, with_goal=False):
 
 
 def Robomimic_dataset(
-    data_path, return_images=False, clip_last=False
+    data_path, return_images=False
 ):
     """
-    Load Robomimic dataset and build:
-    If clip_last, we don't use the last transition for IQL
+    Load Robomimic dataset.
     """
 
     print(f"Loading data from: {data_path}")
@@ -452,7 +449,6 @@ def Robomimic_dataset(
         data = f["data"]
 
         all_observations = []
-        all_next_observations = []
         all_actions = []
         all_rewards = []
         all_images = []
@@ -477,31 +473,14 @@ def Robomimic_dataset(
                 ],
                 axis=1,
             )
-
-            if clip_last:
-                next_obs = obs[1:]
-                obs = obs[:-1]
-
-                acts = demo_data["actions"][:-1]
-                rewards = demo_data["rewards"][:-1]
-                images = demo_data["obs"]["agentview_image"][:-1]
-
-                goal_points = demo_data["goal_points"][:-1]
-            else:
-                next_obs = obs
-
-                acts = demo_data["actions"]
-                rewards = demo_data["rewards"]
-                images = demo_data["obs"]["agentview_image"]
-
-                goal_points = demo_data["goal_points"]
+            acts = demo_data["actions"]
+            rewards = demo_data["rewards"]
+            images = demo_data["obs"]["agentview_image"]
+            goal_points = demo_data["goal_points"]
 
             all_observations.append(obs)
-            all_next_observations.append(next_obs)
             all_actions.append(acts)
             all_rewards.append(rewards)
-            # all_rtgs.append(rtgs)
-
             all_goal_points.append(goal_points)
 
             if images.shape[1] != 84:
@@ -519,9 +498,8 @@ def Robomimic_dataset(
 
         # Convert to numpy arrays
         observations = np.concatenate(all_observations, axis=0)
-        next_observations = np.concatenate(all_next_observations, axis=0)
         actions = np.concatenate(all_actions, axis=0)
-        rewards = np.concatenate(all_rewards, axis=0).reshape(-1, 1)
+        rewards = np.concatenate(all_rewards, axis=0).reshape(-1)
         images = np.concatenate(all_images, axis=0)
         terminals = np.concatenate(all_terminals, axis=0).reshape(-1)
         timesteps = np.concatenate(all_timesteps, axis=0).reshape(-1)
@@ -531,7 +509,6 @@ def Robomimic_dataset(
 
     dataset = {
         "observations": observations,
-        "next_observations": next_observations,
         "actions": actions,
         "rewards": rewards,
         "terminals": terminals,
@@ -606,7 +583,128 @@ class ReplayBuffer:
         raise NotImplementedError("Fine-tuning not implemented")
 
 class SequentialReplayBuffer:
-    """Replay buffer for storing and sampling sequential experience transitions."""
+    """Samples s_t, a_t, r_t, a_t+1, r_t+1, ..., a_t+H, r_t+H"""
+
+    def __init__(self, state_dim: int, action_dim: int, buffer_size: int, seq_len: int, device: str = "cpu"):
+        self.state_dim = state_dim
+        self.action_dim = action_dim
+        self._buffer_size = buffer_size
+        self._pointer = 0
+        self._size = 0
+        self._device = device
+        self._seq_len = seq_len
+
+        # Initialize buffers
+        self._states = torch.zeros((buffer_size, state_dim), dtype=torch.float32, device=device)
+        self._actions = torch.zeros((buffer_size, action_dim), dtype=torch.float32, device=device)
+        self._rewards = torch.zeros((buffer_size,), dtype=torch.float32, device=device)
+        self._dones = torch.zeros((buffer_size,), dtype=torch.float32, device=device)
+        self._timesteps = torch.zeros((buffer_size,), dtype=torch.long, device=device)
+        
+        # Track episode boundaries for sequential sampling
+        self._episode_starts = []
+        self._episode_ends = []
+
+    def _to_tensor(self, data: np.ndarray) -> torch.Tensor:
+        """Convert numpy array to torch tensor."""
+        return torch.tensor(data, dtype=torch.float32, device=self._device)
+
+    def load_dataset(self, data: Dict[str, np.ndarray]) -> None:
+        """Load dataset in d4rl format and track episode boundaries."""
+        if self._size != 0:
+            raise ValueError("Trying to load data into non-empty replay buffer")
+        
+        n_transitions = data["observations"].shape[0]
+        if n_transitions > self._buffer_size:
+            raise ValueError("Replay buffer is smaller than the dataset you are trying to load!")
+        
+        self._states[:n_transitions] = self._to_tensor(data["observations"])
+        self._actions[:n_transitions] = self._to_tensor(data["actions"])
+        self._rewards[:n_transitions] = self._to_tensor(data["rewards"])
+        self._dones[:n_transitions] = self._to_tensor(data["terminals"])
+        self._timesteps[:n_transitions] = torch.tensor(data["timesteps"], dtype=torch.long, device=self._device)
+
+        # Track episode boundaries
+        self._track_episode_boundaries(data["terminals"])
+        # Find valid start indices
+        self._find_valid_starts()
+        
+        self._size += n_transitions
+        self._pointer = min(self._size, n_transitions)
+        
+        print(f"Dataset size: {n_transitions}, Number of valid start indices {len(self.valid_starts)}")
+        print(f"Number of episodes: {len(self._episode_starts)}")
+
+    def _track_episode_boundaries(self, terminals: np.ndarray) -> None:
+        """Track start and end indices of each episode."""
+        episode_start = 0
+        
+        for i, terminal in enumerate(terminals):
+            if terminal:
+                self._episode_starts.append(episode_start)
+                self._episode_ends.append(i)
+                episode_start = i + 1
+
+    def _find_valid_starts(self):
+        self.valid_starts = []
+        for ep_start, ep_end in zip(self._episode_starts, self._episode_ends):
+            # Only allow starts that have at least seq_len + 1 steps remaining in episode (we need to be able to sample a valid next obs)
+            for start_idx in range(ep_start, max(ep_start, ep_end - self._seq_len + 1)):
+                self.valid_starts.append(start_idx)
+
+    def sample(self, batch_size: int) -> List[torch.Tensor]:
+        """
+        Sample sequences of length seq_len.
+        
+        Args:
+            batch_size: Number of sequences to sample
+            
+        Returns:
+            List of tensors: [states, actions, rewards, next_states, dones]
+        """
+                
+        # Sample batch_size starting indices
+        batch_starts = np.random.choice(self.valid_starts, size=batch_size, replace=True)
+
+        states = []
+        next_states = []
+        actions = []
+        rewards = []
+        dones = []
+        
+        for start_idx in batch_starts:
+            # Single initial state
+            state = self._states[start_idx]         # (state_dim,)
+            
+            # Sequence indices for this sample
+            seq_indices = np.arange(start_idx, start_idx + self._seq_len)
+            
+            # Action and reward sequences
+            action_seq = self._actions[seq_indices]  # (seq_len, action_dim)
+            reward_seq = self._rewards[seq_indices]  # (seq_len, 1)
+            done_seq = self._dones[seq_indices]      # (seq_len,)
+
+            next_state = self._states[start_idx + self._seq_len]  # (state_dim,)
+
+            assert done_seq[-1] == 1 if done_seq.sum() == 1 else True
+
+            states.append(state)
+            actions.append(action_seq)
+            rewards.append(reward_seq)
+            next_states.append(next_state)
+            dones.append(done_seq)
+        
+        # Stack into batch tensors
+        states = torch.stack(states, dim=0)           # (batch_size, state_dim)
+        actions = torch.stack(actions, dim=0)         # (batch_size, seq_len, action_dim)
+        rewards = torch.stack(rewards, dim=0)         # (batch_size, seq_len, 1)
+        next_states = torch.stack(next_states, dim=0) # (batch_size, state_dim)
+        dones = torch.stack(dones, dim=0)             # (batch_size, seq_len)
+        
+        return [states, actions, rewards, next_states, dones]
+    
+class DTSequentialReplayBuffer:
+    """Samples s_t, a_t, r_t, s_t+1, a_t+1, r_t+1, ..., s_t+H, a_t+H, r_t+H"""
 
     def __init__(self, state_dim: int, action_dim: int, buffer_size: int, K: int, device: str = "cpu"):
         self.state_dim = state_dim
@@ -770,7 +868,7 @@ def setup_environment_and_dataset(config):
         dataset = MetaWorld_dataset(config)
     elif "robomimic" in config.env:
         env = get_robomimic_env(config.data_path, seed=config.seed, render_hw=config.render_hw)
-        dataset = Robomimic_dataset(config.data_path, clip_last=True)
+        dataset = Robomimic_dataset(config.data_path)
     else:
         env = gym.make(config.env)
         # Add dataset loading for standard gym environments if needed
@@ -862,7 +960,7 @@ def print_dataset_statistics(dataset: Dict[str, np.ndarray]) -> None:
         
         # Episode statistics
         if "terminals" in dataset and isinstance(dataset["terminals"], np.ndarray):
-            num_episodes = np.sum(dataset["terminals"]) + 1
+            num_episodes = np.sum(dataset["terminals"])
             avg_episode_length = total_samples / num_episodes
             print(f"  Estimated episodes: {num_episodes:,}")
             print(f"  Average episode length: {avg_episode_length:.1f} steps")

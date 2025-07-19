@@ -7,6 +7,7 @@ import hydra
 import numpy as np
 import rich
 import torch
+import torch.nn.functional as F
 import torch.nn as nn
 from omegaconf import OmegaConf
 from tqdm import trange
@@ -14,11 +15,13 @@ from tqdm import trange
 import utils.env as utils_env
 import wandb
 from utils.seed import set_seed
-from iql import ReplayBuffer, eval_actor, print_dataset_statistics
+from iql import eval_actor, print_dataset_statistics
 from models.flow_policy import FlowNoisePredictionNet, FlowPolicy
+from models.action_chunking_transformer import ActionChunkingTransformer
 from utils.wandb import wandb_init
 from utils.data import Robomimic_dataset
 from utils.log import print_model_info
+from utils.data import SequentialReplayBuffer, normalize_datasets
 
 TensorBatch = List[torch.Tensor]
 
@@ -41,10 +44,10 @@ class BC:
         log_dict = {}
         self.total_it += 1
 
-        state, action, _, _, _, _, _ = batch
+        observations, actions, _, _, _ = batch
 
-        # Compute actor loss using the actor's compute_loss method
-        loss = self.actor(state, action).mean()
+        pred_actions = self.actor(observations)
+        loss = F.mse_loss(pred_actions, actions)
         log_dict.update({"loss": loss.item()})
 
         # Optimize the actor
@@ -104,33 +107,17 @@ def train(config):
         state_dim = env.observation_space.shape[0]
     action_dim = env.action_space.shape[0]
 
-    if config.normalize:
-        state_mean = dataset["observations"].mean(axis=0)
-        state_std = dataset["observations"].std(axis=0) + 1e-8
-
-        # Bound the std to prevent large values
-        min_std = 1e-2
-        state_std = np.maximum(state_std, min_std)
-
-        dataset["observations"] = (dataset["observations"] - state_mean) / state_std
-        dataset["next_observations"] = (
-            dataset["next_observations"] - state_mean
-        ) / state_std
-
-        # max_action = np.abs(dataset["actions"]).max()
-        # dataset["actions"] = dataset["actions"] / max_action
-    else:
-        state_mean = 0
-        state_std = 1
+    state_mean, state_std = normalize_datasets(dataset)
 
     print_dataset_statistics(dataset)
 
     env = utils_env.wrap_env(env, state_mean=state_mean, state_std=state_std)
-    replay_buffer = ReplayBuffer(
+    replay_buffer = SequentialReplayBuffer(
         state_dim,
         action_dim,
         config.buffer_size,
         device=config.device,
+        seq_len=config.seq_len
     )
     replay_buffer.load_dataset(dataset)
 
@@ -145,16 +132,16 @@ def train(config):
     max_action = float(env.action_space.high[0])
 
     # Set seeds
-    seed = config.seed
-    set_seed(seed, env)
+    set_seed(config.seed, env)
 
     noise_pred_net = FlowNoisePredictionNet(
         action_dim=action_dim, global_cond_dim=state_dim
     ).to(config.device)
 
-    actor = FlowPolicy(
-        action_dim=action_dim, noise_pred_net=noise_pred_net, max_action=max_action
-    ).to(config.device)
+    # actor = FlowPolicy(
+    #     action_dim=action_dim, noise_pred_net=noise_pred_net, max_action=max_action
+    # ).to(config.device)
+    actor = ActionChunkingTransformer(state_dim, action_dim, config.seq_len).to(config.device)
 
     print_model_info({"Actor": actor})
 
@@ -168,7 +155,7 @@ def train(config):
     }
 
     print("---------------------------------------")
-    print(f"Training BC, Env: {config.env}, Seed: {seed}")
+    print(f"Training BC, Env: {config.env}, Seed: {config.seed}")
     print("---------------------------------------")
 
     # Initialize policy
@@ -182,8 +169,8 @@ def train(config):
     for t in trange(int(config.max_timesteps)):
         batch = replay_buffer.sample(config.batch_size)
         log_dict = trainer.train(batch)
+
         wandb.log(log_dict, step=trainer.total_it) if wandb.run is not None else None
-        # Evaluate episode
         if (t + 1) % config.eval_freq == 0:
             print(f"Eval at step: {t + 1}")
 
@@ -193,6 +180,7 @@ def train(config):
                 config.n_episodes,
                 config.seed,
                 record_video=config.record_video,
+                seq_len=config.seq_len
             )
             eval_mean_reward = eval_mean_rewards.mean()
             eval_mean_success = eval_success.mean()
@@ -204,9 +192,7 @@ def train(config):
             print("---------------------------------------")
 
             # Log to wandb
-            # Log to wandb
             if config.use_wandb:
-                # Metrics
                 wandb.log(
                     {
                         "eval/mean_rewards": eval_mean_reward,
@@ -215,13 +201,12 @@ def train(config):
                     step=trainer.total_it,
                 )
 
-                # Rollout vids
                 if config.record_video:
                     for i, frames in enumerate(eval_frames):
                         frames_array = np.stack(frames)  # (T, H, W, C)
                         frames_array = np.transpose(
                             frames_array, (0, 3, 1, 2)
-                        )  # (T, C, H, W)
+                        )
                         mean_reward = eval_mean_rewards[i]
                         success = eval_success[i]
                         wandb.log(

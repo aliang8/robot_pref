@@ -11,8 +11,8 @@ import wandb
 from utils.eval import eval_actor, log_evaluation_results
 from utils.wandb import wandb_init
 from utils.seed import set_seed
-from utils.data import normalize_datasets, SequentialReplayBuffer, setup_environment_and_dataset, setup_reward_model, print_dataset_statistics
-from models.dt.decision_transformer import DecisionTransformer
+from utils.data import normalize_datasets, DTSequentialReplayBuffer, setup_environment_and_dataset, setup_reward_model, print_dataset_statistics
+from models.decision_transformer import DecisionTransformer
 from utils.log import print_model_info
 
 @hydra.main(config_path="configs", config_name="dt", version_base=None)
@@ -39,7 +39,7 @@ def train(config):
         dataset["rewards"] *= 0.0
     else:
         print("Using ground truth rewards")
-    replay_buffer = SequentialReplayBuffer(state_dim, action_dim, config.buffer_size, K=config.K, device=config.device)
+    replay_buffer = DTSequentialReplayBuffer(state_dim, action_dim, config.buffer_size, K=config.K, device=config.device)
     replay_buffer.load_dataset(dataset)
 
     print_dataset_statistics(dataset)

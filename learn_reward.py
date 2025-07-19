@@ -11,7 +11,8 @@ from utils.data import (
     create_segment_indices,
     get_obs_act_data,
     get_images_data,
-    get_eef_data
+    get_eef_data,
+    setup_checkpoint_paths
 )
 from models.reward_model import RewardModel
 from utils.reward import (

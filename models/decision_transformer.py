@@ -3,8 +3,6 @@ import torch.nn as nn
 
 import transformers
 
-from models.dt.trajectory_gpt2 import GPT2Model
-
 
 class DecisionTransformer(nn.Module):
 

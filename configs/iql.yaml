@@ -18,9 +18,9 @@ eef_rm: false # 3D EEF RM
 use_cross: false # DTW augs
 dtw_k_augment: 1
 
-
 wandb:
   name: "iql-${env}-${seed}"
+  project: "robot_pref"
 
 defaults:
 - reward

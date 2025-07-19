@@ -5,6 +5,7 @@ import copy
 import os
 from typing import Any, Dict, List, Tuple
 
+from models.action_chunking_transformer import TwinTransformerQ, ActionChunkingTransformer
 import hydra
 import rich
 import torch
@@ -20,7 +21,7 @@ from utils.eval import eval_actor, log_evaluation_results
 from utils.common import MLP
 from utils.wandb import wandb_init
 from utils.seed import set_seed
-from utils.data import normalize_datasets, ReplayBuffer, setup_environment_and_dataset, setup_reward_model, print_dataset_statistics
+from utils.data import normalize_datasets, SequentialReplayBuffer, setup_environment_and_dataset, setup_reward_model, print_dataset_statistics
 from utils. log import print_model_info
 
 # Type aliases
@@ -136,7 +137,8 @@ class ImplicitQLearning:
             "v_loss": v_loss.item(),})
 
         # Log adv histogram
-        wandb.log({"adv_hist": wandb.Histogram(adv.detach().cpu().numpy())})
+        if wandb.run is not None:
+            wandb.log({"adv_hist": wandb.Histogram(adv.detach().cpu().numpy())}) 
             
         return adv
 
@@ -150,14 +152,26 @@ class ImplicitQLearning:
         log_dict: Dict,
     ) -> None:
         """Update Q-function."""
-        import ipdb; ipdb.set_trace()  # CHECK SHAPES HERE
+
         if rewards.shape[-1] == 1:
             rewards = rewards.squeeze(-1)
         if terminals.shape[-1] == 1:
             terminals = terminals.squeeze(-1)
 
-        targets = rewards + (1.0 - terminals.float()) * self.discount * next_v.detach()
+        # Sum over action chunk dim
+        if len(rewards.shape) > 1:
+            S = rewards.shape[-1]
+            rewards = rewards * self.discount ** torch.arange(S, device=rewards.device)
+            rewards = rewards.sum(1)
+
+            terminals = terminals[:, -1]
+            discount = self.discount ** S
+        else: 
+            discount = self.discount
+
+        targets = rewards + (1.0 - terminals.float()) * discount * next_v.detach()
         qs = self.qf.both(observations, actions)
+
         q_loss = sum(F.mse_loss(q, targets) for q in qs) / len(qs)
         
         self.q_optimizer.zero_grad()
@@ -178,7 +192,10 @@ class ImplicitQLearning:
     ) -> None:
         """Update policy using advantage-weighted regression."""
         exp_adv = torch.exp(self.beta * adv.detach()).clamp(max=EXP_ADV_MAX)
-        loss = self.actor(observations, actions)
+        pred_actions = self.actor(observations)
+
+        loss = F.mse_loss(pred_actions, actions, reduction='none')
+        loss = loss.mean(dim=(1, 2))
         
         # Advantage-weighted regression
         policy_loss = torch.mean(exp_adv * loss)
@@ -197,7 +214,7 @@ class ImplicitQLearning:
     def train(self, batch: TensorBatch) -> Dict[str, float]:
         """Train the model on a batch of data."""
         self.total_it += 1
-        observations, actions, rewards, _, next_observations, dones, _ = batch
+        observations, actions, rewards, next_observations, dones = batch
         log_dict = {}
         
         # Compute next value
@@ -240,24 +257,27 @@ class ImplicitQLearning:
         self.total_it = state_dict["total_it"]
 
 
-def setup_networks(config, state_dim, action_dim, max_action):
-    """Setup neural networks for IQL."""
-    q_network = TwinQ(state_dim, action_dim).to(config.device)
+def setup_networks(config, state_dim, action_dim, seq_len, max_action):
+    """Setup networks for IQL."""
+    
+    q_network = TwinTransformerQ(state_dim, action_dim, seq_len) if seq_len > 1 else TwinQ(state_dim, action_dim)
+    q_network = q_network.to(config.device)
     v_network = ValueFunction(state_dim).to(config.device)
     
-    noise_pred_net = FlowNoisePredictionNet(
-        action_dim=action_dim, 
-        global_cond_dim=state_dim
-    ).to(config.device)
+    # noise_pred_net = FlowNoisePredictionNet(
+    #     action_dim=action_dim, 
+    #     global_cond_dim=state_dim
+    # ).to(config.device)
     
-    actor = FlowPolicy(
-        action_dim=action_dim,
-        noise_pred_net=noise_pred_net,
-        max_action=max_action
-    ).to(config.device)
+    # actor = FlowPolicy(
+    #     action_dim=action_dim,
+    #     noise_pred_net=noise_pred_net,
+    #     max_action=max_action
+    # ).to(config.device)
+
+    actor = ActionChunkingTransformer(state_dim, action_dim, seq_len).to(config.device)
     
     return q_network, v_network, actor
-
 
 
 
@@ -273,9 +293,10 @@ def train(config):
     # Setup environment and dataset
     env, dataset = setup_environment_and_dataset(config)
     
-    # Get dimensions
+    # Get info
     state_dim = env.observation_space["state"].shape[0]
     action_dim = env.action_space.shape[0]
+    seq_len = config.seq_len
     max_action = float(env.action_space.high[0])
 
     # Normalize dataset
@@ -297,14 +318,14 @@ def train(config):
     env = wrap_env(env, state_mean=state_mean, state_std=state_std)
     
     # Setup replay buffer
-    replay_buffer = ReplayBuffer(state_dim, action_dim, config.buffer_size, device=config.device)
+    replay_buffer = SequentialReplayBuffer(state_dim, action_dim, config.buffer_size, config.seq_len, device=config.device)
     replay_buffer.load_dataset(dataset)
     
     # Set seed
     set_seed(config.seed, env)
     
     # Setup networks
-    q_network, v_network, actor = setup_networks(config, state_dim, action_dim, max_action)
+    q_network, v_network, actor = setup_networks(config, state_dim, action_dim, seq_len, max_action)
     print_model_info({"Q-Network": q_network, "Value Network": v_network, "Actor Network": actor})
 
     # Setup optimizers
@@ -344,7 +365,7 @@ def train(config):
             
             eval_results = eval_actor(
                 env, actor, config.n_episodes, config.seed, 
-                record_video=config.record_video
+                record_video=config.record_video, seq_len=config.seq_len
             )
             
             eval_mean_rewards, eval_success, _ = eval_results
