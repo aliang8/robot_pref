@@ -12,7 +12,7 @@ from utils.data import (
     get_obs_act_data,
     get_images_data,
     get_eef_data,
-    setup_checkpoint_paths
+    setup_checkpoint_paths,
 )
 from models.reward_model import RewardModel
 from utils.reward import (
@@ -65,17 +65,42 @@ def train(config: DictConfig):
 
     # Train reward model based on configuration
     if config.single_emb:
-        if getattr(config, 'eef_rm', False):
-            train_eef_reward_model(config, dataset, labels, idx_st_1, idx_st_2, 
-                                 val_labels, val_idx_st_1, val_idx_st_2, 
-                                 val_episodes)
+        if getattr(config, "eef_rm", False):
+            train_eef_reward_model(
+                config,
+                dataset,
+                labels,
+                idx_st_1,
+                idx_st_2,
+                val_labels,
+                val_idx_st_1,
+                val_idx_st_2,
+                val_episodes,
+            )
         else:
-            train_single_embodiment(config, dataset, labels, idx_st_1, idx_st_2, 
-                                   val_labels, val_idx_st_1, val_idx_st_2, 
-                                   val_episodes, obs_act_dim)
+            train_single_embodiment(
+                config,
+                dataset,
+                labels,
+                idx_st_1,
+                idx_st_2,
+                val_labels,
+                val_idx_st_1,
+                val_idx_st_2,
+                val_episodes,
+                obs_act_dim,
+            )
     elif config.use_cross and config.cross_data_path:
-        train_cross_embodiment(config, dataset, cross_dataset, labels, idx_st_1, idx_st_2,
-                              val_episodes, obs_act_dim)
+        train_cross_embodiment(
+            config,
+            dataset,
+            cross_dataset,
+            labels,
+            idx_st_1,
+            idx_st_2,
+            val_episodes,
+            obs_act_dim,
+        )
 
 
 def train_single_embodiment(
@@ -146,7 +171,7 @@ def train_cross_embodiment(
     idx_st_1,
     idx_st_2,
     val_episodes,
-    obs_act_dim
+    obs_act_dim,
 ):
     """Train reward model with cross-embodiment data using DTW."""
     # Load segment indices

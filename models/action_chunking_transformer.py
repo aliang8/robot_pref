@@ -9,6 +9,7 @@ from stable_baselines3.common.distributions import SquashedDiagGaussianDistribut
 LOG_STD_MAX = 2
 LOG_STD_MIN = -20
 
+
 class PositionalEncoding(nn.Module):
     def __init__(self, d_model, dropout=0.1, max_len=5000):
         super(PositionalEncoding, self).__init__()
@@ -27,10 +28,12 @@ class PositionalEncoding(nn.Module):
     def forward(self, x):
         x = x + self.pe[:, : x.size(1)]
         return self.dropout(x)
-    
+
 
 class TwinTransformerQ(nn.Module):
-    def __init__(self, state_dim: int, action_dim: int, seq_len: int, hidden_dim: int = 256):
+    def __init__(
+        self, state_dim: int, action_dim: int, seq_len: int, hidden_dim: int = 256
+    ):
         super(TwinTransformerQ, self).__init__()
         self.state_emb = nn.Linear(state_dim, hidden_dim)
         self.action_emb = nn.Linear(action_dim, hidden_dim)
@@ -46,8 +49,10 @@ class TwinTransformerQ(nn.Module):
         dims = [hidden_dim * 2, hidden_dim, hidden_dim // 2, 1]
         self.q1 = MLP(dims, squeeze_output=True)
         self.q2 = MLP(dims, squeeze_output=True)
-    
-    def both(self, state: torch.Tensor, actions: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+
+    def both(
+        self, state: torch.Tensor, actions: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         B, S, D = actions.shape
 
         state_embed = self.state_emb(state)
@@ -69,7 +74,9 @@ class TwinTransformerQ(nn.Module):
 
 
 class ActionChunkingTransformer(nn.Module):
-    def __init__(self, state_dim: int, action_dim: int, seq_len: int, hidden_dim: int = 256):
+    def __init__(
+        self, state_dim: int, action_dim: int, seq_len: int, hidden_dim: int = 256
+    ):
         super(ActionChunkingTransformer, self).__init__()
         self.state_emb = nn.Linear(state_dim, hidden_dim)
 
@@ -89,9 +96,7 @@ class ActionChunkingTransformer(nn.Module):
             torch.ones(seq_len, seq_len) * float("-inf"),
             diagonal=1,
         )
-        self.position_embedding = PositionalEncoding(
-            last_layer_dim, max_len=seq_len
-        )
+        self.position_embedding = PositionalEncoding(last_layer_dim, max_len=seq_len)
 
         dims = [last_layer_dim, last_layer_dim // 2, last_layer_dim // 2, action_dim]
         self.mu = MLP(dims)
@@ -127,6 +132,3 @@ class ActionChunkingTransformer(nn.Module):
         )
 
         return pred_actions
-        
-
-        

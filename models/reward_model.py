@@ -334,9 +334,9 @@ class RewardModel:
         act = dataset["actions"]
         terminals = dataset["terminals"]
 
-        if self.dimension == 3: # eef rm
-            obs_act = obs[:, :3]  
-        elif self.dimension == 5: # eef rm + 2D goal
+        if self.dimension == 3:  # eef rm
+            obs_act = obs[:, :3]
+        elif self.dimension == 5:  # eef rm + 2D goal
             obs_act = np.concatenate((obs[:, :3], goal), axis=-1)
         else:
             obs_act = np.concatenate((obs, act), axis=-1)

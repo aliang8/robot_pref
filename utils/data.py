@@ -436,9 +436,7 @@ def get_eef_data(dataset, idx_list, with_goal=False):
     return dataset["observations"][:, :3][idx_list]
 
 
-def Robomimic_dataset(
-    data_path, return_images=False
-):
+def Robomimic_dataset(data_path, return_images=False):
     """
     Load Robomimic dataset.
     """
@@ -476,12 +474,12 @@ def Robomimic_dataset(
             acts = demo_data["actions"]
             rewards = demo_data["rewards"]
             images = demo_data["obs"]["agentview_image"]
-            goal_points = demo_data["goal_points"]
+            # goal_points = demo_data["goal_points"]
 
             all_observations.append(obs)
             all_actions.append(acts)
             all_rewards.append(rewards)
-            all_goal_points.append(goal_points)
+            # all_goal_points.append(goal_points)
 
             if images.shape[1] != 84:
                 # Assuming images are in format (batch, height, width, channels)
@@ -503,7 +501,7 @@ def Robomimic_dataset(
         images = np.concatenate(all_images, axis=0)
         terminals = np.concatenate(all_terminals, axis=0).reshape(-1)
         timesteps = np.concatenate(all_timesteps, axis=0).reshape(-1)
-        goal_points = np.concatenate(all_goal_points, axis=0)
+        # goal_points = np.concatenate(all_goal_points, axis=0)
 
     print(f"Total number of transitions: {len(observations)}")
 
@@ -513,7 +511,7 @@ def Robomimic_dataset(
         "rewards": rewards,
         "terminals": terminals,
         "timesteps": timesteps,
-        "goal_points": goal_points,
+        # "goal_points": goal_points,
     }
     if return_images:
         dataset["images"] = images
@@ -523,19 +521,27 @@ def Robomimic_dataset(
 
 class ReplayBuffer:
     """Replay buffer for storing and sampling experience transitions."""
-    
-    def __init__(self, state_dim: int, action_dim: int, buffer_size: int, device: str = "cpu"):
+
+    def __init__(
+        self, state_dim: int, action_dim: int, buffer_size: int, device: str = "cpu"
+    ):
         self._buffer_size = buffer_size
         self._pointer = 0
         self._size = 0
         self._device = device
 
         # Initialize buffers
-        self._states = torch.zeros((buffer_size, state_dim), dtype=torch.float32, device=device)
-        self._actions = torch.zeros((buffer_size, action_dim), dtype=torch.float32, device=device)
+        self._states = torch.zeros(
+            (buffer_size, state_dim), dtype=torch.float32, device=device
+        )
+        self._actions = torch.zeros(
+            (buffer_size, action_dim), dtype=torch.float32, device=device
+        )
         self._rewards = torch.zeros((buffer_size,), dtype=torch.float32, device=device)
-        self._rtgs = torch.zeros((buffer_size,1), dtype=torch.float32, device=device)
-        self._next_states = torch.zeros((buffer_size, state_dim), dtype=torch.float32, device=device)
+        self._rtgs = torch.zeros((buffer_size, 1), dtype=torch.float32, device=device)
+        self._next_states = torch.zeros(
+            (buffer_size, state_dim), dtype=torch.float32, device=device
+        )
         self._dones = torch.zeros((buffer_size,), dtype=torch.float32, device=device)
         self._timesteps = torch.zeros((buffer_size,), dtype=torch.long, device=device)
 
@@ -547,22 +553,26 @@ class ReplayBuffer:
         """Load dataset in d4rl format."""
         if self._size != 0:
             raise ValueError("Trying to load data into non-empty replay buffer")
-        
+
         n_transitions = data["observations"].shape[0]
         if n_transitions > self._buffer_size:
-            raise ValueError("Replay buffer is smaller than the dataset you are trying to load!")
-        
+            raise ValueError(
+                "Replay buffer is smaller than the dataset you are trying to load!"
+            )
+
         self._states[:n_transitions] = self._to_tensor(data["observations"])
         self._actions[:n_transitions] = self._to_tensor(data["actions"])
         self._rewards[:n_transitions] = self._to_tensor(data["rewards"])
         self._rtgs[:n_transitions] = self._to_tensor(data["rtgs"][..., None])
         self._next_states[:n_transitions] = self._to_tensor(data["next_observations"])
         self._dones[:n_transitions] = self._to_tensor(data["terminals"])
-        self._timesteps[:n_transitions] = torch.tensor(data["timesteps"], dtype=torch.long, device=self._device)
+        self._timesteps[:n_transitions] = torch.tensor(
+            data["timesteps"], dtype=torch.long, device=self._device
+        )
 
         self._size += n_transitions
         self._pointer = min(self._size, n_transitions)
-        
+
         print(f"Dataset size: {n_transitions}")
 
     def sample(self, batch_size: int) -> TensorBatch:
@@ -575,17 +585,25 @@ class ReplayBuffer:
             self._rtgs[indices],
             self._next_states[indices],
             self._dones[indices],
-            self._timesteps[indices]
+            self._timesteps[indices],
         ]
 
     def add_transition(self):
         """Add new transition (not implemented for offline RL)."""
         raise NotImplementedError("Fine-tuning not implemented")
 
+
 class SequentialReplayBuffer:
     """Samples s_t, a_t, r_t, a_t+1, r_t+1, ..., a_t+H, r_t+H"""
 
-    def __init__(self, state_dim: int, action_dim: int, buffer_size: int, seq_len: int, device: str = "cpu"):
+    def __init__(
+        self,
+        state_dim: int,
+        action_dim: int,
+        buffer_size: int,
+        seq_len: int,
+        device: str = "cpu",
+    ):
         self.state_dim = state_dim
         self.action_dim = action_dim
         self._buffer_size = buffer_size
@@ -595,12 +613,16 @@ class SequentialReplayBuffer:
         self._seq_len = seq_len
 
         # Initialize buffers
-        self._states = torch.zeros((buffer_size, state_dim), dtype=torch.float32, device=device)
-        self._actions = torch.zeros((buffer_size, action_dim), dtype=torch.float32, device=device)
+        self._states = torch.zeros(
+            (buffer_size, state_dim), dtype=torch.float32, device=device
+        )
+        self._actions = torch.zeros(
+            (buffer_size, action_dim), dtype=torch.float32, device=device
+        )
         self._rewards = torch.zeros((buffer_size,), dtype=torch.float32, device=device)
         self._dones = torch.zeros((buffer_size,), dtype=torch.float32, device=device)
         self._timesteps = torch.zeros((buffer_size,), dtype=torch.long, device=device)
-        
+
         # Track episode boundaries for sequential sampling
         self._episode_starts = []
         self._episode_ends = []
@@ -613,32 +635,38 @@ class SequentialReplayBuffer:
         """Load dataset in d4rl format and track episode boundaries."""
         if self._size != 0:
             raise ValueError("Trying to load data into non-empty replay buffer")
-        
+
         n_transitions = data["observations"].shape[0]
         if n_transitions > self._buffer_size:
-            raise ValueError("Replay buffer is smaller than the dataset you are trying to load!")
-        
+            raise ValueError(
+                "Replay buffer is smaller than the dataset you are trying to load!"
+            )
+
         self._states[:n_transitions] = self._to_tensor(data["observations"])
         self._actions[:n_transitions] = self._to_tensor(data["actions"])
         self._rewards[:n_transitions] = self._to_tensor(data["rewards"])
         self._dones[:n_transitions] = self._to_tensor(data["terminals"])
-        self._timesteps[:n_transitions] = torch.tensor(data["timesteps"], dtype=torch.long, device=self._device)
+        self._timesteps[:n_transitions] = torch.tensor(
+            data["timesteps"], dtype=torch.long, device=self._device
+        )
 
         # Track episode boundaries
         self._track_episode_boundaries(data["terminals"])
         # Find valid start indices
         self._find_valid_starts()
-        
+
         self._size += n_transitions
         self._pointer = min(self._size, n_transitions)
-        
-        print(f"Dataset size: {n_transitions}, Number of valid start indices {len(self.valid_starts)}")
+
+        print(
+            f"Dataset size: {n_transitions}, Number of valid start indices {len(self.valid_starts)}"
+        )
         print(f"Number of episodes: {len(self._episode_starts)}")
 
     def _track_episode_boundaries(self, terminals: np.ndarray) -> None:
         """Track start and end indices of each episode."""
         episode_start = 0
-        
+
         for i, terminal in enumerate(terminals):
             if terminal:
                 self._episode_starts.append(episode_start)
@@ -655,34 +683,36 @@ class SequentialReplayBuffer:
     def sample(self, batch_size: int) -> List[torch.Tensor]:
         """
         Sample sequences of length seq_len.
-        
+
         Args:
             batch_size: Number of sequences to sample
-            
+
         Returns:
             List of tensors: [states, actions, rewards, next_states, dones]
         """
-                
+
         # Sample batch_size starting indices
-        batch_starts = np.random.choice(self.valid_starts, size=batch_size, replace=True)
+        batch_starts = np.random.choice(
+            self.valid_starts, size=batch_size, replace=True
+        )
 
         states = []
         next_states = []
         actions = []
         rewards = []
         dones = []
-        
+
         for start_idx in batch_starts:
             # Single initial state
-            state = self._states[start_idx]         # (state_dim,)
-            
+            state = self._states[start_idx]  # (state_dim,)
+
             # Sequence indices for this sample
             seq_indices = np.arange(start_idx, start_idx + self._seq_len)
-            
+
             # Action and reward sequences
             action_seq = self._actions[seq_indices]  # (seq_len, action_dim)
             reward_seq = self._rewards[seq_indices]  # (seq_len, 1)
-            done_seq = self._dones[seq_indices]      # (seq_len,)
+            done_seq = self._dones[seq_indices]  # (seq_len,)
 
             next_state = self._states[start_idx + self._seq_len]  # (state_dim,)
 
@@ -693,20 +723,28 @@ class SequentialReplayBuffer:
             rewards.append(reward_seq)
             next_states.append(next_state)
             dones.append(done_seq)
-        
+
         # Stack into batch tensors
-        states = torch.stack(states, dim=0)           # (batch_size, state_dim)
-        actions = torch.stack(actions, dim=0)         # (batch_size, seq_len, action_dim)
-        rewards = torch.stack(rewards, dim=0)         # (batch_size, seq_len, 1)
-        next_states = torch.stack(next_states, dim=0) # (batch_size, state_dim)
-        dones = torch.stack(dones, dim=0)             # (batch_size, seq_len)
-        
+        states = torch.stack(states, dim=0)  # (batch_size, state_dim)
+        actions = torch.stack(actions, dim=0)  # (batch_size, seq_len, action_dim)
+        rewards = torch.stack(rewards, dim=0)  # (batch_size, seq_len, 1)
+        next_states = torch.stack(next_states, dim=0)  # (batch_size, state_dim)
+        dones = torch.stack(dones, dim=0)  # (batch_size, seq_len)
+
         return [states, actions, rewards, next_states, dones]
-    
+
+
 class DTSequentialReplayBuffer:
     """Samples s_t, a_t, r_t, s_t+1, a_t+1, r_t+1, ..., s_t+H, a_t+H, r_t+H"""
 
-    def __init__(self, state_dim: int, action_dim: int, buffer_size: int, K: int, device: str = "cpu"):
+    def __init__(
+        self,
+        state_dim: int,
+        action_dim: int,
+        buffer_size: int,
+        K: int,
+        device: str = "cpu",
+    ):
         self.state_dim = state_dim
         self.action_dim = action_dim
         self._buffer_size = buffer_size
@@ -716,14 +754,22 @@ class DTSequentialReplayBuffer:
         self._K = K
 
         # Initialize buffers
-        self._states = torch.zeros((buffer_size, state_dim), dtype=torch.float32, device=device)
-        self._actions = torch.zeros((buffer_size, action_dim), dtype=torch.float32, device=device)
-        self._rewards = torch.zeros((buffer_size, 1), dtype=torch.float32, device=device)
+        self._states = torch.zeros(
+            (buffer_size, state_dim), dtype=torch.float32, device=device
+        )
+        self._actions = torch.zeros(
+            (buffer_size, action_dim), dtype=torch.float32, device=device
+        )
+        self._rewards = torch.zeros(
+            (buffer_size, 1), dtype=torch.float32, device=device
+        )
         # self._rtgs = torch.zeros((buffer_size, 1), dtype=torch.float32, device=device)
-        self._next_states = torch.zeros((buffer_size, state_dim), dtype=torch.float32, device=device)
+        self._next_states = torch.zeros(
+            (buffer_size, state_dim), dtype=torch.float32, device=device
+        )
         self._dones = torch.zeros((buffer_size,), dtype=torch.float32, device=device)
         self._timesteps = torch.zeros((buffer_size,), dtype=torch.long, device=device)
-        
+
         # Track episode boundaries for sequential sampling
         self._episode_starts = []
         self._episode_ends = []
@@ -736,31 +782,35 @@ class DTSequentialReplayBuffer:
         """Load dataset in d4rl format and track episode boundaries."""
         if self._size != 0:
             raise ValueError("Trying to load data into non-empty replay buffer")
-        
+
         n_transitions = data["observations"].shape[0]
         if n_transitions > self._buffer_size:
-            raise ValueError("Replay buffer is smaller than the dataset you are trying to load!")
-        
+            raise ValueError(
+                "Replay buffer is smaller than the dataset you are trying to load!"
+            )
+
         self._states[:n_transitions] = self._to_tensor(data["observations"])
         self._actions[:n_transitions] = self._to_tensor(data["actions"])
         self._rewards[:n_transitions] = self._to_tensor(data["rewards"])
         self._next_states[:n_transitions] = self._to_tensor(data["next_observations"])
         self._dones[:n_transitions] = self._to_tensor(data["terminals"])
-        self._timesteps[:n_transitions] = torch.tensor(data["timesteps"], dtype=torch.long, device=self._device)
+        self._timesteps[:n_transitions] = torch.tensor(
+            data["timesteps"], dtype=torch.long, device=self._device
+        )
 
         # Track episode boundaries
         self._track_episode_boundaries(data["terminals"])
-        
+
         self._size += n_transitions
         self._pointer = min(self._size, n_transitions)
-        
+
         print(f"Dataset size: {n_transitions}")
         print(f"Number of episodes: {len(self._episode_starts)}")
 
     def _track_episode_boundaries(self, terminals: np.ndarray) -> None:
         """Track start and end indices of each episode."""
         episode_start = 0
-        
+
         for i, terminal in enumerate(terminals):
             if terminal:
                 self._episode_starts.append(episode_start)
@@ -770,20 +820,20 @@ class DTSequentialReplayBuffer:
     def sample(self, batch_size: int) -> List[torch.Tensor]:
         """
         Sample sequences of length K.
-        
+
         Args:
             batch_size: Number of sequences to sample
             K: Length of each sequence (K)
-            
+
         Returns:
             List of tensors: [states, actions, rewards, rtgs, next_states, dones, timesteps]
             Each tensor has shape (batch_size, K, ...)
         """
         # Sample batch_size indices
         batch_inds = np.random.randint(0, self._size, size=batch_size)
-        
+
         s, a, r, d, rtg, timesteps, mask = [], [], [], [], [], [], []
-        
+
         for ep_idx in batch_inds:
             # If episode is too close to the end, we left pad
             ep_end = self._episode_ends[self._find_episode_for_transition(ep_idx)]
@@ -816,11 +866,29 @@ class DTSequentialReplayBuffer:
             # Append padded + actual
             s.append(torch.cat([*state_pad, s_seq]))
             a.append(torch.cat([*action_pad, a_seq]))
-            r.append(torch.tensor(reward_pad + r_seq.view(-1).tolist(), device=self._device).view(-1, 1))
-            rtg.append(torch.tensor(rtg_pad + rtg_seq.view(-1).tolist(), device=self._device).view(-1, 1))
-            d.append(torch.tensor(done_pad + d_seq.view(-1).tolist(), device=self._device).view(-1, 1))
-            timesteps.append(torch.tensor(timestep_pad + t_seq.view(-1).tolist(), device=self._device))
-            mask.append(torch.tensor(mask_pad + m_seq, dtype=torch.long, device=self._device))
+            r.append(
+                torch.tensor(
+                    reward_pad + r_seq.view(-1).tolist(), device=self._device
+                ).view(-1, 1)
+            )
+            rtg.append(
+                torch.tensor(
+                    rtg_pad + rtg_seq.view(-1).tolist(), device=self._device
+                ).view(-1, 1)
+            )
+            d.append(
+                torch.tensor(
+                    done_pad + d_seq.view(-1).tolist(), device=self._device
+                ).view(-1, 1)
+            )
+            timesteps.append(
+                torch.tensor(
+                    timestep_pad + t_seq.view(-1).tolist(), device=self._device
+                )
+            )
+            mask.append(
+                torch.tensor(mask_pad + m_seq, dtype=torch.long, device=self._device)
+            )
 
         s = torch.stack(s, dim=0)
         a = torch.stack(a, dim=0)
@@ -831,7 +899,6 @@ class DTSequentialReplayBuffer:
         mask = torch.stack(mask, dim=0)
 
         return [s, a, r, rtg, d, timesteps, mask]
-
 
     def _find_episode_for_transition(self, transition_idx: int) -> int:
         """Find which episode a given transition belongs to."""
@@ -861,46 +928,31 @@ class DTSequentialReplayBuffer:
 
         return rtg
 
-def setup_environment_and_dataset(config):
-    """Setup environment and dataset based on configuration."""
-    if "metaworld" in config.env:
-        env = make_metaworld_env(config.env, config.seed)
-        dataset = MetaWorld_dataset(config)
-    elif "robomimic" in config.env:
-        env = get_robomimic_env(config.data_path, seed=config.seed, render_hw=config.render_hw)
-        dataset = Robomimic_dataset(config.data_path)
-    else:
-        env = gym.make(config.env)
-        # Add dataset loading for standard gym environments if needed
-        raise NotImplementedError("Dataset loading for standard gym environments not implemented")
-    
-    return env, dataset
-
 
 def setup_reward_model(config, dataset):
     """Setup reward model if specified in config."""
     if not config.use_reward_model:
         return dataset
-    
+
     print("Using rewards labeled from trained reward model")
-    
+
     # Determine reward model dimension
     if config.eef_rm:
         dimension = 5 if config.eef_rm_2d else 3
     else:
         dimension = dataset["observations"].shape[1] + dataset["actions"].shape[1]
-    
+
     print(f"Using reward model with dimension {dimension}")
-    
+
     # Load reward model
     model = reward_model.RewardModel(config, None, None, None, None, dimension)
     path = build_rm_checkpoint_path(config)
     path = os.path.join(config.checkpoints_path, path)
-    
+
     print(f"Loading reward model from {path}")
     model.load_model(path)
     print("Successfully loaded reward model")
-    
+
     # Apply reward model to dataset
     rewards = model.get_reward(dataset)
     dataset["rewards"] = rewards
@@ -914,18 +966,18 @@ def print_dataset_statistics(dataset: Dict[str, np.ndarray]) -> None:
     print("\n" + "=" * 60)
     print("DATASET STATISTICS")
     print("=" * 60)
-    
+
     total_samples = None
     for key, data in dataset.items():
         if not isinstance(data, np.ndarray):
             continue
-            
+
         if total_samples is None:
             total_samples = data.shape[0]
-        
+
         print(f"\n{key.upper()}:")
         print(f"  Shape: {data.shape}")
-        
+
         # Basic statistics
         stats = {
             "Mean": np.mean(data),
@@ -933,10 +985,10 @@ def print_dataset_statistics(dataset: Dict[str, np.ndarray]) -> None:
             "Max": np.max(data),
             "Std": np.std(data),
         }
-        
+
         for stat_name, stat_value in stats.items():
             print(f"  {stat_name}:  {stat_value:>12.6f}")
-        
+
         # Per-dimension statistics for reasonable-sized arrays
         if data.ndim == 2 and data.shape[1] <= 10:
             print("  Per-dimension statistics:")
@@ -947,17 +999,19 @@ def print_dataset_statistics(dataset: Dict[str, np.ndarray]) -> None:
                     "min": np.min(data[:, i]),
                     "max": np.max(data[:, i]),
                 }
-                print(f"    Dim {i:2d}: " + 
-                      f"mean={dim_stats['mean']:8.4f}, std={dim_stats['std']:8.4f}, " +
-                      f"min={dim_stats['min']:8.4f}, max={dim_stats['max']:8.4f}")
+                print(
+                    f"    Dim {i:2d}: "
+                    + f"mean={dim_stats['mean']:8.4f}, std={dim_stats['std']:8.4f}, "
+                    + f"min={dim_stats['min']:8.4f}, max={dim_stats['max']:8.4f}"
+                )
         elif data.ndim == 2 and data.shape[1] > 10:
             print(f"  (Skipping per-dimension stats for {data.shape[1]} dimensions)")
-    
+
     # Summary information
     if total_samples is not None:
         print("\nSUMMARY:")
         print(f"  Total samples: {total_samples:,}")
-        
+
         # Episode statistics
         if "terminals" in dataset and isinstance(dataset["terminals"], np.ndarray):
             num_episodes = np.sum(dataset["terminals"])
@@ -966,6 +1020,7 @@ def print_dataset_statistics(dataset: Dict[str, np.ndarray]) -> None:
             print(f"  Average episode length: {avg_episode_length:.1f} steps")
 
     print("\n" + "=" * 60)
+
 
 def setup_checkpoint_paths(config):
     """Setup checkpoint directories and save config."""

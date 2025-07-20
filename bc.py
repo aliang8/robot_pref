@@ -1,4 +1,5 @@
 import os
+import time
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -7,23 +8,25 @@ import hydra
 import numpy as np
 import rich
 import torch
-import torch.nn.functional as F
 import torch.nn as nn
+import torch.nn.functional as F
 from omegaconf import OmegaConf
+from stable_baselines3.common.env_util import make_vec_env
+from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv
 from tqdm import trange
 
-import utils.env as utils_env
 import wandb
-from utils.seed import set_seed
-from iql import eval_actor, print_dataset_statistics
-from models.flow_policy import FlowNoisePredictionNet, FlowPolicy
 from models.action_chunking_transformer import ActionChunkingTransformer
-from utils.wandb import wandb_init
-from utils.data import Robomimic_dataset
+from models.flow_policy import FlowNoisePredictionNet, FlowPolicy
+from utils.data import Robomimic_dataset, SequentialReplayBuffer, normalize_datasets
+from utils.env import get_robomimic_env, wrap_env
+from utils.eval import eval_actor, log_evaluation_results
 from utils.log import print_model_info
-from utils.data import SequentialReplayBuffer, normalize_datasets
+from utils.seed import set_seed
+from utils.wandb import wandb_init
 
 TensorBatch = List[torch.Tensor]
+
 
 class BC:
     def __init__(
@@ -70,54 +73,36 @@ class BC:
         self.total_it = state_dict["total_it"]
 
 
-class EnvFactory:
-    def __init__(self, data_path):
-        self.data_path = data_path
-
-    def __call__(self, seed):
-        return utils_env.get_robomimic_env(self.data_path, seed=seed)
-
-
 @hydra.main(config_path="configs", config_name="bc", version_base=None)
 def train(config):
-    import multiprocessing as mp
-
-    mp.set_start_method("spawn", force=True)
-
     wandb_init(config) if config.use_wandb else None
 
     rich.print("config ", config)
-    if "metaworld" in config.env:
-        env = utils_env.make_metaworld_env(config.env, config.seed)
-        dataset = utils_env.MetaWorld_dataset(config)
-    elif "dmc" in config.env:
-        env = utils_env.make_dmc_env(config.env, config.seed)
-        dataset = utils_env.DMC_dataset(config)
-    elif "robomimic" in config.env:
-        env = utils_env.get_robomimic_env(config.data_path, seed=config.seed)
-        # env_fn = EnvFactory(config.data_path)
-        dataset = Robomimic_dataset(config.data_path)
-    else:
-        env = gym.make(config.env)
 
-    # Handle both standard and dict observation spaces
-    if isinstance(env.observation_space, gym.spaces.Dict):
-        state_dim = env.observation_space["state"].shape[0]
-    else:
-        state_dim = env.observation_space.shape[0]
-    action_dim = env.action_space.shape[0]
-
-    state_mean, state_std = normalize_datasets(dataset)
-
+    # Load datasets
+    dataset = Robomimic_dataset(config.data_path)
     print_dataset_statistics(dataset)
 
-    env = utils_env.wrap_env(env, state_mean=state_mean, state_std=state_std)
+    # Setup env
+    def make_env_fn(seed):
+        def _init():
+            env = get_robomimic_env(config.data_path, seed=seed)
+            return env
+
+        return _init
+
+    env_fns = [make_env_fn(seed) for seed in range(config.n_envs)]
+    env = DummyVecEnv(env_fns)
+
+    state_dim = env.observation_space["state"].shape[0]
+    action_dim = env.action_space.shape[0]
+
     replay_buffer = SequentialReplayBuffer(
         state_dim,
         action_dim,
         config.buffer_size,
         device=config.device,
-        seq_len=config.seq_len
+        seq_len=config.seq_len,
     )
     replay_buffer.load_dataset(dataset)
 
@@ -132,16 +117,17 @@ def train(config):
     max_action = float(env.action_space.high[0])
 
     # Set seeds
-    set_seed(config.seed, env)
+    set_seed(config.seed)
 
-    noise_pred_net = FlowNoisePredictionNet(
-        action_dim=action_dim, global_cond_dim=state_dim
-    ).to(config.device)
-
+    # noise_pred_net = FlowNoisePredictionNet(
+    #     action_dim=action_dim, global_cond_dim=state_dim
+    # ).to(config.device)
     # actor = FlowPolicy(
     #     action_dim=action_dim, noise_pred_net=noise_pred_net, max_action=max_action
     # ).to(config.device)
-    actor = ActionChunkingTransformer(state_dim, action_dim, config.seq_len).to(config.device)
+    actor = ActionChunkingTransformer(state_dim, action_dim, config.seq_len).to(
+        config.device
+    )
 
     print_model_info({"Actor": actor})
 
@@ -166,28 +152,27 @@ def train(config):
         trainer.load_state_dict(torch.load(policy_file))
         actor = trainer.actor
 
+    start_time = time.time()
+
     for t in trange(int(config.max_timesteps)):
         batch = replay_buffer.sample(config.batch_size)
         log_dict = trainer.train(batch)
+
+        batch_time = time.time() - start_time
+        log_dict["batch_time"] = batch_time
 
         wandb.log(log_dict, step=trainer.total_it) if wandb.run is not None else None
         if (t + 1) % config.eval_freq == 0:
             print(f"Eval at step: {t + 1}")
 
-            eval_mean_rewards, eval_success, eval_frames = eval_actor(
-                env,
-                actor,
-                config.n_episodes,
-                config.seed,
-                record_video=config.record_video,
-                seq_len=config.seq_len
+            eval_reward, eval_sr, eval_frames = eval_actor(
+                env, actor, record_video=config.record_video, seq_len=config.seq_len
             )
-            eval_mean_reward = eval_mean_rewards.mean()
-            eval_mean_success = eval_success.mean()
+
             print("---------------------------------------")
             print(
-                f"Evaluation over {config.n_episodes} episodes: "
-                f"{eval_mean_reward:.3f} , success: {eval_mean_success * 100:.3f}"
+                f"Evaluation over {config.n_envs} episodes: "
+                f"{eval_reward:.3f} , success: {eval_sr * 100:.3f}"
             )
             print("---------------------------------------")
 
@@ -195,8 +180,8 @@ def train(config):
             if config.use_wandb:
                 wandb.log(
                     {
-                        "eval/mean_rewards": eval_mean_reward,
-                        "eval/success": eval_mean_success,
+                        "eval/mean_rewards": eval_reward,
+                        "eval/success": eval_sr,
                     },
                     step=trainer.total_it,
                 )
@@ -204,18 +189,13 @@ def train(config):
                 if config.record_video:
                     for i, frames in enumerate(eval_frames):
                         frames_array = np.stack(frames)  # (T, H, W, C)
-                        frames_array = np.transpose(
-                            frames_array, (0, 3, 1, 2)
-                        )
-                        mean_reward = eval_mean_rewards[i]
-                        success = eval_success[i]
+                        frames_array = np.transpose(frames_array, (0, 3, 1, 2))
                         wandb.log(
                             {
                                 f"eval_vids/ep_{i + 1}": wandb.Video(
                                     frames_array,
                                     fps=30,
                                     format="mp4",
-                                    caption=f"Mean Reward: {mean_reward:.2f}, Success: {success:.2f}",
                                 )
                             },
                             step=trainer.total_it,

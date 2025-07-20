@@ -277,7 +277,7 @@ def get_robomimic_env(
     render_offscreen=True,
     use_image_obs=False,
     seed=42,
-    render_hw=(224, 224)
+    render_hw=(224, 224),
 ):
     """Create a Robomimic environment.
 

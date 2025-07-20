@@ -178,7 +178,7 @@ def classify_reward_type(row):
         if get_config_value(row, "use_goal_pos") is True:
             return "dtw prefs (2d goal + 3d eef)"
         return "dtw prefs (3d eef)"
-    
+
     if get_config_value(row, "eef_rm") is True:
         if get_config_value(row, "eef_rm_2d") is True:
             return "eef + 2d goal rm"

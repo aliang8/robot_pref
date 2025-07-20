@@ -15,110 +15,122 @@ os.environ["MUJOCO_GL"] = "egl"
 def eval_actor(
     env: gym.Env,
     actor: nn.Module,
-    n_episodes: int,
-    seed: int,
     max_steps: int = 500,
     record_video: bool = True,
     seq_len: int = 1,
 ) -> Tuple[np.ndarray, np.ndarray, List[np.ndarray]]:
     """Evaluate the actor on the environment."""
-    # TODO: implement parallel
     actor.eval()
+    if record_video:
+        [
+            setattr(env, "render_mode", "rgb_array") for env in env.envs
+        ]  # needed for rendering
 
-    episode_mean_rewards = []
-    episode_success_list = []
-    episode_frames = []
-
-    for i in range(n_episodes):
-        if seq_len > 1:
-            mean_reward, success, frames = _eval_episode_seq(
-                env, actor, max_steps, seed + (i * 5), record_video=record_video
-            )
-        else:
-            # Standard evaluation
-            mean_reward, success, frames = _eval_episode(
-                env,
-                actor,
-                max_steps,
-                seed + (i * 5),  # so sequential seeds don't overlap
-                record_video=record_video,  # and i < 5,  # Record up to 5 episodes
-            )
-        episode_mean_rewards.append(mean_reward)
-        episode_success_list.append(success)
-        episode_frames.append(frames)
+    if seq_len > 1:
+        mean_reward, success, frames = _eval_episode_seq(
+            env, actor, max_steps, record_video=record_video
+        )
+    # else:
+    #     # Standard evaluation
+    #     mean_reward, success, frames = _eval_episode(
+    #         env,
+    #         actor,
+    #         max_steps,
+    #         seed + (i * 5),  # so sequential seeds don't overlap
+    #         record_video=record_video,  # and i < 5,  # Record up to 5 episodes
+    # )
+    # episode_mean_rewards.append(mean_reward)
+    # episode_success_list.append(success)
+    # episode_frames.append(frames)
 
     actor.train()
 
     return (
-        np.array(episode_mean_rewards),
-        np.array(episode_success_list),
-        episode_frames,
+        mean_reward,
+        success,
+        frames,
     )
 
 
-def _eval_episode(env, actor, max_steps, seed, record_video=False, device="cuda"):
-    env.seed(seed)
-    state, _ = env.reset()
+# def _eval_episode(env, actor, max_steps, seed, record_video=False, device="cuda"):
+#     env.seed(seed)
+#     state, _ = env.reset()
 
-    frames = [env.render(mode="rgb_array")] if record_video else []
-    total_reward, success = 0.0, False
+#     frames = [env.render(mode="rgb_array")] if record_video else []
+#     total_reward, success = 0.0, False
 
-    for _ in range(max_steps):
-        with torch.no_grad():
-            action = (
-                actor.sample(torch.from_numpy(state).unsqueeze(0).to(device))
-                .cpu()
-                .numpy()[0]
-            )
-        state, reward, _, _, info = env.step(action)
-        if record_video:
-            frame = env.render(mode="rgb_array")
-            frames.append(frame)
-        total_reward += reward
-        if info.get("success", False):
-            success = True
-            break
+#     for _ in range(max_steps):
+#         with torch.no_grad():
+#             action = (
+#                 actor.sample(torch.from_numpy(state).unsqueeze(0).to(device))
+#                 .cpu()
+#                 .numpy()[0]
+#             )
+#         state, reward, _, _, info = env.step(action)
+#         if record_video:
+#             frame = env.render(mode="rgb_array")
+#             frames.append(frame)
+#         total_reward += reward
+#         if info.get("success", False):
+#             success = True
+#             break
 
-    mean_reward = total_reward / (len(frames) or max_steps)
-    return mean_reward, int(success), frames if record_video else None
+#     mean_reward = total_reward / (len(frames) or max_steps)
+#     return mean_reward, int(success), frames if record_video else None
 
-def _eval_episode_seq(env, actor, max_steps, seed, record_video=False, device="cuda"):
-    env.seed(seed)
-    state, _ = env.reset()
 
-    frames = [env.render(mode="rgb_array")] if record_video else []
-    total_reward, success = 0.0, False
+def _eval_episode_seq(env, actor, max_steps, record_video=False, device="cuda"):
+    states = env.reset()
+    num_envs = len(states["state"])
+
+    frames = (
+        [[env.envs[i].render()] for i in range(min(5, num_envs))]
+        if record_video
+        else None
+    )
+
+    # total_reward, success = 0.0, False
     total_steps = 0
+    total_rewards = np.zeros(num_envs)
+    success_flags = np.zeros(num_envs, dtype=bool)
+    done_flags = np.zeros(num_envs, dtype=bool)
 
     for _ in range(max_steps):
+        if isinstance(states, dict):
+            states = states["state"]
+        else:
+            states = states
+
         with torch.no_grad():
-            actions = (
-                actor(torch.from_numpy(state).unsqueeze(0).to(device))
-                .cpu()
-                .numpy()
-            ).squeeze(0)
-        
-        for action in actions:
+            actions = actor(torch.from_numpy(states).to(device)).cpu().numpy()
+
+        for i in range(actions.shape[1]):
+            action = actions[:, i]  # (B, D)
             if total_steps >= max_steps:
                 break
-                
-            state, reward, terminated, truncated, info = env.step(action)
-            total_reward += reward
-            total_steps += 1
+
+            states, rewards, dones, infos = env.step(action)
+            total_rewards += rewards
+            done_flags = np.logical_or(done_flags, dones)
 
             if record_video:
-                frame = env.render(mode="rgb_array")
-                frames.append(frame)
+                for env_i in range(min(5, num_envs)):
+                    frame = env.envs[env_i].render()
+                    frames[env_i].append(frame)
 
-            if info.get("success", False):
-                success = True
-            if terminated or truncated:
+            for i, info in enumerate(infos):
+                if info.get("success", False):
+                    success_flags[i] = True
+            if all(done_flags):
                 break
-        
-        if terminated or truncated or success:
-            break
-    
-    return total_reward / total_steps, int(success), frames if record_video else None
+
+            total_steps += 1
+
+    avg_reward = total_rewards.mean()
+    success_rate = success_flags.mean()
+
+    return avg_reward, success_rate, frames if record_video else None
+
 
 # Decision Transformer eval
 # def _eval_episode_dt_seq(env, actor, max_steps, seed, record_video=False, device="cuda", target_return=30.0, mode='normal', scale=1000.):
@@ -177,7 +189,7 @@ def _eval_episode_seq(env, actor, max_steps, seed, record_video=False, device="c
 #         if record_video:
 #             frame = env.render(mode="rgb_array")
 #             frames.append(frame)
-        
+
 #         if info.get("success", False):
 #             success = True
 #             break
@@ -186,32 +198,39 @@ def _eval_episode_seq(env, actor, max_steps, seed, record_video=False, device="c
 
 #     return mean_reward, int(success), frames if record_video else None
 
+
 def log_evaluation_results(config, total_it, eval_results):
     """Log evaluation results to wandb."""
     if not config.use_wandb:
         return
-    
+
     eval_mean_rewards, eval_success, eval_frames = eval_results
     eval_mean_reward = eval_mean_rewards.mean()
     eval_mean_success = eval_success.mean()
-    
+
     # Log metrics
-    wandb.log({
-        "eval/mean_rewards": eval_mean_reward,
-        "eval/success": eval_mean_success,
-    }, step=total_it)
-    
+    wandb.log(
+        {
+            "eval/mean_rewards": eval_mean_reward,
+            "eval/success": eval_mean_success,
+        },
+        step=total_it,
+    )
+
     # Log videos if requested
     if config.record_video and eval_frames:
         for i, frames in enumerate(eval_frames):
             frames_array = np.stack(frames)  # (T, H, W, C)
             frames_array = np.transpose(frames_array, (0, 3, 1, 2))  # (T, C, H, W)
-            
-            wandb.log({
-                f"eval_vids/ep_{i + 1}": wandb.Video(
-                    frames_array,
-                    fps=30,
-                    format="mp4",
-                    caption=f"Reward: {eval_mean_rewards[i]:.2f}, Success: {eval_success[i]:.2f}",
-                )
-            }, step=total_it)
+
+            wandb.log(
+                {
+                    f"eval_vids/ep_{i + 1}": wandb.Video(
+                        frames_array,
+                        fps=30,
+                        format="mp4",
+                        caption=f"Reward: {eval_mean_rewards[i]:.2f}, Success: {eval_success[i]:.2f}",
+                    )
+                },
+                step=total_it,
+            )
