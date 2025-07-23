@@ -18,7 +18,7 @@ from tqdm import trange
 import wandb
 from models.action_chunking_transformer import ActionChunkingTransformer
 from models.flow_policy import FlowNoisePredictionNet, FlowPolicy
-from utils.data import Robomimic_dataset, SequentialReplayBuffer, normalize_datasets
+from utils.data import Robomimic_dataset, SequentialReplayBuffer, print_dataset_statistics
 from utils.env import get_robomimic_env, wrap_env
 from utils.eval import eval_actor, log_evaluation_results
 from utils.log import print_model_info
@@ -76,23 +76,34 @@ class BC:
 @hydra.main(config_path="configs", config_name="bc", version_base=None)
 def train(config):
     wandb_init(config) if config.use_wandb else None
-
     rich.print("config ", config)
+
+    set_seed(config.seed)
 
     # Load datasets
     dataset = Robomimic_dataset(config.data_path)
+
+    # pre-normalization stats
     print_dataset_statistics(dataset)
+
+    normalization_path = Path(config.data_path).parent / "normalization.npz"
 
     # Setup env
     def make_env_fn(seed):
         def _init():
-            env = get_robomimic_env(config.data_path, seed=seed)
+            env = get_robomimic_env(config.data_path, seed=seed, normalization_path=normalization_path)
             return env
 
         return _init
 
     env_fns = [make_env_fn(seed) for seed in range(config.n_envs)]
     env = DummyVecEnv(env_fns)
+
+    dataset["observations"] = env.envs[0].normalize_obs(dataset["observations"]) if normalization_path is not None else dataset["observations"]
+    dataset["actions"] = env.envs[0].normalize_action(dataset["actions"]) if normalization_path is not None else dataset["actions"]
+
+    # post-normalization stats
+    print_dataset_statistics(dataset)
 
     state_dim = env.observation_space["state"].shape[0]
     action_dim = env.action_space.shape[0]
@@ -114,17 +125,8 @@ def train(config):
             config=config, f=os.path.join(config.checkpoints_path, "config.yaml")
         )
 
-    max_action = float(env.action_space.high[0])
+    max_action = float(env.action_space.high[0])    
 
-    # Set seeds
-    set_seed(config.seed)
-
-    # noise_pred_net = FlowNoisePredictionNet(
-    #     action_dim=action_dim, global_cond_dim=state_dim
-    # ).to(config.device)
-    # actor = FlowPolicy(
-    #     action_dim=action_dim, noise_pred_net=noise_pred_net, max_action=max_action
-    # ).to(config.device)
     actor = ActionChunkingTransformer(state_dim, action_dim, config.seq_len).to(
         config.device
     )

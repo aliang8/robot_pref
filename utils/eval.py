@@ -52,6 +52,44 @@ def eval_actor(
     )
 
 
+@torch.no_grad()
+def eval_actor_dt(
+    envs: List[gym.Env],
+    actor: nn.Module,
+    target_return: float,
+    max_steps: int = 500,
+    record_video: bool = True,
+) -> Tuple[np.ndarray, np.ndarray, List[np.ndarray]]:
+    """Evaluate the actor on the environment."""
+    actor.eval()
+    if record_video:
+        [
+            setattr(env, "render_mode", "rgb_array") for env in envs
+        ]  # needed for rendering
+    
+    mean_rewards = []
+    successes = []
+    videos = []
+
+    for i, env in enumerate(envs):
+        mean_reward, success, frames = _eval_episode_dt_seq(
+            env, actor, max_steps, target_return, record_video=record_video
+        )
+        mean_rewards.append(mean_reward)
+        successes.append(success)
+
+        if i < 5: 
+            videos.append(frames)
+        
+    actor.train()
+
+    return (
+        np.array(mean_rewards),
+        np.array(successes),
+        videos,
+    )
+
+
 # def _eval_episode(env, actor, max_steps, seed, record_video=False, device="cuda"):
 #     env.seed(seed)
 #     state, _ = env.reset()
@@ -133,70 +171,71 @@ def _eval_episode_seq(env, actor, max_steps, record_video=False, device="cuda"):
 
 
 # Decision Transformer eval
-# def _eval_episode_dt_seq(env, actor, max_steps, seed, record_video=False, device="cuda", target_return=30.0, mode='normal', scale=1000.):
-#     actor = actor.to(device)
+def _eval_episode_dt_seq(env, actor, max_steps, target_return, record_video=False, device="cuda", mode='normal', scale=1000.):
+    actor = actor.to(device)
+    state = env.reset()
 
-#     env.seed(seed)
-#     state, _ = env.reset()
+    state = state["state"]
 
-#     state_dim = env.observation_space["state"].shape[0]
-#     act_dim = env.action_space.shape[0]
+    state_dim = env.observation_space["state"].shape[0]
+    act_dim = env.action_space.shape[0]
 
-#     states = torch.from_numpy(state).reshape(1, state_dim).to(device=device, dtype=torch.float32)
-#     actions = torch.zeros((0, act_dim), device=device, dtype=torch.float32)
-#     rewards = torch.zeros(0, device=device, dtype=torch.float32)
-#     target_return = torch.tensor(target_return, device=device, dtype=torch.float32).reshape(1, 1)
-#     timesteps = torch.tensor(0, device=device, dtype=torch.long).reshape(1, 1)
+    states = torch.from_numpy(state).reshape(1, state_dim).to(device=device, dtype=torch.float32)
+    actions = torch.zeros((0, act_dim), device=device, dtype=torch.float32)
+    rewards = torch.zeros(0, device=device, dtype=torch.float32)
+    target_return = torch.tensor(target_return, device=device, dtype=torch.float32).repeat(1, 1)
+    timesteps = torch.zeros((1, 1), device=device, dtype=torch.long)
 
-#     # eval metrics
-#     total_reward, success = 0.0, False
-#     frames = [env.render(mode="rgb_array")] if record_video else []
+    # eval metrics
+    total_reward, success = 0.0, False
+    frames = [env.render(mode="rgb_array")] if record_video else []
 
-#     for t in range(max_steps):
-#         # latest action and reward is "padding"
-#         actions = torch.cat([actions, torch.zeros((1, act_dim), device=device)], dim=0)
-#         rewards = torch.cat([rewards, torch.zeros(1, device=device)])
+    for t in range(max_steps):
+        # latest action and reward is "padding"
+        actions = torch.cat([actions, torch.zeros((1, act_dim), device=device)], dim=0)
+        rewards = torch.cat([rewards, torch.zeros(1, device=device)])
 
-#         action = actor.sample(
-#             states,
-#             actions,
-#             rewards,
-#             target_return,
-#             timesteps,
-#         )
-#         # update
-#         actions[-1] = action
+        action = actor.get_action(
+            states,
+            actions,
+            rewards,
+            target_return,
+            timesteps,
+        )
+        # update
+        actions[-1] = action
 
-#         # step
-#         action = action.detach().cpu().numpy()
-#         state, reward, _, _, info = env.step(action)
-#         cur_state = torch.from_numpy(state).to(device=device).reshape(1, state_dim)
-#         states = torch.cat([states, cur_state], dim=0)
-#         rewards[-1] = reward
+        # step
+        action = action.detach().cpu().numpy()
+        state, reward, _, info = env.step(action)
+        state = state["state"]
+        cur_state = torch.from_numpy(state).to(device=device).reshape(1, state_dim)
+        states = torch.cat([states, cur_state], dim=0)
+        rewards[-1] = reward
 
-#         if mode != 'delayed':
-#             pred_return = target_return[0, -1] - (reward/scale)
-#         else:
-#             pred_return = target_return[0, -1]
-#         target_return = torch.cat(
-#             [target_return, pred_return.reshape(1, 1)], dim=1)
-#         timesteps = torch.cat(
-#             [timesteps,
-#              torch.ones((1, 1), device=device, dtype=torch.long) * (t+1)], dim=1)
+        if mode != 'delayed':
+            pred_return = target_return[0, -1] - (reward/scale)
+        else:
+            pred_return = target_return[0, -1]
+        target_return = torch.cat(
+            [target_return, pred_return.reshape(1, 1)], dim=1)
+        timesteps = torch.cat(
+            [timesteps,
+             torch.ones((1, 1), device=device, dtype=torch.long) * (t+1)], dim=1)
 
-#         total_reward += reward
+        total_reward += reward
 
-#         if record_video:
-#             frame = env.render(mode="rgb_array")
-#             frames.append(frame)
+        if record_video:
+            frame = env.render(mode="rgb_array")
+            frames.append(frame)
 
-#         if info.get("success", False):
-#             success = True
-#             break
+        if info.get("success", False):
+            success = True
+            break
 
-#     mean_reward = total_reward / (len(frames) or max_steps)
+    mean_reward = total_reward / (len(frames) or max_steps)
 
-#     return mean_reward, int(success), frames if record_video else None
+    return mean_reward, int(success), frames if record_video else None
 
 
 def log_evaluation_results(config, total_it, eval_results):

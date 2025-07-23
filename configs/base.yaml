@@ -2,23 +2,22 @@
 seed: 0
 device: 'cuda'
 load_model: ''
-record_video: false
+record_video: true
 render_hw: [224, 224]
 use_wandb: false
 discount: 0.99
-seq_len: 5 # action chunk length
+seq_len: 10 # action chunk length
 
 # data
 batch_size: 256
 buffer_size: 1_000_000
-data_path: "/scr/shared/datasets/robot_pref/stack_mixed/stack_mixed.hdf5"
-normalization_path: "/scr/matthewh6/robot_pref/results/normalization/norm_stats.npy"
+data_path: "/scr/shared/datasets/robot_pref/stack_mixed_sawyer/stack_mixed_sawyer.hdf5"
 env: robomimic_stack
 normalize: true
 
 # train/eval
 max_timesteps: 250_000
-eval_freq: 1_0000
+eval_freq: 10_000
 n_envs: 30
 checkpoints_path: logs/
 

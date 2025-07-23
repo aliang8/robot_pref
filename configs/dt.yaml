@@ -6,7 +6,7 @@ hidden_size: 64
 nhead: 2
 nlayer: 1
 K: 20 # from the paper
-target_return: 50.0
+target_return: 40.0
 
 discount: 0.99
 lr: 3e-4

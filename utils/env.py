@@ -273,6 +273,7 @@ def DMC_dataset(config):
 
 def get_robomimic_env(
     data_path,
+    normalization_path=None,
     render=False,
     render_offscreen=True,
     use_image_obs=False,
@@ -329,7 +330,7 @@ def get_robomimic_env(
 
     from env.robomimic_lowdim import RobomimicLowdimWrapper
 
-    env = RobomimicLowdimWrapper(env, render_hw=render_hw)
+    env = RobomimicLowdimWrapper(env, render_hw=render_hw, normalization_path=normalization_path)
     env.seed(seed)
 
     return env

@@ -16,12 +16,12 @@ import utils.env as utils_env
 
 def main():
     # define this
-    # expert_data_path = "/tmp/square_500/square/demo_src_square_task_D0_r_Panda/demo.hdf5"
-    expert_data_path = "/tmp/mimicgen_stack_1000/stack/demo_src_stack_task_D0_r_Sawyer/demo_success.hdf5"
+    expert_data_path = "/tmp/square_500/square/demo_src_square_task_D0_r_Panda/demo_success.hdf5"
+    # expert_data_path = "/tmp/mimicgen_stack_1000/stack/demo_src_stack_task_D0_r_Sawyer/demo_success.hdf5"
 
     # expert/suboptimal split
-    expert_trajs = 250
-    suboptimal_trajs = 250
+    expert_trajs = 100
+    suboptimal_trajs = 100
 
     # randomness of data
     noise_std = 0.8

@@ -29,6 +29,17 @@ class PositionalEncoding(nn.Module):
         x = x + self.pe[:, : x.size(1)]
         return self.dropout(x)
 
+class ValueFunction(nn.Module):
+    def __init__(self, state_dim: int, hidden_dim: int = 256, n_hidden: int = 2):
+        super().__init__()
+        dims = [state_dim, *([hidden_dim] * n_hidden), 1]
+        self.v = MLP(dims, squeeze_output=True)
+
+        self.apply(xavier_init_weights)
+        
+
+    def forward(self, state: torch.Tensor) -> torch.Tensor:
+        return self.v(state)
 
 class TwinTransformerQ(nn.Module):
     def __init__(
@@ -49,6 +60,9 @@ class TwinTransformerQ(nn.Module):
         dims = [hidden_dim * 2, hidden_dim, hidden_dim // 2, 1]
         self.q1 = MLP(dims, squeeze_output=True)
         self.q2 = MLP(dims, squeeze_output=True)
+
+        self.apply(xavier_init_weights)
+
 
     def both(
         self, state: torch.Tensor, actions: torch.Tensor
@@ -104,6 +118,9 @@ class ActionChunkingTransformer(nn.Module):
 
         self.seq_len = seq_len
 
+        self.apply(xavier_init_weights)
+
+
     def get_action_dist_params(self, state):
         state_embed = self.state_emb(state)
         latent_pi = self.latent_pi(state_embed)
@@ -124,7 +141,7 @@ class ActionChunkingTransformer(nn.Module):
 
         return mu, log_std
 
-    def forward(self, state, deterministic=True):
+    def forward(self, state, deterministic=False):
         mu, log_std = self.get_action_dist_params(state)
 
         pred_actions = self.action_dist.actions_from_params(
@@ -132,3 +149,10 @@ class ActionChunkingTransformer(nn.Module):
         )
 
         return pred_actions
+
+
+def xavier_init_weights(m):
+    if isinstance(m, nn.Linear):
+        nn.init.xavier_uniform_(m.weight)
+        if m.bias is not None:
+            nn.init.constant_(m.bias, 0.0)

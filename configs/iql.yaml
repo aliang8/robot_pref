@@ -3,8 +3,8 @@ group: iql-$env-multiseed-v0
 
 # iql
 actor_lr: 3e-4
-qf_lr: 1e-3
-vf_lr: 1e-3
+qf_lr: 3e-4
+vf_lr: 3e-4
 beta: 3.0
 tau: 0.005
 iql_tau: 0.7

@@ -128,8 +128,8 @@ def create_dataframe(run_data):
 
         # Calculate top 3 average success rate
         success_rates = run["eval_success_rates"]
-        # top_rates = success_rates[-5:]  # Last 5 rates
-        top_rates = sorted(success_rates, reverse=True)[:3]
+        top_rates = success_rates[-5:]  # Last 5 rates
+        # top_rates = sorted(success_rates, reverse=True)[:3]
         row["top3_avg_eval_success_rate"] = sum(top_rates) / len(top_rates)
 
         rows.append(row)
@@ -185,7 +185,7 @@ def classify_reward_type(row):
         return "eef rm"
 
     if get_config_value(row, "single_emb") is True:
-        return None
+        return "human prefs"
 
     if get_config_value(row, "human") is True:
         return "human prefs"

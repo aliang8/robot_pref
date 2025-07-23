@@ -303,7 +303,7 @@ class RewardModel:
         """Get reward predictions from the ensemble."""
         obs = dataset["observations"]
         act = dataset["actions"]
-        goals = dataset["goal_points"]
+        # goals = dataset["goal_points"]
 
         if self.dimension == 3:  # eef rm
             obs_act = obs[:, :3]
@@ -330,14 +330,14 @@ class RewardModel:
         Returns rewards in the same order as trajectory_indices.
         """
         obs = dataset["observations"]
-        goal = dataset["goal_points"]
+        # goal = dataset["goal_points"]
         act = dataset["actions"]
         terminals = dataset["terminals"]
 
         if self.dimension == 3:  # eef rm
             obs_act = obs[:, :3]
-        elif self.dimension == 5:  # eef rm + 2D goal
-            obs_act = np.concatenate((obs[:, :3], goal), axis=-1)
+        # elif self.dimension == 5:  # eef rm + 2D goal
+        #     obs_act = np.concatenate((obs[:, :3], goal), axis=-1)
         else:
             obs_act = np.concatenate((obs, act), axis=-1)
         obs_act = torch.from_numpy(obs_act).float().to(self.device)

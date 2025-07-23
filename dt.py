@@ -1,44 +1,62 @@
+import copy
 import os
+import time
+from pathlib import Path
+from typing import Any, Dict, List, Tuple
 
 import hydra
+import numpy as np
 import rich
 import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from stable_baselines3.common.vec_env import DummyVecEnv
+from torch.optim.lr_scheduler import CosineAnnealingLR
 from tqdm import trange
 
-import torch.nn.functional as F
-from utils.env import wrap_env
 import wandb
-from utils.eval import eval_actor, log_evaluation_results
-from utils.wandb import wandb_init
-from utils.seed import set_seed
-from utils.data import (
-    normalize_datasets,
-    DTSequentialReplayBuffer,
-    setup_environment_and_dataset,
-    setup_reward_model,
-    print_dataset_statistics,
+from models.action_chunking_transformer import (
+    ActionChunkingTransformer,
+    TwinTransformerQ,
+    ValueFunction,
 )
 from models.decision_transformer import DecisionTransformer
+from utils.common import MLP
+from utils.data import (
+    DTSequentialReplayBuffer,
+    Robomimic_dataset,
+    print_dataset_statistics,
+    setup_reward_model,
+)
+from utils.env import get_robomimic_env, wrap_env
+from utils.eval import eval_actor_dt, log_evaluation_results
 from utils.log import print_model_info
+from utils.seed import set_seed
+from utils.wandb import wandb_init
 
 
 @hydra.main(config_path="configs", config_name="dt", version_base=None)
 def train(config):
+    wandb_init(config) if config.use_wandb else None
+    rich.print("config", config)
+
     set_seed(config.seed)
 
-    if config.use_wandb:
-        wandb_init(config)
+    # Load datasets
+    dataset = Robomimic_dataset(config.data_path)
+    print_dataset_statistics(dataset)
 
-    rich.print("Config:", config)
+    normalization_path = Path(config.data_path).parent / "normalization.npz"
 
-    # Setup env and dataset
-    env, dataset = setup_environment_and_dataset(config)
+    # Setup envs
+    def create_env(seed):
+        env = get_robomimic_env(config.data_path, seed=seed, normalization_path=normalization_path)
+        return env
+    envs = [create_env(seed) for seed in range(config.n_envs)]
 
-    state_dim = env.observation_space["state"].shape[0]
-    action_dim = env.action_space.shape[0]
+    dataset["observations"] = envs[0].normalize_obs(dataset["observations"])
+    dataset["actions"] = envs[0].normalize_action(dataset["actions"])
 
-    # Setup dataset
-    state_mean, state_std = normalize_datasets(dataset)
     if config.use_reward_model:
         dataset = setup_reward_model(config, dataset)
     elif config.trivial_reward == 1:
@@ -46,15 +64,16 @@ def train(config):
         dataset["rewards"] *= 0.0
     else:
         print("Using ground truth rewards")
+
+    # Replay Buffer
+    state_dim = envs[0].observation_space["state"].shape[0]
+    action_dim = envs[0].action_space.shape[0]
     replay_buffer = DTSequentialReplayBuffer(
         state_dim, action_dim, config.buffer_size, K=config.K, device=config.device
     )
     replay_buffer.load_dataset(dataset)
 
     print_dataset_statistics(dataset)
-
-    # Setup env
-    env = wrap_env(env, state_mean=state_mean, state_std=state_std)
 
     # Networks
     dt = DecisionTransformer(
@@ -84,23 +103,20 @@ def train(config):
         if (t + 1) % config.eval_freq == 0:
             print(f"Evaluation at step: {t + 1}")
 
-            eval_results = eval_actor(
-                env,
+            eval_results = eval_actor_dt(
+                envs,
                 dt,
-                config.n_episodes,
-                config.seed,
                 record_video=config.record_video,
-                has_seq=True,
                 target_return=config.target_return,
             )
 
-            eval_mean_rewards, eval_success, _ = eval_results
+            eval_mean_rewards, eval_success, eval_videos = eval_results
             eval_mean_reward = eval_mean_rewards.mean()
             eval_mean_success = eval_success.mean()
 
             print("---------------------------------------")
             print(
-                f"Evaluation over {config.n_episodes} episodes: "
+                f"Evaluation over {config.n_envs} envs: "
                 f"Reward: {eval_mean_reward:.3f}, Success: {eval_mean_success * 100:.1f}%"
             )
             print("---------------------------------------")

@@ -41,11 +41,15 @@ class RobomimicLowdimWrapper(gym.Env):
         self.normalize = normalization_path is not None
         if self.normalize:
             normalization = np.load(normalization_path, allow_pickle=True)
-            normalization = normalization.item()
-            self.obs_min = normalization["obs_min"]
-            self.obs_max = normalization["obs_max"]
-            self.action_min = normalization["action_min"]
-            self.action_max = normalization["action_max"]
+            # self.obs_min = normalization["obs_min"]
+            # self.obs_max = normalization["obs_max"]
+            # self.action_min = normalization["action_min"]
+            # self.action_max = normalization["action_max"]
+            
+            self.obs_mean = normalization["obs_mean"]
+            self.obs_std = normalization["obs_std"]
+            self.action_mean = normalization["action_mean"]
+            self.action_std = normalization["action_std"]
 
         # setup spaces
         low = np.full(env.action_dimension, fill_value=-1)
@@ -72,24 +76,17 @@ class RobomimicLowdimWrapper(gym.Env):
         )
 
     def normalize_obs(self, obs):
-        obs = 2 * (
-            (obs - self.obs_min) / (self.obs_max - self.obs_min + 1e-6) - 0.5
-        )  # -> [-1, 1]
-        if self.clamp_obs:
-            obs = np.clip(obs, -1, 1)
-        return obs
-
-    # def unnormalize_action(self, action):
-    #     # For gripper actions (last dimension), keep in [-1, 1] range
-    #     # For other actions, convert to [0, 1] range
-    #     action = action.copy()
-    #     if len(action) > 0:
-    #         # Keep gripper action in [-1, 1] range
-    #         action[-1] = np.clip(action[-1], -1, 1)
-    #         # Convert other actions to [0, 1] range
-    #         action[:-1] = (action[:-1] + 1) / 2
-    #     return action * (self.action_max - self.action_min) + self.action_min
-
+        return (obs - self.obs_mean) / (self.obs_std + 1e-6)
+    
+    def unnormalize_obs(self, obs):
+        return obs * self.obs_std + self.obs_mean
+    
+    def normalize_action(self, action):
+        return (action - self.action_mean) / (self.action_std + 1e-6)
+    
+    def unnormalize_action(self, action):
+        return action * self.action_std + self.action_mean
+        
     def get_observation(self, raw_obs):
         obs = {"state": np.concatenate([raw_obs[key] for key in self.obs_keys], axis=0)}
         if self.normalize:

@@ -761,12 +761,12 @@ class DTSequentialReplayBuffer:
             (buffer_size, action_dim), dtype=torch.float32, device=device
         )
         self._rewards = torch.zeros(
-            (buffer_size, 1), dtype=torch.float32, device=device
+            (buffer_size,), dtype=torch.float32, device=device
         )
         # self._rtgs = torch.zeros((buffer_size, 1), dtype=torch.float32, device=device)
-        self._next_states = torch.zeros(
-            (buffer_size, state_dim), dtype=torch.float32, device=device
-        )
+        # self._next_states = torch.zeros(
+        #     (buffer_size, state_dim), dtype=torch.float32, device=device
+        # )
         self._dones = torch.zeros((buffer_size,), dtype=torch.float32, device=device)
         self._timesteps = torch.zeros((buffer_size,), dtype=torch.long, device=device)
 
@@ -792,7 +792,7 @@ class DTSequentialReplayBuffer:
         self._states[:n_transitions] = self._to_tensor(data["observations"])
         self._actions[:n_transitions] = self._to_tensor(data["actions"])
         self._rewards[:n_transitions] = self._to_tensor(data["rewards"])
-        self._next_states[:n_transitions] = self._to_tensor(data["next_observations"])
+        # self._next_states[:n_transitions] = self._to_tensor(data["next_observations"])
         self._dones[:n_transitions] = self._to_tensor(data["terminals"])
         self._timesteps[:n_transitions] = torch.tensor(
             data["timesteps"], dtype=torch.long, device=self._device

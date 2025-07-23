@@ -4,6 +4,7 @@
 import copy
 import os
 import time
+from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
 import hydra
@@ -20,6 +21,7 @@ import wandb
 from models.action_chunking_transformer import (
     ActionChunkingTransformer,
     TwinTransformerQ,
+    ValueFunction,
 )
 from utils.common import MLP
 from utils.data import (
@@ -34,13 +36,8 @@ from utils.log import print_model_info
 from utils.seed import set_seed
 from utils.wandb import wandb_init
 
-# Type aliases
 TensorBatch = List[torch.Tensor]
-
-# Constants
 EXP_ADV_MAX = 100.0
-LOG_STD_MIN = -20.0
-LOG_STD_MAX = 2.0
 
 
 def soft_update(target: nn.Module, source: nn.Module, tau: float) -> None:
@@ -52,7 +49,6 @@ def soft_update(target: nn.Module, source: nn.Module, tau: float) -> None:
 def asymmetric_l2_loss(u: torch.Tensor, tau: float) -> torch.Tensor:
     """Asymmetric L2 loss for IQL value function."""
     return torch.mean(torch.abs(tau - (u < 0).float()) * u**2)
-
 
 class TwinQ(nn.Module):
     """Twin Q-network for double Q-learning."""
@@ -77,16 +73,7 @@ class TwinQ(nn.Module):
         return torch.min(*self.both(state, action))
 
 
-class ValueFunction(nn.Module):
-    """Value function network."""
 
-    def __init__(self, state_dim: int, hidden_dim: int = 256, n_hidden: int = 2):
-        super().__init__()
-        dims = [state_dim, *([hidden_dim] * n_hidden), 1]
-        self.v = MLP(dims, squeeze_output=True)
-
-    def forward(self, state: torch.Tensor) -> torch.Tensor:
-        return self.v(state)
 
 
 class ImplicitQLearning:
@@ -134,10 +121,9 @@ class ImplicitQLearning:
         """Update value function."""
         with torch.no_grad():
             target_q = self.q_target(observations, actions)
-
+        
         v = self.vf(observations)
         adv = target_q - v
-
         v_loss = asymmetric_l2_loss(adv, self.iql_tau)
 
         self.v_optimizer.zero_grad()
@@ -194,12 +180,15 @@ class ImplicitQLearning:
 
         self.q_optimizer.zero_grad()
         q_loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.qf.parameters(), max_norm=10.0)
         self.q_optimizer.step()
 
         # Update target Q network
         soft_update(self.q_target, self.qf, self.tau)
 
         log_dict["q_loss"] = q_loss.item()
+        log_dict["q1_max"] = qs[0].max().item()
+        log_dict["q1_min"] = qs[0].min().item()
 
     def _update_policy(
         self,
@@ -244,7 +233,9 @@ class ImplicitQLearning:
         # Update networks
         adv = self._update_v(observations, actions, log_dict)
         self._update_q(next_v, observations, actions, rewards, dones, log_dict)
-        self._update_policy(adv, observations, actions, log_dict)
+
+        if self.total_it > 1000 and self.total_it % 10 == 0:
+            self._update_policy(adv, observations, actions, log_dict)
 
         return log_dict
 
@@ -287,18 +278,6 @@ def setup_networks(config, state_dim, action_dim, seq_len):
     )
     q_network = q_network.to(config.device)
     v_network = ValueFunction(state_dim).to(config.device)
-
-    # noise_pred_net = FlowNoisePredictionNet(
-    #     action_dim=action_dim,
-    #     global_cond_dim=state_dim
-    # ).to(config.device)
-
-    # actor = FlowPolicy(
-    #     action_dim=action_dim,
-    #     noise_pred_net=noise_pred_net,
-    #     max_action=max_action
-    # ).to(config.device)
-
     actor = ActionChunkingTransformer(state_dim, action_dim, seq_len).to(config.device)
 
     return q_network, v_network, actor
@@ -307,17 +286,20 @@ def setup_networks(config, state_dim, action_dim, seq_len):
 @hydra.main(config_path="configs", config_name="iql", version_base=None)
 def train(config):
     wandb_init(config) if config.use_wandb else None
+    rich.print("config", config)
 
-    rich.print("config ", config)
+    set_seed(config.seed)
 
     # Load datasets
     dataset = Robomimic_dataset(config.data_path)
     print_dataset_statistics(dataset)
 
+    normalization_path = Path(config.data_path).parent / "normalization.npz"
+
     # Setup env
     def make_env_fn(seed):
         def _init():
-            env = get_robomimic_env(config.data_path, seed=seed)
+            env = get_robomimic_env(config.data_path, seed=seed, normalization_path=normalization_path)
             return env
 
         return _init
@@ -325,7 +307,9 @@ def train(config):
     env_fns = [make_env_fn(seed) for seed in range(config.n_envs)]
     env = DummyVecEnv(env_fns)
 
-    
+    dataset["observations"] = env.envs[0].normalize_obs(dataset["observations"])
+    dataset["actions"] = env.envs[0].normalize_action(dataset["actions"])
+
     if config.use_reward_model:
         dataset = setup_reward_model(config, dataset)
     elif config.trivial_reward == 1:
@@ -342,10 +326,7 @@ def train(config):
     replay_buffer = SequentialReplayBuffer(
         state_dim, action_dim, config.buffer_size, config.seq_len, device=config.device
     )
-    replay_buffer.load_dataset(dataset)
-
-    # Set seed
-    set_seed(config.seed, env)
+    replay_buffer.load_dataset(dataset)    
 
     # Setup networks
     q_network, v_network, actor = setup_networks(
@@ -358,9 +339,7 @@ def train(config):
     # Setup optimizers
     v_optimizer = torch.optim.Adam(v_network.parameters(), lr=config.vf_lr)
     q_optimizer = torch.optim.Adam(q_network.parameters(), lr=config.qf_lr)
-    actor_optimizer = torch.optim.Adam(
-        actor.parameters(), lr=config.actor_lr, weight_decay=1e-4
-    )
+    actor_optimizer = torch.optim.Adam(actor.parameters(), lr=config.actor_lr)
 
     # Initialize trainer
     trainer = ImplicitQLearning(
