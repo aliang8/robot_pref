@@ -744,6 +744,7 @@ class DTSequentialReplayBuffer:
         buffer_size: int,
         K: int,
         device: str = "cpu",
+        scale: float = 10.0,  # RTG scaling factor
     ):
         self.state_dim = state_dim
         self.action_dim = action_dim
@@ -752,6 +753,7 @@ class DTSequentialReplayBuffer:
         self._size = 0
         self._device = device
         self._K = K
+        self._scale = scale
 
         # Initialize buffers
         self._states = torch.zeros(
@@ -763,16 +765,13 @@ class DTSequentialReplayBuffer:
         self._rewards = torch.zeros(
             (buffer_size,), dtype=torch.float32, device=device
         )
-        # self._rtgs = torch.zeros((buffer_size, 1), dtype=torch.float32, device=device)
-        # self._next_states = torch.zeros(
-        #     (buffer_size, state_dim), dtype=torch.float32, device=device
-        # )
         self._dones = torch.zeros((buffer_size,), dtype=torch.float32, device=device)
-        self._timesteps = torch.zeros((buffer_size,), dtype=torch.long, device=device)
+        self._timesteps = torch.zeros((buffer_size,), dtype=torch.long, device=self._device)
 
         # Track episode boundaries for sequential sampling
         self._episode_starts = []
         self._episode_ends = []
+        self._episode_lengths = []
 
     def _to_tensor(self, data: np.ndarray) -> torch.Tensor:
         """Convert numpy array to torch tensor."""
@@ -792,7 +791,6 @@ class DTSequentialReplayBuffer:
         self._states[:n_transitions] = self._to_tensor(data["observations"])
         self._actions[:n_transitions] = self._to_tensor(data["actions"])
         self._rewards[:n_transitions] = self._to_tensor(data["rewards"])
-        # self._next_states[:n_transitions] = self._to_tensor(data["next_observations"])
         self._dones[:n_transitions] = self._to_tensor(data["terminals"])
         self._timesteps[:n_transitions] = torch.tensor(
             data["timesteps"], dtype=torch.long, device=self._device
@@ -804,128 +802,122 @@ class DTSequentialReplayBuffer:
         self._size += n_transitions
         self._pointer = min(self._size, n_transitions)
 
+        # Compute episode lengths for sampling
+        self._episode_lengths = [end - start + 1 for start, end in zip(self._episode_starts, self._episode_ends)]
+
         print(f"Dataset size: {n_transitions}")
         print(f"Number of episodes: {len(self._episode_starts)}")
 
     def _track_episode_boundaries(self, terminals: np.ndarray) -> None:
         """Track start and end indices of each episode."""
         episode_start = 0
-
         for i, terminal in enumerate(terminals):
             if terminal:
                 self._episode_starts.append(episode_start)
                 self._episode_ends.append(i)
                 episode_start = i + 1
 
-    def sample(self, batch_size: int) -> List[torch.Tensor]:
+    def sample(self, batch_size: int) -> list:
         """
-        Sample sequences of length K.
-
-        Args:
-            batch_size: Number of sequences to sample
-            K: Length of each sequence (K)
-
-        Returns:
-            List of tensors: [states, actions, rewards, rtgs, next_states, dones, timesteps]
-            Each tensor has shape (batch_size, K, ...)
+        Sample sequences of length K, matching the Decision Transformer reference implementation (except for state normalization).
+        - Samples by trajectory, weighted by timesteps.
+        - Uses -10 for action padding, 2 for done padding.
+        - Scales RTG by self._scale.
+        - Returns (s, a, r, d, rtg, timesteps, mask).
         """
-        # Sample batch_size indices
-        batch_inds = np.random.randint(0, self._size, size=batch_size)
+        episode_lengths = np.array(self._episode_lengths)
+        p_sample = episode_lengths / episode_lengths.sum()
+        num_episodes = len(self._episode_starts)
+        batch_inds = np.random.choice(np.arange(num_episodes), size=batch_size, replace=True, p=p_sample)
 
         s, a, r, d, rtg, timesteps, mask = [], [], [], [], [], [], []
+        for i in range(batch_size):
+            ep_idx = batch_inds[i]
+            ep_start = self._episode_starts[ep_idx]
+            ep_end = self._episode_ends[ep_idx]
+            ep_len = ep_end - ep_start + 1
 
-        for ep_idx in batch_inds:
-            # If episode is too close to the end, we left pad
-            ep_end = self._episode_ends[self._find_episode_for_transition(ep_idx)]
-            valid_len = ep_end + 1 - ep_idx
-            k_start = max(0, self._K - valid_len)
+            # Random start index within episode
+            si = np.random.randint(0, ep_len)
+            idx_start = ep_start + si
+            idx_end = idx_start + self._K
+
+            # Compute how many valid steps are left in the episode
+            tlen = min(self._K, ep_end - idx_start + 1)
+
+            # Extract sequences (may be shorter than K at episode end)
+            s_seq = self._states[idx_start:idx_start + tlen].cpu().numpy().reshape(1, -1, self.state_dim)
+            a_seq = self._actions[idx_start:idx_start + tlen].cpu().numpy().reshape(1, -1, self.action_dim)
+            r_seq = self._rewards[idx_start:idx_start + tlen].cpu().numpy().reshape(1, -1, 1)
+            d_seq = self._dones[idx_start:idx_start + tlen].cpu().numpy().reshape(1, -1)
+            t_seq = self._timesteps[idx_start:idx_start + tlen].cpu().numpy().reshape(1, -1)
+
+            # Timesteps: pad to max_ep_len-1 if needed
+            t_seq = np.clip(t_seq, 0, self._K-1)
+
+            # Compute RTG (discount=1.0), from idx_start to ep_end
+            rewards_for_rtg = self._rewards[idx_start:ep_end+1]
+            rtg_seq_full = self._discount_cumsum(rewards_for_rtg, gamma=1.0).cpu().numpy().reshape(-1, 1)
+            # Take first tlen+1 elements for RTG, pad if needed
+            rtg_seq = rtg_seq_full[:tlen+1].reshape(1, -1, 1)
+            if rtg_seq.shape[1] <= s_seq.shape[1]:
+                # pad one more at the end if needed
+                rtg_seq = np.concatenate([rtg_seq, np.zeros((1, 1, 1), dtype=np.float32)], axis=1)
+            # Now, only take first self._K elements (for padding)
+            rtg_seq = rtg_seq[:, :tlen+1, :]
+            # Will pad to self._K below
+            rtg_seq = rtg_seq / self._scale
 
             # Padding
-            zero_state = torch.zeros((1, self.state_dim), device=self._device)
-            zero_action = torch.zeros((1, self.action_dim), device=self._device)
-            state_pad = [zero_state] * k_start
-            action_pad = [zero_action] * k_start
-            reward_pad = [0.0] * k_start
-            rtg_pad = [0.0] * k_start
-            done_pad = [0.0] * k_start
-            timestep_pad = [0] * k_start
-            mask_pad = [0] * k_start
+            pad_len = self._K - tlen
+            s_pad = np.zeros((1, pad_len, self.state_dim), dtype=np.float32)
+            a_pad = np.ones((1, pad_len, self.action_dim), dtype=np.float32) * -10.
+            r_pad = np.zeros((1, pad_len, 1), dtype=np.float32)
+            d_pad = np.ones((1, pad_len), dtype=np.float32) * 2
+            rtg_pad = np.zeros((1, pad_len, 1), dtype=np.float32)
+            t_pad = np.zeros((1, pad_len), dtype=np.float32)
+            m_pad = np.zeros((1, pad_len), dtype=np.float32)
 
-            # Actual sequence
-            seq_slice = slice(ep_idx, min(ep_idx + self._K, ep_end + 1))
-            s_seq = self._states[seq_slice]
-            a_seq = self._actions[seq_slice]
-            r_seq = self._rewards[seq_slice]
-            rtg_seq = self._discount_cumsum(r_seq, gamma=1.0)
-            d_seq = self._dones[seq_slice]
-            t_seq = self._timesteps[seq_slice]
+            # Pad sequences
+            s.append(np.concatenate([s_pad, s_seq], axis=1))
+            a.append(np.concatenate([a_pad, a_seq], axis=1))
+            r.append(np.concatenate([r_pad, r_seq], axis=1))
+            d.append(np.concatenate([d_pad, d_seq], axis=1))
+            # For RTG, pad at the front so that the last tlen+1 elements are the real ones
+            rtg_padded = np.concatenate([rtg_pad, rtg_seq], axis=1)
+            # Only keep the first self._K elements (RTG is length K+1, but we want K)
+            rtg.append(rtg_padded[:, :self._K, :])
+            timesteps.append(np.concatenate([t_pad, t_seq], axis=1))
+            mask.append(np.concatenate([m_pad, np.ones((1, tlen), dtype=np.float32)], axis=1))
 
-            seq_len = s_seq.shape[0]
-            m_seq = [1] * seq_len
+        # Convert to torch tensors
+        s = torch.from_numpy(np.concatenate(s, axis=0)).to(dtype=torch.float32, device=self._device)
+        a = torch.from_numpy(np.concatenate(a, axis=0)).to(dtype=torch.float32, device=self._device)
+        r = torch.from_numpy(np.concatenate(r, axis=0)).to(dtype=torch.float32, device=self._device)
+        d = torch.from_numpy(np.concatenate(d, axis=0)).to(dtype=torch.float32, device=self._device)
+        rtg = torch.from_numpy(np.concatenate(rtg, axis=0)).to(dtype=torch.float32, device=self._device)
+        timesteps = torch.from_numpy(np.concatenate(timesteps, axis=0)).to(dtype=torch.long, device=self._device)
+        mask = torch.from_numpy(np.concatenate(mask, axis=0)).to(dtype=torch.float32, device=self._device)
 
-            # Append padded + actual
-            s.append(torch.cat([*state_pad, s_seq]))
-            a.append(torch.cat([*action_pad, a_seq]))
-            r.append(
-                torch.tensor(
-                    reward_pad + r_seq.view(-1).tolist(), device=self._device
-                ).view(-1, 1)
-            )
-            rtg.append(
-                torch.tensor(
-                    rtg_pad + rtg_seq.view(-1).tolist(), device=self._device
-                ).view(-1, 1)
-            )
-            d.append(
-                torch.tensor(
-                    done_pad + d_seq.view(-1).tolist(), device=self._device
-                ).view(-1, 1)
-            )
-            timesteps.append(
-                torch.tensor(
-                    timestep_pad + t_seq.view(-1).tolist(), device=self._device
-                )
-            )
-            mask.append(
-                torch.tensor(mask_pad + m_seq, dtype=torch.long, device=self._device)
-            )
-
-        s = torch.stack(s, dim=0)
-        a = torch.stack(a, dim=0)
-        r = torch.stack(r, dim=0)
-        rtg = torch.stack(rtg, dim=0)
-        d = torch.stack(d, dim=0)
-        timesteps = torch.stack(timesteps, dim=0)
-        mask = torch.stack(mask, dim=0)
+        # Ensure rtg has shape (batch, K, 1) for DecisionTransformer
+        if rtg.ndim == 2:
+            rtg = rtg.unsqueeze(-1)
 
         return [s, a, r, rtg, d, timesteps, mask]
 
     def _find_episode_for_transition(self, transition_idx: int) -> int:
-        """Find which episode a given transition belongs to."""
         for i, (start, end) in enumerate(zip(self._episode_starts, self._episode_ends)):
             if start <= transition_idx <= end:
                 return i
         raise ValueError(f"Transition index {transition_idx} not found in any episode")
 
     def _discount_cumsum(self, rewards, gamma=1.0):
-        """
-        Compute discounted cumulative sums of rewards.
-
-        Args:
-            rewards (torch.Tensor): shape (T,) or (T, 1)
-            gamma (float): discount factor
-
-        Returns:
-            torch.Tensor: discounted cumulative sum of rewards, same shape as input
-        """
         T = rewards.shape[0]
         rtg = torch.zeros_like(rewards)
         running_sum = 0.0
-
         for t in reversed(range(T)):
             running_sum = rewards[t] + gamma * running_sum
             rtg[t] = running_sum
-
         return rtg
 
 

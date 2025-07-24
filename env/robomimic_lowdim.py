@@ -135,8 +135,8 @@ class RobomimicLowdimWrapper(gym.Env):
         return self.get_observation(raw_obs)
 
     def step(self, action):
-        if self.normalize:
-            action = self.unnormalize_action(action)
+        # if self.normalize:
+        #     action = self.unnormalize_action(action)
         raw_obs, reward, done, info = self.env.step(action)
         obs = self.get_observation(raw_obs)
 

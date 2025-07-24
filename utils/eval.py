@@ -59,6 +59,7 @@ def eval_actor_dt(
     target_return: float,
     max_steps: int = 500,
     record_video: bool = True,
+    scale: float = 10.0,
 ) -> Tuple[np.ndarray, np.ndarray, List[np.ndarray]]:
     """Evaluate the actor on the environment."""
     actor.eval()
@@ -73,7 +74,7 @@ def eval_actor_dt(
 
     for i, env in enumerate(envs):
         mean_reward, success, frames = _eval_episode_dt_seq(
-            env, actor, max_steps, target_return, record_video=record_video
+            env, actor, max_steps, target_return/scale, record_video=record_video, scale=scale
         )
         mean_rewards.append(mean_reward)
         successes.append(success)
@@ -171,7 +172,7 @@ def _eval_episode_seq(env, actor, max_steps, record_video=False, device="cuda"):
 
 
 # Decision Transformer eval
-def _eval_episode_dt_seq(env, actor, max_steps, target_return, record_video=False, device="cuda", mode='normal', scale=1000.):
+def _eval_episode_dt_seq(env, actor, max_steps, target_return, record_video=False, device="cuda", mode='normal', scale=10.0):
     actor = actor.to(device)
     state = env.reset()
 
@@ -215,8 +216,10 @@ def _eval_episode_dt_seq(env, actor, max_steps, target_return, record_video=Fals
 
         if mode != 'delayed':
             pred_return = target_return[0, -1] - (reward/scale)
+            # pred_return = target_return[0, -1] - reward
         else:
             pred_return = target_return[0, -1]
+
         target_return = torch.cat(
             [target_return, pred_return.reshape(1, 1)], dim=1)
         timesteps = torch.cat(

@@ -55,7 +55,7 @@ def train(config):
     envs = [create_env(seed) for seed in range(config.n_envs)]
 
     dataset["observations"] = envs[0].normalize_obs(dataset["observations"])
-    dataset["actions"] = envs[0].normalize_action(dataset["actions"])
+    # dataset["actions"] = envs[0].normalize_action(dataset["actions"])
 
     if config.use_reward_model:
         dataset = setup_reward_model(config, dataset)
@@ -69,7 +69,7 @@ def train(config):
     state_dim = envs[0].observation_space["state"].shape[0]
     action_dim = envs[0].action_space.shape[0]
     replay_buffer = DTSequentialReplayBuffer(
-        state_dim, action_dim, config.buffer_size, K=config.K, device=config.device
+        state_dim, action_dim, config.buffer_size, K=config.K, device=config.device, scale=config.scale
     )
     replay_buffer.load_dataset(dataset)
 
@@ -108,6 +108,7 @@ def train(config):
                 dt,
                 record_video=config.record_video,
                 target_return=config.target_return,
+                scale=config.scale,
             )
 
             eval_mean_rewards, eval_success, eval_videos = eval_results

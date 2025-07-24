@@ -15,7 +15,7 @@ class DecisionTransformer(nn.Module):
         hidden_size,
         max_length=None,
         max_ep_len=4096,
-        action_tanh=True,
+        action_tanh=False,
         **kwargs
     ):
         super().__init__()
