@@ -62,7 +62,7 @@ def load_tensordict(file_path):
 
 def process_data_trajectories(data, device="cpu"):
     """
-    Load and process data into trajectories based on "episode" key from a data file.
+    Load and process data into trajectories based on "traj" key from a data file.
 
     Args:
         data (str): Raw TensorDict data to process.
@@ -73,17 +73,17 @@ def process_data_trajectories(data, device="cpu"):
     data = {
         k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in data.items()
     }
-    # Group data by episode
-    unique_episodes = data["episode"].unique()
+    # Group data by traj
+    unique_trajs = data["traj"].unique()
 
     trajectories = []
-    # Process each unique episode
-    for episode_num in unique_episodes:
-        episode_mask = data["episode"] == episode_num
+    # Process each unique traj
+    for traj_num in unique_trajs:
+        traj_mask = data["traj"] == traj_num
 
         trajectory = {}
         for key in data.keys():
-            trajectory[key] = data[key][episode_mask]
+            trajectory[key] = data[key][traj_mask]
 
         trajectories.append(trajectory)
 
@@ -160,8 +160,8 @@ def get_gt_preferences(data, segment_indices, pairs):
     return preference_labels
 
 
-def segment_episodes(data, segment_length):
-    """Segment episodes into smaller segments.
+def segment_trajs(data, segment_length):
+    """Segment trajs into smaller segments.
 
     Args:
         data: Raw TensorDict data to segment
@@ -170,54 +170,54 @@ def segment_episodes(data, segment_length):
     Returns:
         segments: List of segments
     """
-    episode_lens = [
-        len(np.where(data["episode"] == i)[0]) for i in np.unique(data["episode"])
+    traj_lens = [
+        len(np.where(data["traj"] == i)[0]) for i in np.unique(data["traj"])
     ]
-    # assert len(set(episode_lens)) == 1, "All episodes should be the same length"
-    unique_episode_lens = np.unique(episode_lens)
-    print(f"Unique episode lengths: {unique_episode_lens}")
+    # assert len(set(traj_lens)) == 1, "All trajs should be the same length"
+    unique_traj_lens = np.unique(traj_lens)
+    print(f"Unique traj lengths: {unique_traj_lens}")
 
     # only keep segments that are the same length
-    episode_len_gt = episode_lens[10]
-    print(f"Episode length use: {episode_len_gt}")
+    traj_len_gt = traj_lens[10]
+    print(f"Episode length use: {traj_len_gt}")
 
-    # Calculate segments_per_trajectory based on the episode length
-    segments_per_trajectory = episode_len_gt // segment_length + 1
+    # Calculate segments_per_trajectory based on the traj length
+    segments_per_trajectory = traj_len_gt // segment_length + 1
 
-    # Get segments from each episode
+    # Get segments from each traj
     segments = []
     segment_indices = []
-    unique_episodes = np.unique(data["episode"])
+    unique_trajs = np.unique(data["traj"])
 
-    # Compute the starting absolute index for each episode in the full dataset
-    episode_start_indices = {}
+    # Compute the starting absolute index for each traj in the full dataset
+    traj_start_indices = {}
     abs_idx = 0
-    print(f"Segmenting {len(unique_episodes)} episodes")
-    for episode_idx in tqdm(unique_episodes):
-        episode_mask = data["episode"] == episode_idx
-        episode_len = np.sum(episode_mask.numpy())
-        if episode_len != episode_len_gt:
-            print(f"Episode length {episode_len} != {episode_len_gt}, skipping")
+    print(f"Segmenting {len(unique_trajs)} trajs")
+    for traj_idx in tqdm(unique_trajs):
+        traj_mask = data["traj"] == traj_idx
+        traj_len = np.sum(traj_mask.numpy())
+        if traj_len != traj_len_gt:
+            print(f"Episode length {traj_len} != {traj_len_gt}, skipping")
             continue
-        episode_start_indices[episode_idx] = abs_idx
-        episode_abs_start = abs_idx
+        traj_start_indices[traj_idx] = abs_idx
+        traj_abs_start = abs_idx
 
         # Create segments_per_trajectory evenly spaced segments
         for i in range(segments_per_trajectory):
             # Calculate evenly spaced starting points across the trajectory
             start_idx = (
                 i
-                * (episode_len - segment_length)
+                * (traj_len - segment_length)
                 // max(1, segments_per_trajectory - 1)
             )
             end_idx = start_idx + segment_length
 
-            # Ensure end_idx doesn't exceed the episode length
-            end_idx = min(end_idx, episode_len)
+            # Ensure end_idx doesn't exceed the traj length
+            end_idx = min(end_idx, traj_len)
 
             # Compute absolute indices in the full dataset
-            abs_start_idx = episode_abs_start + start_idx
-            abs_end_idx = episode_abs_start + end_idx
+            abs_start_idx = traj_abs_start + start_idx
+            abs_end_idx = traj_abs_start + end_idx
 
             segment_indices.append((abs_start_idx, abs_end_idx))
 
@@ -228,14 +228,14 @@ def segment_episodes(data, segment_length):
 
             segments.append(segment)
 
-        abs_idx += episode_len
+        abs_idx += traj_len
 
     print(f"Segmented {len(segments)} segments")
     return segments, segment_indices
 
 
-def segment_episodes_random(data, segment_length, num_segments=None, val_split=0.1):
-    """Segment episodes into num_segments segments of segment_length randomly. Split into test and train segments.
+def segment_trajs_random(data, segment_length, num_segments=None, val_split=0.1):
+    """Segment trajs into num_segments segments of segment_length randomly. Split into test and train segments.
 
     Args:
         data: Raw TensorDict data to segment
@@ -248,45 +248,45 @@ def segment_episodes_random(data, segment_length, num_segments=None, val_split=0
         segment_indices: List of (start_idx, end_idx) tuples for each segment
         val_segments: List of validation segments
         val_segment_indices: List of (start_idx, end_idx) tuples for each validation segment
-        val_samples: List of unique episode IDs used for validation
+        val_samples: List of unique traj IDs used for validation
     """
-    # Get unique episodes and their lengths
-    unique_episodes = np.unique(data["episode"])
+    # Get unique trajs and their lengths
+    unique_trajs = np.unique(data["traj"])
 
-    # Randomly sample episodes to be held out for validation
-    num_val_samples = int(len(unique_episodes) * val_split)
-    val_samples = np.random.choice(unique_episodes, size=num_val_samples, replace=False)
+    # Randomly sample trajs to be held out for validation
+    num_val_samples = int(len(unique_trajs) * val_split)
+    val_samples = np.random.choice(unique_trajs, size=num_val_samples, replace=False)
 
-    episode_lens = {
-        int(ep): len(np.where(data["episode"] == ep)[0]) for ep in unique_episodes
+    traj_lens = {
+        int(ep): len(np.where(data["traj"] == ep)[0]) for ep in unique_trajs
     }
 
-    print(f"Found {len(unique_episodes)} episodes")
+    print(f"Found {len(unique_trajs)} trajs")
     print(
-        f"Episode lengths range: min={min(episode_lens.values())}, max={max(episode_lens.values())}"
+        f"Episode lengths range: min={min(traj_lens.values())}, max={max(traj_lens.values())}"
     )
 
-    # Create list of train episodes and val episodes
-    train_episodes = []
-    val_episodes = []
-    episode_start_indices = {}  # Track start index of each episode
+    # Create list of train trajs and val trajs
+    train_trajs = []
+    val_trajs = []
+    traj_start_indices = {}  # Track start index of each traj
     current_idx = 0
 
-    for episode_idx in unique_episodes:
-        episode_len = episode_lens[int(episode_idx)]
-        if episode_len <= segment_length:
+    for traj_idx in unique_trajs:
+        traj_len = traj_lens[int(traj_idx)]
+        if traj_len <= segment_length:
             raise ValueError(
-                f"Episode {episode_idx} is too short, use a shorter segment_length"
+                f"Episode {traj_idx} is too short, use a shorter segment_length"
             )
-        if episode_idx not in val_samples:
-            train_episodes.append((episode_idx, episode_len))
+        if traj_idx not in val_samples:
+            train_trajs.append((traj_idx, traj_len))
         else:
-            val_episodes.append((episode_idx, episode_len))
-        episode_start_indices[episode_idx] = current_idx
-        current_idx += episode_len
+            val_trajs.append((traj_idx, traj_len))
+        traj_start_indices[traj_idx] = current_idx
+        current_idx += traj_len
 
     print(
-        f"Using {len(train_episodes)} train episodes and {len(val_episodes)} val episodes"
+        f"Using {len(train_trajs)} train trajs and {len(val_trajs)} val trajs"
     )
 
     # Sample segments
@@ -296,18 +296,18 @@ def segment_episodes_random(data, segment_length, num_segments=None, val_split=0
     # Sample num_segments segments
     total_segments = 0
     while total_segments < num_segments:
-        # Randomly select an episode
-        episode_idx, episode_len = random.choice(train_episodes)
-        episode_abs_start = episode_start_indices[episode_idx]
+        # Randomly select an traj
+        traj_idx, traj_len = random.choice(train_trajs)
+        traj_abs_start = traj_start_indices[traj_idx]
 
         # Sample a random valid segment
-        max_start = episode_len - segment_length - 1  # we don't want to sample next obs
+        max_start = traj_len - segment_length - 1  # we don't want to sample next obs
         start_idx = random.randint(0, max_start)
         end_idx = start_idx + segment_length
 
         # Compute absolute indices in the full dataset
-        abs_start_idx = episode_abs_start + start_idx
-        abs_end_idx = episode_abs_start + end_idx
+        abs_start_idx = traj_abs_start + start_idx
+        abs_end_idx = traj_abs_start + end_idx
 
         # Create segment dictionary
         segment = {}
@@ -329,18 +329,18 @@ def segment_episodes_random(data, segment_length, num_segments=None, val_split=0
     val_segment_indices = []
 
     while total_segments < num_val_segments:
-        # Randomly select an episode
-        episode_idx, episode_len = random.choice(val_episodes)
-        episode_abs_start = episode_start_indices[episode_idx]
+        # Randomly select an traj
+        traj_idx, traj_len = random.choice(val_trajs)
+        traj_abs_start = traj_start_indices[traj_idx]
 
         # Sample a random valid segment
-        max_start = episode_len - segment_length
+        max_start = traj_len - segment_length
         start_idx = random.randint(0, max_start)
         end_idx = start_idx + segment_length
 
         # Compute absolute indices in the full dataset
-        abs_start_idx = episode_abs_start + start_idx
-        abs_end_idx = episode_abs_start + end_idx
+        abs_start_idx = traj_abs_start + start_idx
+        abs_end_idx = traj_abs_start + end_idx
 
         # Create segment dictionary
         segment = {}
@@ -487,9 +487,9 @@ def Robomimic_dataset(data_path, return_images=False):
                 all_images.append(resized_images)
             else:
                 all_images.append(images)
-            # Create terminals array - True only for the last step of each episode
-            episode_length = len(acts)
-            terminals = np.zeros(episode_length, dtype=bool)
+            # Create terminals array - True only for the last step of each traj
+            traj_length = len(acts)
+            terminals = np.zeros(traj_length, dtype=bool)
             terminals[-1] = True  # Mark the last step as terminal
             all_terminals.append(terminals)
             all_timesteps.append(np.arange(len(terminals)))
@@ -623,16 +623,16 @@ class SequentialReplayBuffer:
         self._dones = torch.zeros((buffer_size,), dtype=torch.float32, device=device)
         self._timesteps = torch.zeros((buffer_size,), dtype=torch.long, device=device)
 
-        # Track episode boundaries for sequential sampling
-        self._episode_starts = []
-        self._episode_ends = []
+        # Track traj boundaries for sequential sampling
+        self._traj_starts = []
+        self._traj_ends = []
 
     def _to_tensor(self, data: np.ndarray) -> torch.Tensor:
         """Convert numpy array to torch tensor."""
         return torch.tensor(data, dtype=torch.float32, device=self._device)
 
     def load_dataset(self, data: Dict[str, np.ndarray]) -> None:
-        """Load dataset in d4rl format and track episode boundaries."""
+        """Load dataset in d4rl format and track traj boundaries."""
         if self._size != 0:
             raise ValueError("Trying to load data into non-empty replay buffer")
 
@@ -650,8 +650,8 @@ class SequentialReplayBuffer:
             data["timesteps"], dtype=torch.long, device=self._device
         )
 
-        # Track episode boundaries
-        self._track_episode_boundaries(data["terminals"])
+        # Track traj boundaries
+        self._track_traj_boundaries(data["terminals"])
         # Find valid start indices
         self._find_valid_starts()
 
@@ -661,22 +661,22 @@ class SequentialReplayBuffer:
         print(
             f"Dataset size: {n_transitions}, Number of valid start indices {len(self.valid_starts)}"
         )
-        print(f"Number of episodes: {len(self._episode_starts)}")
+        print(f"Number of trajs: {len(self._traj_starts)}")
 
-    def _track_episode_boundaries(self, terminals: np.ndarray) -> None:
-        """Track start and end indices of each episode."""
-        episode_start = 0
+    def _track_traj_boundaries(self, terminals: np.ndarray) -> None:
+        """Track start and end indices of each traj."""
+        traj_start = 0
 
         for i, terminal in enumerate(terminals):
             if terminal:
-                self._episode_starts.append(episode_start)
-                self._episode_ends.append(i)
-                episode_start = i + 1
+                self._traj_starts.append(traj_start)
+                self._traj_ends.append(i)
+                traj_start = i + 1
 
     def _find_valid_starts(self):
         self.valid_starts = []
-        for ep_start, ep_end in zip(self._episode_starts, self._episode_ends):
-            # Only allow starts that have at least seq_len + 1 steps remaining in episode (we need to be able to sample a valid next obs)
+        for ep_start, ep_end in zip(self._traj_starts, self._traj_ends):
+            # Only allow starts that have at least seq_len + 1 steps remaining in traj (we need to be able to sample a valid next obs)
             for start_idx in range(ep_start, max(ep_start, ep_end - self._seq_len + 1)):
                 self.valid_starts.append(start_idx)
 
@@ -735,7 +735,7 @@ class SequentialReplayBuffer:
 
 
 class DTSequentialReplayBuffer:
-    """Samples s_t, a_t, r_t, s_t+1, a_t+1, r_t+1, ..., s_t+H, a_t+H, r_t+H"""
+    """Optimized version with pre-computed RTGs while maintaining exact functionality"""
 
     def __init__(
         self,
@@ -744,7 +744,7 @@ class DTSequentialReplayBuffer:
         buffer_size: int,
         K: int,
         device: str = "cpu",
-        scale: float = 10.0,  # RTG scaling factor
+        scale: float = 10.0,
     ):
         self.state_dim = state_dim
         self.action_dim = action_dim
@@ -765,151 +765,152 @@ class DTSequentialReplayBuffer:
         self._rewards = torch.zeros(
             (buffer_size,), dtype=torch.float32, device=device
         )
-        self._dones = torch.zeros((buffer_size,), dtype=torch.float32, device=device)
-        self._timesteps = torch.zeros((buffer_size,), dtype=torch.long, device=self._device)
+        self._dones = torch.zeros((buffer_size,), dtype=torch.long, device=device)
+        self._timesteps = torch.zeros((buffer_size,), dtype=torch.long, device=device)
+        self._rtgs = torch.zeros((buffer_size,), dtype=torch.float32, device=device)
 
-        # Track episode boundaries for sequential sampling
-        self._episode_starts = []
-        self._episode_ends = []
-        self._episode_lengths = []
-
-    def _to_tensor(self, data: np.ndarray) -> torch.Tensor:
-        """Convert numpy array to torch tensor."""
-        return torch.tensor(data, dtype=torch.float32, device=self._device)
+        # traj boundaries
+        self._traj_starts = []
+        self._traj_ends = []
+        self._traj_lengths = []
 
     def load_dataset(self, data: Dict[str, np.ndarray]) -> None:
-        """Load dataset in d4rl format and track episode boundaries."""
+        """Load dataset and PRE-COMPUTE all RTGs"""
         if self._size != 0:
             raise ValueError("Trying to load data into non-empty replay buffer")
 
         n_transitions = data["observations"].shape[0]
         if n_transitions > self._buffer_size:
-            raise ValueError(
-                "Replay buffer is smaller than the dataset you are trying to load!"
-            )
+            raise ValueError("Replay buffer is smaller than the dataset you are trying to load!")
 
-        self._states[:n_transitions] = self._to_tensor(data["observations"])
-        self._actions[:n_transitions] = self._to_tensor(data["actions"])
-        self._rewards[:n_transitions] = self._to_tensor(data["rewards"])
-        self._dones[:n_transitions] = self._to_tensor(data["terminals"])
-        self._timesteps[:n_transitions] = torch.tensor(
-            data["timesteps"], dtype=torch.long, device=self._device
-        )
+        # Load data
+        self._states[:n_transitions] = torch.from_numpy(data["observations"]).to(dtype=torch.float32, device=self._device)
+        self._actions[:n_transitions] = torch.from_numpy(data["actions"]).to(dtype=torch.float32, device=self._device)
+        self._rewards[:n_transitions] = torch.from_numpy(data["rewards"]).to(dtype=torch.float32, device=self._device)
+        self._dones[:n_transitions] = torch.from_numpy(data["terminals"]).to(dtype=torch.long, device=self._device)
+        self._timesteps[:n_transitions] = torch.from_numpy(data["timesteps"]).to(dtype=torch.long, device=self._device)
 
-        # Track episode boundaries
-        self._track_episode_boundaries(data["terminals"])
-
+        # Pre-computing data
+        self._track_traj_boundaries(data["terminals"])
+        self._traj_lengths = [end - start + 1 for start, end in zip(self._traj_starts, self._traj_ends)]
+        self._precompute_rtgs()
+        
         self._size += n_transitions
         self._pointer = min(self._size, n_transitions)
-
-        # Compute episode lengths for sampling
-        self._episode_lengths = [end - start + 1 for start, end in zip(self._episode_starts, self._episode_ends)]
-
         print(f"Dataset size: {n_transitions}")
-        print(f"Number of episodes: {len(self._episode_starts)}")
+        print(f"Number of trajs: {len(self._traj_starts)}")
 
-    def _track_episode_boundaries(self, terminals: np.ndarray) -> None:
-        """Track start and end indices of each episode."""
-        episode_start = 0
-        for i, terminal in enumerate(terminals):
-            if terminal:
-                self._episode_starts.append(episode_start)
-                self._episode_ends.append(i)
-                episode_start = i + 1
+    def _track_traj_boundaries(self, terminals: np.ndarray) -> None:
+        """Track start and end indices of each traj using NumPy vectorized operations."""
+        terminal_indices = np.flatnonzero(terminals)
+        self._traj_starts = [0] + (terminal_indices[:-1] + 1).tolist()
+        self._traj_ends = terminal_indices.tolist()
 
-    def sample(self, batch_size: int) -> list:
-        """
-        Sample sequences of length K, matching the Decision Transformer reference implementation (except for state normalization).
-        - Samples by trajectory, weighted by timesteps.
-        - Uses -10 for action padding, 2 for done padding.
-        - Scales RTG by self._scale.
-        - Returns (s, a, r, d, rtg, timesteps, mask).
-        """
-        episode_lengths = np.array(self._episode_lengths)
-        p_sample = episode_lengths / episode_lengths.sum()
-        num_episodes = len(self._episode_starts)
-        batch_inds = np.random.choice(np.arange(num_episodes), size=batch_size, replace=True, p=p_sample)
+    def _precompute_rtgs(self, gamma=1.0):
+        """Pre-compute RTGs for all trajs using original logic"""
+        print("Pre-computing RTGs...")
+        for start, end in zip(self._traj_starts, self._traj_ends):
+            traj_rewards = self._rewards[start:end+1]
+            traj_rtgs = self._discount_cumsum(traj_rewards, gamma)
+            self._rtgs[start:end+1] = traj_rtgs
+        print("RTGs pre-computed!")
 
-        s, a, r, d, rtg, timesteps, mask = [], [], [], [], [], [], []
+    def sample(self, batch_size: int) -> List[torch.Tensor]:
+        traj_lengths = torch.tensor(self._traj_lengths, dtype=torch.float32, device=self._device)
+        p_sample = traj_lengths / traj_lengths.sum()
+        batch_inds = torch.multinomial(p_sample, batch_size, replacement=True)
+
+        s = torch.zeros((batch_size, self._K, self.state_dim), device=self._device)
+        a = torch.ones((batch_size, self._K, self.action_dim), device=self._device) * -10.
+        r = torch.zeros((batch_size, self._K, 1), device=self._device)
+        d = torch.ones((batch_size, self._K), device=self._device) * 2
+        rtg = torch.zeros((batch_size, self._K, 1), device=self._device)
+        timesteps = torch.zeros((batch_size, self._K), dtype=torch.long, device=self._device)
+        mask = torch.zeros((batch_size, self._K), device=self._device)
+
         for i in range(batch_size):
-            ep_idx = batch_inds[i]
-            ep_start = self._episode_starts[ep_idx]
-            ep_end = self._episode_ends[ep_idx]
-            ep_len = ep_end - ep_start + 1
+            ep_idx = batch_inds[i].item()
+            ep_start = self._traj_starts[ep_idx]
+            ep_end = self._traj_ends[ep_idx]
+            ep_len = self._traj_lengths[ep_idx]
 
-            # Random start index within episode
-            si = np.random.randint(0, ep_len)
+            si = torch.randint(0, ep_len, (1,)).item()
             idx_start = ep_start + si
-            idx_end = idx_start + self._K
+            idx_end = min(idx_start + self._K, ep_end + 1)
 
-            # Compute how many valid steps are left in the episode
-            tlen = min(self._K, ep_end - idx_start + 1)
+            tlen = idx_end - idx_start
 
-            # Extract sequences (may be shorter than K at episode end)
-            s_seq = self._states[idx_start:idx_start + tlen].cpu().numpy().reshape(1, -1, self.state_dim)
-            a_seq = self._actions[idx_start:idx_start + tlen].cpu().numpy().reshape(1, -1, self.action_dim)
-            r_seq = self._rewards[idx_start:idx_start + tlen].cpu().numpy().reshape(1, -1, 1)
-            d_seq = self._dones[idx_start:idx_start + tlen].cpu().numpy().reshape(1, -1)
-            t_seq = self._timesteps[idx_start:idx_start + tlen].cpu().numpy().reshape(1, -1)
+            s[i, -tlen:] = self._states[idx_start:idx_end]
+            a[i, -tlen:] = self._actions[idx_start:idx_end]
+            r[i, -tlen:] = self._rewards[idx_start:idx_end].unsqueeze(-1)
+            d[i, -tlen:] = self._dones[idx_start:idx_end]
+            rtg[i, -tlen:] = self._rtgs[idx_start:idx_end].unsqueeze(-1) / self._scale
+            timesteps[i, -tlen:] = torch.arange(si, si + tlen, device=self._device)
+            mask[i, -tlen:] = 1
 
-            # Timesteps: pad to max_ep_len-1 if needed
-            t_seq = np.clip(t_seq, 0, self._K-1)
+        return [s, a, r, rtg, d.long(), timesteps, mask]
 
-            # Compute RTG (discount=1.0), from idx_start to ep_end
-            rewards_for_rtg = self._rewards[idx_start:ep_end+1]
-            rtg_seq_full = self._discount_cumsum(rewards_for_rtg, gamma=1.0).cpu().numpy().reshape(-1, 1)
-            # Take first tlen+1 elements for RTG, pad if needed
-            rtg_seq = rtg_seq_full[:tlen+1].reshape(1, -1, 1)
-            if rtg_seq.shape[1] <= s_seq.shape[1]:
-                # pad one more at the end if needed
-                rtg_seq = np.concatenate([rtg_seq, np.zeros((1, 1, 1), dtype=np.float32)], axis=1)
-            # Now, only take first self._K elements (for padding)
-            rtg_seq = rtg_seq[:, :tlen+1, :]
-            # Will pad to self._K below
-            rtg_seq = rtg_seq / self._scale
 
-            # Padding
-            pad_len = self._K - tlen
-            s_pad = np.zeros((1, pad_len, self.state_dim), dtype=np.float32)
-            a_pad = np.ones((1, pad_len, self.action_dim), dtype=np.float32) * -10.
-            r_pad = np.zeros((1, pad_len, 1), dtype=np.float32)
-            d_pad = np.ones((1, pad_len), dtype=np.float32) * 2
-            rtg_pad = np.zeros((1, pad_len, 1), dtype=np.float32)
-            t_pad = np.zeros((1, pad_len), dtype=np.float32)
-            m_pad = np.zeros((1, pad_len), dtype=np.float32)
+    # def sample(self, batch_size: int) -> List[torch.Tensor]:
+    #     import random
+    #     # Sample trajectories proportionally to their lengths
+    #     traj_lengths = np.array(self._traj_lengths)
+    #     p_sample = traj_lengths / traj_lengths.sum()
+    #     num_trajs = len(self._traj_starts)
+    #     batch_inds = np.random.choice(np.arange(num_trajs), size=batch_size, replace=True, p=p_sample)
 
-            # Pad sequences
-            s.append(np.concatenate([s_pad, s_seq], axis=1))
-            a.append(np.concatenate([a_pad, a_seq], axis=1))
-            r.append(np.concatenate([r_pad, r_seq], axis=1))
-            d.append(np.concatenate([d_pad, d_seq], axis=1))
-            # For RTG, pad at the front so that the last tlen+1 elements are the real ones
-            rtg_padded = np.concatenate([rtg_pad, rtg_seq], axis=1)
-            # Only keep the first self._K elements (RTG is length K+1, but we want K)
-            rtg.append(rtg_padded[:, :self._K, :])
-            timesteps.append(np.concatenate([t_pad, t_seq], axis=1))
-            mask.append(np.concatenate([m_pad, np.ones((1, tlen), dtype=np.float32)], axis=1))
+    #     s, a, r, d, rtg, timesteps, mask = [], [], [], [], [], [], []
+        
+    #     for i in range(batch_size):
+    #         ep_idx = batch_inds[i]
+    #         ep_start = self._traj_starts[ep_idx]
+    #         ep_end = self._traj_ends[ep_idx]
+    #         ep_len = self._traj_lengths[ep_idx]
 
-        # Convert to torch tensors
-        s = torch.from_numpy(np.concatenate(s, axis=0)).to(dtype=torch.float32, device=self._device)
-        a = torch.from_numpy(np.concatenate(a, axis=0)).to(dtype=torch.float32, device=self._device)
-        r = torch.from_numpy(np.concatenate(r, axis=0)).to(dtype=torch.float32, device=self._device)
-        d = torch.from_numpy(np.concatenate(d, axis=0)).to(dtype=torch.float32, device=self._device)
-        rtg = torch.from_numpy(np.concatenate(rtg, axis=0)).to(dtype=torch.float32, device=self._device)
-        timesteps = torch.from_numpy(np.concatenate(timesteps, axis=0)).to(dtype=torch.long, device=self._device)
-        mask = torch.from_numpy(np.concatenate(mask, axis=0)).to(dtype=torch.float32, device=self._device)
+    #         # Random start index [ep_start, ep_end]
+    #         si = random.randint(0, ep_len - 1)
+            
+    #         idx_start = ep_start + si
+    #         idx_end = idx_start + self._K
 
-        # Ensure rtg has shape (batch, K, 1) for DecisionTransformer
-        if rtg.ndim == 2:
-            rtg = rtg.unsqueeze(-1)
+    #         # Compute how many valid steps are left in the traj
+    #         tlen = min(self._K, ep_end - idx_start + 1)
 
-        return [s, a, r, rtg, d, timesteps, mask]
+    #         s_seq = self._states[idx_start:idx_start + tlen].detach().cpu().numpy().reshape(1, -1, self.state_dim)
+    #         a_seq = self._actions[idx_start:idx_start + tlen].detach().cpu().numpy().reshape(1, -1, self.action_dim)
+    #         r_seq = self._rewards[idx_start:idx_start + tlen].detach().cpu().numpy().reshape(1, -1, 1)
+    #         d_seq = self._dones[idx_start:idx_start + tlen].detach().cpu().numpy().reshape(1, -1)
+    #         t_seq = np.arange(si, si + tlen).reshape(1, -1)
+    #         rtg_seq = self._rtgs[idx_start:idx_start+ tlen].detach().cpu().numpy().reshape(1, -1, 1)
 
-    def _find_episode_for_transition(self, transition_idx: int) -> int:
-        for i, (start, end) in enumerate(zip(self._episode_starts, self._episode_ends)):
-            if start <= transition_idx <= end:
-                return i
-        raise ValueError(f"Transition index {transition_idx} not found in any episode")
+    #         # Padding
+    #         pad_len = self._K - tlen
+    #         s_pad = np.zeros((1, pad_len, self.state_dim))
+    #         a_pad = np.ones((1, pad_len, self.action_dim)) * -10.
+    #         r_pad = np.zeros((1, pad_len, 1))
+    #         d_pad = np.ones((1, pad_len)) * 2
+    #         rtg_pad = np.zeros((1, pad_len, 1))  # divide by scale
+    #         t_pad = np.zeros((1, pad_len))
+    #         m_pad = np.zeros((1, pad_len))
+
+    #         s.append(np.concatenate([s_pad, s_seq], axis=1))
+    #         a.append(np.concatenate([a_pad, a_seq], axis=1))
+    #         r.append(np.concatenate([r_pad, r_seq], axis=1))
+    #         d.append(np.concatenate([d_pad, d_seq], axis=1))
+    #         rtg.append(np.concatenate([rtg_pad, rtg_seq], axis=1) / self._scale)
+    #         timesteps.append(np.concatenate([t_pad, t_seq], axis=1))
+    #         mask.append(np.concatenate([m_pad, np.ones((1, tlen))], axis=1))
+
+    #     # Convert to tensors
+    #     s = torch.from_numpy(np.concatenate(s, axis=0)).to(dtype=torch.float32, device=self._device)
+    #     a = torch.from_numpy(np.concatenate(a, axis=0)).to(dtype=torch.float32, device=self._device)
+    #     r = torch.from_numpy(np.concatenate(r, axis=0)).to(dtype=torch.float32, device=self._device)
+    #     d = torch.from_numpy(np.concatenate(d, axis=0)).to(dtype=torch.long, device=self._device)
+    #     rtg = torch.from_numpy(np.concatenate(rtg, axis=0)).to(dtype=torch.float32, device=self._device)
+    #     timesteps = torch.from_numpy(np.concatenate(timesteps, axis=0)).to(dtype=torch.long, device=self._device)
+    #     mask = torch.from_numpy(np.concatenate(mask, axis=0)).to(dtype=torch.float32, device=self._device)
+
+    #     return [s, a, r, rtg, d, timesteps, mask]
 
     def _discount_cumsum(self, rewards, gamma=1.0):
         T = rewards.shape[0]
@@ -963,6 +964,8 @@ def print_dataset_statistics(dataset: Dict[str, np.ndarray]) -> None:
     for key, data in dataset.items():
         if not isinstance(data, np.ndarray):
             continue
+        if key != "observations" and key != "actions" and key != "rewards":
+            continue
 
         if total_samples is None:
             total_samples = data.shape[0]
@@ -1006,10 +1009,10 @@ def print_dataset_statistics(dataset: Dict[str, np.ndarray]) -> None:
 
         # Episode statistics
         if "terminals" in dataset and isinstance(dataset["terminals"], np.ndarray):
-            num_episodes = np.sum(dataset["terminals"])
-            avg_episode_length = total_samples / num_episodes
-            print(f"  Estimated episodes: {num_episodes:,}")
-            print(f"  Average episode length: {avg_episode_length:.1f} steps")
+            num_trajs = np.sum(dataset["terminals"])
+            avg_traj_length = total_samples / num_trajs
+            print(f"  Trajectories: {num_trajs:,}")
+            print(f"  Average traj length: {avg_traj_length:.1f} steps")
 
     print("\n" + "=" * 60)
 

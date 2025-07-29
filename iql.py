@@ -295,6 +295,16 @@ def train(config):
     print_dataset_statistics(dataset)
 
     normalization_path = Path(config.data_path).parent / "normalization.npz"
+    if not normalization_path.exists():
+        # create normalization file
+        norm_dict = {
+            "obs_mean": dataset["observations"].mean(axis=0),
+            "obs_std": dataset["observations"].std(axis=0) + 1e-6,
+
+        }
+        np.savez(normalization_path,
+            obs_mean=norm_dict["obs_mean"],
+            obs_std=norm_dict["obs_std"])
 
     # Setup env
     def make_env_fn(seed):
@@ -308,7 +318,7 @@ def train(config):
     env = DummyVecEnv(env_fns)
 
     dataset["observations"] = env.envs[0].normalize_obs(dataset["observations"])
-    dataset["actions"] = env.envs[0].normalize_action(dataset["actions"])
+    # dataset["actions"] = env.envs[0].normalize_action(dataset["actions"])
 
     if config.use_reward_model:
         dataset = setup_reward_model(config, dataset)
@@ -324,7 +334,7 @@ def train(config):
     state_dim = env.observation_space["state"].shape[0]
     action_dim = env.action_space.shape[0]
     replay_buffer = SequentialReplayBuffer(
-        state_dim, action_dim, config.buffer_size, config.seq_len, device=config.device
+        state_dim, action_dim, config.buffer_size, config.seq_len
     )
     replay_buffer.load_dataset(dataset)    
 
@@ -362,6 +372,7 @@ def train(config):
     # Training loop
     for t in trange(int(config.max_timesteps)):
         batch = replay_buffer.sample(config.batch_size)
+        batch = [x.to(config.device) for x in batch]
         log_dict = trainer.train(batch)
 
         batch_time = time.time() - start_time

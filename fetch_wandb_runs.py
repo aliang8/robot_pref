@@ -95,6 +95,11 @@ def fetch_wandb_runs(project, entity, filters=None, max_runs=None, after_date=No
             "eval_success_rates": success_rates,
         }
 
+        # Extract all eval/<target>_success columns
+        success_cols = [col for col in history.columns if col.startswith("eval/") and col.endswith("_success")]
+        for col in success_cols:
+            run_dict[col] = history[col].dropna().tolist()
+
         print(f"Run {run.name}: Found {len(success_rates)} success rate values")
         run_data.append(run_dict)
 
@@ -148,6 +153,12 @@ def create_dataframe(run_data):
         f"\nSummary: {total_runs} runs, {valid_metrics} with valid metrics ({valid_metrics / total_runs:.1%})"
     )
 
+    # Find all eval/<target>_success columns
+    success_cols = [col for col in df.columns if col.startswith("eval/") and col.endswith("_success")]
+    # For each, compute the mean of the last 5 values (or whatever you want)
+    for col in success_cols:
+        df[f"{col}_mean"] = df[col].apply(lambda x: np.mean(x[-5:]) if isinstance(x, list) and len(x) > 0 else np.nan)
+
     return df
 
 
@@ -167,6 +178,9 @@ def classify_reward_type(row):
 
     if "bc" in run_name.lower():
         return "bc"
+
+    if "dt" in run_name.lower():
+        return "dt"
 
     if get_config_value(row, "trivial_reward") == 1:
         return "zero"
@@ -282,6 +296,58 @@ def create_comparison_plots(df, output_dir):
         output_path = os.path.join(output_dir, f"{Path(data_path).name}_comparison.png")
         plt.savefig(output_path, dpi=300, bbox_inches="tight")
         print(f"Saved comparison plot to {output_path}")
+        plt.close()
+
+    # Find all eval/<target>_success columns
+    success_cols = [col for col in df_filtered.columns if col.startswith("eval/") and col.endswith("_success_mean")]
+    for col in success_cols:
+        target_return = col.split("/")[1].replace("_success_mean", "")
+        # Filter for DT runs only
+        dt_df = df_filtered[df_filtered.apply(classify_reward_type, axis=1) == "dt"].copy()
+        if dt_df.empty:
+            print(f"No DT runs found for target return {target_return}. Skipping plot.")
+            continue
+        dt_df["reward_type"] = dt_df.apply(classify_reward_type, axis=1)
+        stats = (
+            dt_df.groupby("reward_type")[col]
+            .agg(["mean", "std", "count"])
+            .reset_index()
+        )
+        stats = stats.sort_values("mean", ascending=True)
+        stats = stats.reset_index(drop=True)
+        performance_order = stats["reward_type"].tolist()
+        plt.figure(figsize=(8, 4))
+        ax = sns.barplot(
+            x="reward_type",
+            y="mean",
+            data=stats,
+            palette="viridis",
+            order=performance_order,
+        )
+        for i, row in stats.iterrows():
+            ax.errorbar(
+                i, row["mean"], yerr=row["std"], fmt="none", ecolor="black", capsize=5
+            )
+            ax.text(
+                i,
+                row["mean"] + row["std"] + 0.01,
+                f"{row['mean']:.3f}±{row['std']:.3f}\nn={row['count']}",
+                ha="center",
+                va="bottom",
+                fontsize=8,
+            )
+        plt.title(f"DT Success Rate for Target Return {target_return}", fontsize=10)
+        plt.ylabel("Success Rate", fontsize=8)
+        plt.xlabel("")
+        ax.set_xticklabels(ax.get_xticklabels(), fontsize=7)
+        ax.set_yticklabels(ax.get_yticklabels(), fontsize=7)
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+        max_value = stats["mean"].max() + stats["std"].max()
+        plt.ylim(0, min(1.0, max_value * 1.2))
+        output_path = os.path.join(output_dir, f"dt_target_{target_return}_comparison.png")
+        plt.savefig(output_path, dpi=300, bbox_inches="tight")
+        print(f"Saved DT comparison plot to {output_path}")
         plt.close()
 
 

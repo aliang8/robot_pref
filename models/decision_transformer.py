@@ -14,8 +14,8 @@ class DecisionTransformer(nn.Module):
         act_dim,
         hidden_size,
         max_length=None,
-        max_ep_len=4096,
-        action_tanh=False,
+        max_ep_len=256,
+        action_tanh=True,
         **kwargs
     ):
         super().__init__()
@@ -37,6 +37,7 @@ class DecisionTransformer(nn.Module):
         self.embed_return = nn.Linear(1, hidden_size)
         self.embed_state = nn.Linear(self.state_dim, hidden_size)
         self.embed_action = nn.Linear(self.act_dim, hidden_size)
+
         self.embed_ln = nn.LayerNorm(hidden_size)
 
         self.predict_state = nn.Linear(hidden_size, self.state_dim)
@@ -45,25 +46,20 @@ class DecisionTransformer(nn.Module):
         )
         self.predict_return = nn.Linear(hidden_size, 1)
 
-    def forward(self, batch):
+    def forward(self, states, actions, returns_to_go, timesteps, attention_mask=None):
         """
         Decision Transformer forward pass.
         Args:
-            batch: tuple of tensors
-                states: (B, T, state_dim)
-                actions: (B, T, act_dim)
-                rewards: (B, T, 1)
-                returns_to_go: (B, T, 1)
-                dones: (B, T, 1) or None
-                timesteps: (B, T)
-                attention_mask: (B, T) or None
+            states: (B, T, state_dim)
+            actions: (B, T, act_dim)
+            returns_to_go: (B, T, 1)
+            timesteps: (B, T)
+            attention_mask: (B, T) or None
         Returns:
             state_preds: (B, T, state_dim)
             action_preds: (B, T, act_dim)
             return_preds: (B, T, 1)
         """
-        # Unpack batch
-        states, actions, _, returns_to_go, _, timesteps, attention_mask = batch
         batch_size, seq_length = states.shape[0], states.shape[1]
 
         if attention_mask is None:
@@ -108,6 +104,8 @@ class DecisionTransformer(nn.Module):
         return action_preds
 
     def get_action(self, states, actions, rewards, returns_to_go, timesteps, **kwargs):
+        device = states.device
+
         states = states.reshape(1, -1, self.state_dim)
         actions = actions.reshape(1, -1, self.act_dim)
         returns_to_go = returns_to_go.reshape(1, -1, 1)
@@ -121,39 +119,35 @@ class DecisionTransformer(nn.Module):
 
             # pad all tokens to sequence length
             attention_mask = torch.cat([
-                torch.zeros(self.max_length - states.shape[1], device=states.device),
-                torch.ones(states.shape[1], device=states.device)
+                torch.zeros(self.max_length - states.shape[1]),
+                torch.ones(states.shape[1])
             ])
-            attention_mask = attention_mask.to(dtype=torch.long).reshape(1, -1)
+            attention_mask = attention_mask.to(dtype=torch.long, device=device).reshape(1, -1)
             states = torch.cat([
-                torch.zeros((states.shape[0], self.max_length - states.shape[1], self.state_dim), device=states.device),
+                torch.zeros((states.shape[0], self.max_length - states.shape[1], self.state_dim), device=device),
                 states
             ], dim=1).to(dtype=torch.float32)
             actions = torch.cat([
-                torch.zeros((actions.shape[0], self.max_length - actions.shape[1], self.act_dim), device=actions.device),
+                torch.zeros((actions.shape[0], self.max_length - actions.shape[1], self.act_dim), device=device),
                 actions
             ], dim=1).to(dtype=torch.float32)
             returns_to_go = torch.cat([
-                torch.zeros((returns_to_go.shape[0], self.max_length - returns_to_go.shape[1], 1), device=returns_to_go.device),
+                torch.zeros((returns_to_go.shape[0], self.max_length - returns_to_go.shape[1], 1), device=device),
                 returns_to_go
             ], dim=1).to(dtype=torch.float32)
             timesteps = torch.cat([
-                torch.zeros((timesteps.shape[0], self.max_length - timesteps.shape[1]), device=timesteps.device),
+                torch.zeros((timesteps.shape[0], self.max_length - timesteps.shape[1]), device=device),
                 timesteps
             ], dim=1).to(dtype=torch.long)
         else:
             attention_mask = None
 
-        batch = (
+        action_preds = self.forward(
             states,
             actions,
-            rewards,
             returns_to_go,
-            None,
             timesteps,
-            attention_mask,
+            attention_mask
         )
-
-        action_preds = self.forward(batch, **kwargs)
 
         return action_preds[0, -1]

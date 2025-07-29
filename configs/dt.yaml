@@ -2,12 +2,12 @@ name: DT
 group: dt-$env-multiseed-v0
 
 # DT
-hidden_size: 64
-nhead: 2
-nlayer: 1
-K: 20 # from the paper
-target_return: 40.0
-scale: 50.0
+hidden_size: 128
+nhead: 4
+nlayer: 4
+K: 30
+target_returns: [30.0, 35.0, 40.0, 45.0, 60.0]
+scale: 10.0
 
 discount: 0.99
 lr: 3e-4
@@ -21,6 +21,8 @@ use_cross: false # DTW augs
 dtw_k_augment: 1
 wandb:
   name: "dt-${env}-${seed}"
+  project: "robot_pref"
 
 defaults:
+- reward
 - base

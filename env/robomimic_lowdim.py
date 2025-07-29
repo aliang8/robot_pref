@@ -40,16 +40,11 @@ class RobomimicLowdimWrapper(gym.Env):
         # set up normalization
         self.normalize = normalization_path is not None
         if self.normalize:
-            normalization = np.load(normalization_path, allow_pickle=True)
-            # self.obs_min = normalization["obs_min"]
-            # self.obs_max = normalization["obs_max"]
-            # self.action_min = normalization["action_min"]
-            # self.action_max = normalization["action_max"]
-            
+            normalization = np.load(normalization_path, allow_pickle=True)            
             self.obs_mean = normalization["obs_mean"]
             self.obs_std = normalization["obs_std"]
-            self.action_mean = normalization["action_mean"]
-            self.action_std = normalization["action_std"]
+            # self.action_mean = normalization["action_mean"]
+            # self.action_std = normalization["action_std"]
 
         # setup spaces
         low = np.full(env.action_dimension, fill_value=-1)
@@ -58,7 +53,7 @@ class RobomimicLowdimWrapper(gym.Env):
             low=low,
             high=high,
             shape=low.shape,
-            dtype=low.dtype,
+            dtype=np.float32,
         )
         self.obs_keys = low_dim_keys
         self.observation_space = spaces.Dict()
@@ -81,11 +76,11 @@ class RobomimicLowdimWrapper(gym.Env):
     def unnormalize_obs(self, obs):
         return obs * self.obs_std + self.obs_mean
     
-    def normalize_action(self, action):
-        return (action - self.action_mean) / (self.action_std + 1e-6)
+    # def normalize_action(self, action):
+    #     return (action - self.action_mean) / (self.action_std + 1e-6)
     
-    def unnormalize_action(self, action):
-        return action * self.action_std + self.action_mean
+    # def unnormalize_action(self, action):
+    #     return action * self.action_std + self.action_mean
         
     def get_observation(self, raw_obs):
         obs = {"state": np.concatenate([raw_obs[key] for key in self.obs_keys], axis=0)}

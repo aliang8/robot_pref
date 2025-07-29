@@ -25,7 +25,7 @@ ensemble_method: mean
 use_distributional_model: false # Use distributional reward model
 
 # methods
-single_emb: false # GT
+single_emb: true # GT
 use_cross: false # DTW X-augs
 eef_rm: false # 3D EEF RM
 eef_rm_2d: false # 3D EEF w/ 2D goal position RM

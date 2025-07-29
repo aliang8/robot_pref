@@ -16,11 +16,11 @@ import utils.env as utils_env
 
 def main():
     # define this
-    expert_data_path = "/tmp/square_500/square/demo_src_square_task_D0_r_Panda/demo_success.hdf5"
-    # expert_data_path = "/tmp/mimicgen_stack_1000/stack/demo_src_stack_task_D0_r_Sawyer/demo_success.hdf5"
+    # expert_data_path = "/tmp/square_500/square/demo_src_square_task_D0_r_Panda/demo_success.hdf5"
+    expert_data_path = "/tmp/mimicgen_stack_1000/stack/demo_src_stack_task_D0_r_Panda/demo_success.hdf5"
 
     # expert/suboptimal split
-    expert_trajs = 100
+    expert_trajs = 200
     suboptimal_trajs = 100
 
     # randomness of data
@@ -95,19 +95,20 @@ def main():
             env.env.reset_to({"states": initial_state})
 
             # Replay the expert actions to create video
+            returns = 0.0
             for action in actions:
                 obs = env.env.get_observation()
                 obs["agentview_image"] = env.render(mode="rgb_array")
-                rew = env.env.get_reward()
+                returns += env.env.get_reward()
 
                 rgb_frame = obs["agentview_image"]
                 frame_with_text = rgb_frame.copy()
                 cv2.putText(
                     frame_with_text,
-                    f"Expert - Reward: {rew:.2f}",
+                    f"Expert - Return: {returns:.2f}",
                     (10, 30),
                     cv2.FONT_HERSHEY_SIMPLEX,
-                    0.2,
+                    0.4,
                     (0, 255, 0),
                     1,
                     cv2.LINE_AA,
@@ -157,6 +158,7 @@ def main():
                 env.reset()
 
             # replay actions
+            returns = 0.0
             for action in noisy_actions:
                 obs = env.env.get_observation()
                 obs["agentview_image"] = env.render(
@@ -164,6 +166,7 @@ def main():
                 )  # add rgb image to observation
                 state = env.env.get_state()["states"]
                 rew = env.env.get_reward()
+                returns += rew
 
                 collected_obs.append(obs)
                 collected_states.append(state)
@@ -175,10 +178,10 @@ def main():
                 frame_with_text = rgb_frame.copy()
                 cv2.putText(
                     frame_with_text,
-                    f"Reward: {rew:.2f}",
+                    f"Returns: {returns:.2f}",
                     (10, 30),  # position (x, y)
                     cv2.FONT_HERSHEY_SIMPLEX,
-                    0.2,  # font scale (smaller)
+                    0.4,
                     (0, 255, 0),  # color (B, G, R)
                     1,  # thickness (you can also reduce this)
                     cv2.LINE_AA,
